@@ -1,0 +1,11 @@
+*.exe
+*.dll
+*.sys
+*.log
+*.err
+*.out
+spike-archive/
+build/
+config.yaml
+config.yaml.*
+!config.yaml.example

@@ -1,0 +1,10 @@
+github.com/imgk/divert-go v0.1.0 h1:PTB6jsmj5j2ymDBaiyhh0mzQ8ldma10mNaq1tknJysM=
+github.com/imgk/divert-go v0.1.0/go.mod h1:8j670dnMAWuHP3AHj7Zd8b4HhGw4mdTo8aYhCWNsAeU=
+github.com/ying32/govcl v2.2.3+incompatible h1:Iyfcl26yNE1USm+3uG+btQyhkoFIV18+VITrUdHu8Lw=
+github.com/ying32/govcl v2.2.3+incompatible/go.mod h1:yZVtbJ9Md1nAVxtHKIriKZn4K6TQYqI1en3sN/m9FJ8=
+golang.org/x/sys v0.30.0 h1:QjkSwP/36a20jFYWkSue1YwXzLmsV5Gfq7Eiy72C1uc=
+golang.org/x/sys v0.30.0/go.mod h1:/VUhepiaJMQUp4+oa/7Zr1D23ma6VTLIYjOOTFZPUcA=
+gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405 h1:yhCVgyC4o1eVCa2tZl7eS0r+SDo693bJlVdllGtEeKM=
+gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
+gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
+gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
