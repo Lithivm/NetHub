@@ -334,10 +334,11 @@ func (b *Backend) ClashCheck() ClashCheckView {
 		v.NeedFix = len(needDomains) > 0
 		if pm.Mode == "pac" {
 			v.Verdict = "内网域名经代理到不了（实测到 HTTP 层）。PAC 模式下绕过列表不生效，建议改用普通系统代理，" +
-				"并把下面的域名加进 Clash Verge 的「绕过地址」。"
+				"并把下面的域名加进 Clash Verge 的「绕过地址」（设置 → 系统代理 左侧小齿轮）。"
 		} else {
-			v.Verdict = "内网域名经代理到不了（实测到 HTTP 层），但直连可达。把下面的域名加进 Clash Verge 的「绕过地址」，" +
-				"让浏览器访问内网时走直连（= 我们的隧道），公网仍走 Clash。"
+			v.Verdict = "内网域名经代理到不了（实测到 HTTP 层），但直连可达。把下面的域名加进 Clash Verge 的「绕过地址」" +
+				"（入口：设置 → 系统代理 那一行左侧的小齿轮），让浏览器访问内网时走直连（= 我们的隧道），公网仍走 Clash。" +
+				"若你不需要用浏览器打开内网域名，这一步可跳过。"
 		}
 	}
 	if len(needDomains) == 0 {
@@ -447,8 +448,12 @@ func PrintClashCheck(cfg *config.Config) {
 	fmt.Printf("  %s\n", v.Verdict)
 	if v.NeedFix {
 		fmt.Println("\n  把下面这段填进 Clash Verge 的「绕过地址」：")
-		fmt.Printf("  %s\n", v.BypassList)
+		fmt.Println("  【入口】Clash Verge → 设置 → 系统代理 那一行左侧的小齿轮 → 「代理绕过设置」")
+		fmt.Println("  【核对】同处的「当前绕过」可确认是否真的写进去了")
+		fmt.Printf("  【内容】%s\n", v.BypassList)
 		fmt.Println("\n  （为什么不由我们代写：ProxyOverride 由 Clash Verge 自己维护，")
 		fmt.Println("    它每次应用系统代理都会重写该值 —— 实测我们的修改 5 秒内就被冲掉了。）")
+		fmt.Println("\n  另：若你不需要用【浏览器】打开内网【域名】，这一步可跳过 ——")
+		fmt.Println("    内网用 IP（如 内部 API 10.0.0.12:9056）本来就走直连，业务客户端也不受影响。")
 	}
 }
