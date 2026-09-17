@@ -49,6 +49,13 @@ func (b *Bus) SetFile(path string) error {
 	return nil
 }
 
+// FilePath 返回当前日志文件路径（未设置时为空）。
+func (b *Bus) FilePath() string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.filePath
+}
+
 // Subscribe 返回一个通道，收到后续日志。缓冲满时丢弃最旧的，绝不阻塞调用方。
 func (b *Bus) Subscribe() chan Line {
 	ch := make(chan Line, 512)

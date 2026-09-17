@@ -12,15 +12,12 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"netproxy/internal/config"
 	"netproxy/internal/logbus"
+	"netproxy/internal/winrun"
 )
-
-// CREATE_NO_WINDOW：子进程完全不创建控制台窗口（比最小化更彻底，没有黑框）。
-const createNoWindow = 0x08000000
 
 // proc 一个 gost 子进程（对应一条链）。
 type proc struct {
@@ -167,11 +164,8 @@ func (m *Manager) PID() int {
 }
 
 func (m *Manager) spawn(p *proc) error {
-	cmd := exec.Command(m.exe, p.args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		CreationFlags: createNoWindow, // 无控制台窗口
-		HideWindow:    true,
-	}
+	// winrun 已经把 SysProcAttr 设成"隐藏控制台"了，这里不要再覆盖
+	cmd := winrun.Command(m.exe, p.args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err

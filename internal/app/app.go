@@ -55,6 +55,18 @@ func (a *App) notify(t string, text string, k NotifyKind) {
 	}
 }
 
+// String 给前端用的通知级别名。
+func (k NotifyKind) String() string {
+	switch k {
+	case NotifyWarn:
+		return "warn"
+	case NotifyError:
+		return "error"
+	default:
+		return "info"
+	}
+}
+
 // Running 返回是否已启动。
 func (a *App) Running() bool {
 	a.mu.Lock()

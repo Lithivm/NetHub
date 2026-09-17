@@ -1,22 +1,9 @@
-// netproxy —— 内网隧道透明代理（Wails/WebView2 界面）。
+// netproxy —— 内网隧道透明代理。
 //
 // 替代 Proxifier + 两个 gost .bat：一个进程管链路、一个驱动管拦截、一个界面管规则。
-//
-// 界面栈选择（见 DESIGN.md 的说明）：
-//
-//	驱动级拦截 + gost 托管在 internal/ 里，与界面无关；
-//	界面用 Wails v2 + 手写 HTML/CSS/JS —— 因为设计系统本身是 CSS 设计系统，
-//	用 Web 技术实现是照抄，用原生控件实现是翻译加走形（govcl 版保留在 cmd/govcl-gui）。
-//
-// 构建（**必须带 production 标签**，否则 Wails 会弹 "will not build without the correct build tags"）：
-//
-//	go build -tags production -ldflags "-H=windowsgui -s -w" -o netproxy.exe .
-//
-// 不需要 wails CLI，也不需要 npm：bindings 由 Wails 在运行时从 options.Bind 自动生成。
 package main
 
 import (
-	"embed"
 	"flag"
 	"fmt"
 	"log"
@@ -27,22 +14,16 @@ import (
 	"syscall"
 	"unsafe"
 
-	"github.com/wailsapp/wails/v2"
-	"github.com/wailsapp/wails/v2/pkg/options"
-	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
-	wopts "github.com/wailsapp/wails/v2/pkg/options/windows"
+	_ "github.com/ying32/govcl/pkgs/winappres"
 	"golang.org/x/sys/windows"
 
 	"netproxy/internal/app"
 	"netproxy/internal/autostart"
 	"netproxy/internal/config"
 	"netproxy/internal/gostproc"
+	"netproxy/internal/gui"
 	"netproxy/internal/logbus"
-	"netproxy/internal/webui"
 )
-
-//go:embed all:frontend
-var assets embed.FS
 
 func main() {
 	cfgPath := flag.String("config", "", "配置文件路径（默认 exe 同目录 config.yaml）")
@@ -108,61 +89,7 @@ func main() {
 		runHeadless(a, bus)
 		return
 	}
-	runGUI(a, bus, p)
-}
-
-// runGUI 启动 Wails 界面（阻塞到退出）。
-func runGUI(a *app.App, bus *logbus.Bus, cfgPath string) {
-	b := webui.New(a)
-
-	// 托盘：先建好，点 X 才有地方可去
-	tray := webui.NewTray(filepath.Join(filepath.Dir(cfgPath), "netproxy.ico"),
-		func() { webui.ShowMainWindow(b) }, // 显示主界面
-		func() { go func() { _ = a.Start() }() },
-		func() { a.Stop() },
-		func() { b.Quit() },
-	)
-	b.SetTray(tray)
-
-	theme := wopts.Light
-	bg := uint32(0xffffffff)
-	if a.Cfg.UI.Theme == "dark" {
-		theme = wopts.Dark
-		bg = 0xff121314 // ABGR
-	}
-
-	err := wails.Run(&options.App{
-		Title:     "netproxy · 内网隧道代理",
-		Width:     1120,
-		Height:    720,
-		MinWidth:  880,
-		MinHeight: 560,
-		Frameless: true, // 自绘标题栏（Win10 原生标题栏是"Win7 味"的主要来源）
-		AssetServer: &assetserver.Options{
-			Assets: assets,
-		},
-		BackgroundColour: &options.RGBA{R: uint8(bg & 0xff), G: uint8((bg >> 8) & 0xff), B: uint8((bg >> 16) & 0xff), A: 255},
-		Bind:             []interface{}{b},
-		Windows: &wopts.Options{
-			Theme:        theme,
-			BackdropType: wopts.None, // Mica 需要 Win11 22621+，Win10 上只能 None
-		},
-		OnStartup:     b.OnStartup,
-		OnDomReady:    b.OnDomReady,
-		OnBeforeClose: b.OnBeforeClose,
-		SingleInstanceLock: &options.SingleInstanceLock{
-			UniqueId: "netproxy-single-instance",
-			OnSecondInstanceLaunch: func(options.SecondInstanceData) {
-				webui.ShowMainWindow(b)
-			},
-		},
-	})
-	if err != nil {
-		bus.Error("界面退出: %v", err)
-	}
-	a.Stop()
-	bus.Info("已退出")
-	bus.Close()
+	gui.Run(a)
 }
 
 // runHeadless 无界面运行，Ctrl+C / 杀进程时清理子进程。
@@ -196,20 +123,26 @@ func relaunchElevated() error {
 	args, _ := syscall.UTF16PtrFromString(strings.Join(os.Args[1:], " "))
 
 	shell32 := windows.NewLazySystemDLL("shell32.dll")
-	se := shell32.NewProc("ShellExecuteW")
-	r, _, e := se.Call(0,
+	shellExecuteW := shell32.NewProc("ShellExecuteW")
+	const swShowNormal = 1
+	r, _, e := shellExecuteW.Call(0,
 		uintptr(unsafe.Pointer(verb)),
 		uintptr(unsafe.Pointer(file)),
 		uintptr(unsafe.Pointer(args)),
-		0, 1 /* SW_SHOWNORMAL */)
-	if r <= 32 {
-		return fmt.Errorf("ShellExecuteW 返回 %d (%v)", r, e)
+		0, swShowNormal)
+	if r <= 32 { // ShellExecute 成功时返回值 > 32
+		if e != nil {
+			return fmt.Errorf("ShellExecuteW 返回 %d: %v", r, e)
+		}
+		return fmt.Errorf("ShellExecuteW 返回 %d（用户可能取消了 UAC）", r)
 	}
 	return nil
 }
 
-// ───────────────────────── 开机启动管理（命令行）─────────────────────────
+// ───────────────────────── 从 bat 导入 ─────────────────────────
 
+// doImportBats 解析 gost 的 .bat，把凭据搬进配置文件（凭据只落盘、不打印）。
+// doImportBats 从旧 gost .bat 目录导入链路上游（解析已在 gostproc 里，GUI 复用同一套）。
 func doImportBats(cfgPath, dir string) error {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {

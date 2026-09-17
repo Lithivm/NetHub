@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,8 +35,13 @@ type GostCfg struct {
 
 // HostsCfg 系统 hosts 标记区块的内容。
 type HostsCfg struct {
-	Manage  bool     `yaml:"manage"` // 是否由我们维护这段 hosts
-	Entries []string `yaml:"entries"`  // 每行是一条 "IP 域名"
+	Manage  bool     `yaml:"manage"`  // 是否由我们维护这段 hosts
+	Entries []string `yaml:"entries"` // 每行是一条 "IP 域名"
+}
+
+// UICfg 界面相关设置。
+type UICfg struct {
+	Theme string `yaml:"theme"` // light | dark
 }
 
 // Config 顶层配置。
@@ -45,6 +51,7 @@ type Config struct {
 	Routes []Route  `yaml:"routes"`
 	Gost   GostCfg  `yaml:"gost"`
 	Hosts  HostsCfg `yaml:"hosts"`
+	UI     UICfg    `yaml:"ui"`
 
 	path string
 }
@@ -67,6 +74,7 @@ func Default() *Config {
 		},
 		Gost:  GostCfg{Enabled: true, Exe: `C:\Users\Administrator\Desktop\gost\gost.exe`},
 		Hosts: HostsCfg{Manage: false},
+		UI:    UICfg{Theme: "light"},
 	}
 }
 
@@ -91,6 +99,9 @@ func Load(path string) (*Config, error) {
 	c.path = path
 	if c.Relay == "" {
 		c.Relay = "127.0.0.1:0"
+	}
+	if c.UI.Theme != "dark" {
+		c.UI.Theme = "light"
 	}
 	if err := c.Validate(); err != nil {
 		return nil, err
@@ -122,6 +133,7 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("至少要配置一条链")
 	}
 	seen := map[string]bool{}
+	seenListen := map[string]string{}
 	for i, ch := range c.Chains {
 		if strings.TrimSpace(ch.Name) == "" {
 			return fmt.Errorf("第 %d 条链: name 不能为空", i+1)
@@ -133,6 +145,11 @@ func (c *Config) Validate() error {
 		if !strings.Contains(ch.Listen, ":") {
 			return fmt.Errorf("链 %s: listen 应为 host:port，当前 %q", ch.Name, ch.Listen)
 		}
+		// 两条链监听同一个端口，后起的 gost 会直接绑定失败
+		if other, dup := seenListen[ch.Listen]; dup {
+			return fmt.Errorf("链 %s 和链 %s 的监听端口相同（%s），后启动的会绑定失败", ch.Name, other, ch.Listen)
+		}
+		seenListen[ch.Listen] = ch.Name
 		if c.Gost.Enabled && strings.TrimSpace(ch.Forward) == "" {
 			return fmt.Errorf("链 %s: 开了 gost 托管就必须填 forward（上游转发 URL）", ch.Name)
 		}
@@ -141,11 +158,218 @@ func (c *Config) Validate() error {
 		if !seen[r.Chain] {
 			return fmt.Errorf("第 %d 条规则(%s): 引用了不存在的链 %q", i+1, r.Target, r.Chain)
 		}
+		if _, err := NormalizeTarget(r.Target); err != nil {
+			return fmt.Errorf("第 %d 条规则: 目标 %q 不是合法 IP 或 CIDR（%v）", i+1, r.Target, err)
+		}
 	}
 	if !strings.Contains(c.Relay, ":") {
 		return fmt.Errorf("relay 应为 host:port，当前 %q", c.Relay)
 	}
 	return nil
+}
+
+// ───────────────────── 链 / 规则的编辑操作（供 GUI 调用）─────────────────────
+
+// NormalizeTarget 把目标写成 CIDR：单 IP → /32，并校验合法性。
+func NormalizeTarget(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", fmt.Errorf("不能为空")
+	}
+	if !strings.Contains(s, "/") {
+		s += "/32"
+	}
+	ip, n, err := net.ParseCIDR(s)
+	if err != nil {
+		return "", fmt.Errorf("解析失败")
+	}
+	if ip.To4() == nil {
+		return "", fmt.Errorf("只支持 IPv4")
+	}
+	// 归一化：让 10.0.1.5/24 这类写法变成 10.0.1.0/24
+	ones, bits := n.Mask.Size()
+	if bits != 32 {
+		return "", fmt.Errorf("只支持 IPv4")
+	}
+	return fmt.Sprintf("%s/%d", n.IP.String(), ones), nil
+}
+
+// FindChain 按下标找链，找不到返回 -1。
+func (c *Config) FindChain(name string) int {
+	for i := range c.Chains {
+		if c.Chains[i].Name == name {
+			return i
+		}
+	}
+	return -1
+}
+
+// AddChain 追加一条链。
+func (c *Config) AddChain(ch Chain) error {
+	if strings.TrimSpace(ch.Name) == "" {
+		return fmt.Errorf("链名不能为空")
+	}
+	if c.FindChain(ch.Name) >= 0 {
+		return fmt.Errorf("链名 %q 已存在", ch.Name)
+	}
+	ch.Listen = NormalizeListenLoose(ch.Listen)
+	c.Chains = append(c.Chains, ch)
+	if err := c.Validate(); err != nil {
+		c.Chains = c.Chains[:len(c.Chains)-1] // 回滚，不留非法状态
+		return err
+	}
+	return nil
+}
+
+// UpdateChain 把 oldName 这条链替换成 ch（允许改名）。
+func (c *Config) UpdateChain(oldName string, ch Chain) error {
+	i := c.FindChain(oldName)
+	if i < 0 {
+		return fmt.Errorf("找不到链 %q", oldName)
+	}
+	if ch.Name != oldName && c.FindChain(ch.Name) >= 0 {
+		return fmt.Errorf("链名 %q 已存在", ch.Name)
+	}
+	ch.Listen = NormalizeListenLoose(ch.Listen)
+	old := c.Chains[i]
+	c.Chains[i] = ch
+	if ch.Name != oldName {
+		// 改名同步改所有引用
+		for j := range c.Routes {
+			if c.Routes[j].Chain == oldName {
+				c.Routes[j].Chain = ch.Name
+			}
+		}
+	}
+	if err := c.Validate(); err != nil {
+		c.Chains[i] = old // 回滚，不要留下非法状态
+		return err
+	}
+	return nil
+}
+
+// ChainUsage 返回引用了该链的规则条数。
+func (c *Config) ChainUsage(name string) int {
+	n := 0
+	for _, r := range c.Routes {
+		if r.Chain == name {
+			n++
+		}
+	}
+	return n
+}
+
+// RemoveChain 删除链；还被规则引用时拒绝，避免静默产生悬空规则。
+func (c *Config) RemoveChain(name string) error {
+	i := c.FindChain(name)
+	if i < 0 {
+		return fmt.Errorf("找不到链 %q", name)
+	}
+	if n := c.ChainUsage(name); n > 0 {
+		return fmt.Errorf("链 %q 还被 %d 条规则引用，请先改掉那些规则", name, n)
+	}
+	if len(c.Chains) <= 1 {
+		return fmt.Errorf("至少要保留一条链")
+	}
+	c.Chains = append(c.Chains[:i], c.Chains[i+1:]...)
+	return nil
+}
+
+// MoveChain 把第 from 条链移到第 to 条位置。
+func (c *Config) MoveChain(from, to int) error {
+	n := len(c.Chains)
+	if from < 0 || from >= n || to < 0 || to >= n || from == to {
+		return fmt.Errorf("位置越界")
+	}
+	ch := c.Chains[from]
+	rest := append(append([]Chain{}, c.Chains[:from]...), c.Chains[from+1:]...)
+	out := append([]Chain{}, rest[:to]...)
+	out = append(out, ch)
+	out = append(out, rest[to:]...)
+	c.Chains = out
+	return nil
+}
+
+// AddRoute 追加一条规则（target 会被归一化成 CIDR）。
+func (c *Config) AddRoute(rt Route) error {
+	t, err := NormalizeTarget(rt.Target)
+	if err != nil {
+		return fmt.Errorf("目标 %q: %v", rt.Target, err)
+	}
+	for _, r := range c.Routes {
+		if strings.EqualFold(r.Target, t) {
+			return fmt.Errorf("目标 %s 已经有一条规则了（规则按顺序匹配，重复必有一条永远不生效）", t)
+		}
+	}
+	rt.Target = t
+	c.Routes = append(c.Routes, rt)
+	if err := c.Validate(); err != nil {
+		c.Routes = c.Routes[:len(c.Routes)-1]
+		return err
+	}
+	return nil
+}
+
+// UpdateRoute 替换第 i 条规则。
+func (c *Config) UpdateRoute(i int, rt Route) error {
+	if i < 0 || i >= len(c.Routes) {
+		return fmt.Errorf("规则下标越界")
+	}
+	t, err := NormalizeTarget(rt.Target)
+	if err != nil {
+		return fmt.Errorf("目标 %q: %v", rt.Target, err)
+	}
+	for j, r := range c.Routes {
+		if j != i && strings.EqualFold(r.Target, t) {
+			return fmt.Errorf("目标 %s 已被第 %d 条规则占用", t, j+1)
+		}
+	}
+	rt.Target = t
+	old := c.Routes[i]
+	c.Routes[i] = rt
+	if err := c.Validate(); err != nil {
+		c.Routes[i] = old
+		return err
+	}
+	return nil
+}
+
+// RemoveRoute 删除第 i 条规则。
+func (c *Config) RemoveRoute(i int) error {
+	if i < 0 || i >= len(c.Routes) {
+		return fmt.Errorf("规则下标越界")
+	}
+	c.Routes = append(c.Routes[:i], c.Routes[i+1:]...)
+	return nil
+}
+
+// MoveRoute 把第 from 条规则移到第 to 条位置（顺序即匹配优先级）。
+func (c *Config) MoveRoute(from, to int) error {
+	n := len(c.Routes)
+	if from < 0 || from >= n || to < 0 || to >= n || from == to {
+		return fmt.Errorf("位置越界")
+	}
+	rt := c.Routes[from]
+	rest := append(append([]Route{}, c.Routes[:from]...), c.Routes[from+1:]...)
+	out := append([]Route{}, rest[:to]...)
+	out = append(out, rt)
+	out = append(out, rest[to:]...)
+	c.Routes = out
+	return nil
+}
+
+// NormalizeListenLoose 把 ":1080"/"0.0.0.0:1080" 统一成 "127.0.0.1:1080"（回环收紧）。
+func NormalizeListenLoose(s string) string {
+	s = strings.TrimSpace(s)
+	i := strings.LastIndex(s, ":")
+	if i < 0 {
+		return s
+	}
+	host, port := s[:i], s[i+1:]
+	if host == "" || host == "0.0.0.0" || host == "::" || host == "[::]" {
+		host = "127.0.0.1"
+	}
+	return host + ":" + port
 }
 
 // ChainByName 按名字取链。

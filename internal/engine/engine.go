@@ -15,9 +15,9 @@ package engine
 
 import (
 	"fmt"
+	"netproxy/internal/winrun"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -422,7 +422,7 @@ func ensureDriverPath(bus *logbus.Bus) {
 	}
 	want := filepath.Join(filepath.Dir(exe), "WinDivert64.sys")
 
-	out, err := exec.Command("sc", "qc", "WinDivert").CombinedOutput()
+	out, err := winrun.Command("sc", "qc", "WinDivert").CombinedOutput()
 	if err != nil {
 		return // 服务不存在，WinDivert 会自己装
 	}
@@ -444,9 +444,9 @@ func ensureDriverPath(bus *logbus.Bus) {
 	}
 
 	bus.Warn("驱动服务指向旧路径（%s），按当前目录 %s 重建", cur, want)
-	_ = exec.Command("sc", "stop", "WinDivert").Run()
+	_ = winrun.Command("sc", "stop", "WinDivert").Run()
 	time.Sleep(600 * time.Millisecond)
-	_ = exec.Command("sc", "delete", "WinDivert").Run()
+	_ = winrun.Command("sc", "delete", "WinDivert").Run()
 	time.Sleep(600 * time.Millisecond)
 }
 
@@ -463,7 +463,7 @@ func openDivert(bus *logbus.Bus, filter string) (*divert.Handle, error) {
 		}
 		lastErr = err
 		bus.Warn("WinDivert 打开失败(第 %d/6 次): %v", attempt, err)
-		out, serr := exec.Command("sc", "start", "WinDivert").CombinedOutput()
+		out, serr := winrun.Command("sc", "start", "WinDivert").CombinedOutput()
 		if serr != nil {
 			bus.Info("  sc start WinDivert -> %s", strings.TrimSpace(string(out)))
 		} else {

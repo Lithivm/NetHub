@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>netproxy · 内网隧道代理</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ── 自绘标题栏（窗口是 Frameless，拖动靠 --wails-draggable） ── -->
+<div class="titlebar" id="titlebar">
+  <div class="titlebar-brand">
+    <span class="logo"></span>
+    <span class="title">netproxy</span>
+    <span class="subtitle">内网隧道代理</span>
+    <span class="pill" id="elevPill" title="驱动程序需要管理员权限">管理员</span>
+  </div>
+  <div class="titlebar-spacer"></div>
+  <div class="winbtns">
+    <button class="winbtn" id="winMin" title="最小化">&#x2500;</button>
+    <button class="winbtn" id="winMax" title="最大化">&#x25A1;</button>
+    <button class="winbtn winbtn-close" id="winClose" title="最小化到托盘（服务继续运行）">&#x2715;</button>
+  </div>
+</div>
+
+<!-- ── 状态条 + 主操作 ── -->
+<header class="toolbar">
+  <div class="statusline">
+    <span class="runstate" id="runState"><span class="dot"></span><span id="runStateText">未启动</span></span>
+    <span class="sep"></span>
+    <span class="kv">relay <b id="stRelay">-</b></span>
+    <span class="kv">gost <b id="stPids">-</b></span>
+    <span class="kv">累计 <b id="stTotal">0</b></span>
+    <span class="kv">活跃 <b id="stActive">0</b></span>
+  </div>
+  <div class="actions">
+    <button class="btn btn-primary" id="btnToggle">启动服务</button>
+    <button class="btn" id="btnRestart">重启</button>
+    <button class="btn btn-ghost" id="btnTheme">深色</button>
+  </div>
+</header>
+
+<!-- ── 标签条 ── -->
+<nav class="tabs" id="tabs">
+  <button class="tab is-active" data-page="log">运行日志</button>
+  <button class="tab" data-page="chain">隧道链路<span class="tab-badge" id="badgeChain">0</span></button>
+  <button class="tab" data-page="rule">路由规则<span class="tab-badge" id="badgeRule">0</span></button>
+  <button class="tab" data-page="settings">设置</button>
+</nav>
+
+<main class="content">
+
+  <!-- ═══════ 运行日志 ═══════ -->
+  <section class="page is-active" id="page-log">
+    <div class="card card-fill">
+      <div class="card-head">
+        <h2>运行日志</h2>
+        <span class="hint">同时写到程序目录的 netproxy.log</span>
+        <div class="spacer"></div>
+        <button class="btn btn-sm" id="btnSelfTest">链路自检</button>
+        <button class="btn btn-sm" id="btnOpenLog">打开日志目录</button>
+        <button class="btn btn-sm btn-ghost" id="btnClearLog">清空</button>
+      </div>
+      <div class="logbox" id="logBox"></div>
+    </div>
+  </section>
+
+  <!-- ═══════ 隧道链路 ═══════ -->
+  <section class="page" id="page-chain">
+    <div class="card card-fill">
+      <div class="card-head">
+        <h2>隧道链路</h2>
+        <span class="hint">一条链 = 一个 gost 子进程（<code>-L</code> 本地监听 + <code>-F</code> 上游）；规则按链名引用它</span>
+        <div class="spacer"></div>
+        <button class="btn btn-sm btn-primary" id="btnChainAdd">添加链路</button>
+        <button class="btn btn-sm" id="btnChainImport">从 .bat 批量导入</button>
+      </div>
+      <div class="table" id="chainTable"></div>
+    </div>
+  </section>
+
+  <!-- ═══════ 路由规则 ═══════ -->
+  <section class="page" id="page-rule">
+    <div class="card card-fill">
+      <div class="card-head">
+        <h2>路由规则</h2>
+        <span class="hint">自上而下匹配，命中即停。改动即时保存，点「重启」生效</span>
+        <div class="spacer"></div>
+        <button class="btn btn-sm btn-primary" id="btnRuleAdd">添加规则</button>
+      </div>
+      <div class="table" id="ruleTable"></div>
+    </div>
+  </section>
+
+  <!-- ═══════ 设置 ═══════ -->
+  <section class="page" id="page-settings">
+    <div class="settings-scroll">
+
+      <div class="card">
+        <div class="card-head"><h2>gost 链路托管</h2></div>
+        <div class="card-body form">
+          <label class="check">
+            <input type="checkbox" id="setGostEnabled">
+            <span>由本程序托管 gost 子进程<em>关掉则假定外部已有 socks5 在监听</em></span>
+          </label>
+          <div class="field">
+            <label for="setGostExe">gost.exe 路径</label>
+            <div class="input-row">
+              <input type="text" id="setGostExe" class="input" spellcheck="false">
+              <button class="btn btn-sm" id="btnPickGost">浏览…</button>
+            </div>
+          </div>
+          <div class="field">
+            <label for="setRelay">relay 监听</label>
+            <div class="input-row">
+              <input type="text" id="setRelay" class="input input-sm" spellcheck="false">
+              <span class="hint">端口写 0 = 自动分配（推荐）</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>系统 hosts 接管</h2></div>
+        <div class="card-body form">
+          <label class="check">
+            <input type="checkbox" id="setHostsManage">
+            <span>由本程序维护 hosts 里的内网域名映射<em>写入标记区块，你的手写内容不受影响</em></span>
+          </label>
+          <div class="field">
+            <label>映射条目<em>每行一条：IP 域名</em></label>
+            <textarea id="setHostsEntries" class="input textarea" spellcheck="false" rows="7"></textarea>
+          </div>
+          <div class="input-row">
+            <button class="btn btn-sm btn-primary" id="btnHostsApply">立即写入 hosts</button>
+            <button class="btn btn-sm" id="btnHostsRemove">移除标记区块</button>
+            <span class="hint" id="hostsInfo"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>开机自启</h2></div>
+        <div class="card-body form">
+          <label class="check">
+            <input type="checkbox" id="setAutostart">
+            <span>开机自动启动<em>用计划任务 + 最高权限：登录后静默启动，不弹 UAC</em></span>
+          </label>
+          <div class="hint" id="autoInfo"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>文件位置</h2></div>
+        <div class="card-body form">
+          <div class="pathline"><span class="hint">配置文件</span><code id="pathConfig">-</code></div>
+          <div class="pathline"><span class="hint">日志文件</span><code id="pathLog">-</code></div>
+          <div class="input-row">
+            <button class="btn btn-sm" id="btnOpenConfig">打开配置文件</button>
+            <button class="btn btn-sm" id="btnOpenDir">打开程序目录</button>
+          </div>
+        </div>
+      </div>
+
+    </div>
+    <div class="settings-actions">
+      <button class="btn btn-primary" id="btnSaveSettings">保存设置</button>
+      <button class="btn" id="btnSaveRestart">保存并重启</button>
+      <span class="hint">gost 托管 / relay 的改动需要重启服务才生效</span>
+    </div>
+  </section>
+
+</main>
+
+<!-- ── 应用内提示 ── -->
+<div class="toasts" id="toasts"></div>
+
+<!-- ── 模态框 ── -->
+<div class="modal-backdrop" id="modalBackdrop">
+  <div class="modal" id="modal">
+    <div class="modal-head"><h3 id="modalTitle">标题</h3><button class="winbtn" id="modalX">&#x2715;</button></div>
+    <div class="modal-body" id="modalBody"></div>
+    <div class="modal-foot">
+      <span class="modal-err" id="modalErr"></span>
+      <div class="spacer"></div>
+      <button class="btn" id="modalCancel">取消</button>
+      <button class="btn btn-primary" id="modalOk">确定</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

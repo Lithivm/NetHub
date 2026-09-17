@@ -5,6 +5,7 @@
 *.log
 *.err
 *.out
+*.png
 spike-archive/
 build/
 
