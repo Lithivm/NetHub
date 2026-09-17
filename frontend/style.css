@@ -422,7 +422,7 @@ code, .mono { font-family: var(--font-mono); }
 
 .clash-table {
   display: grid;
-  grid-template-columns: minmax(140px, 1.1fr) 110px 120px 170px;
+  grid-template-columns: minmax(140px, 1fr) 100px minmax(180px, 1.4fr);
   border: 1px solid var(--hairline);
   border-radius: var(--r-btn);
   overflow: hidden;
@@ -433,12 +433,12 @@ code, .mono { font-family: var(--font-mono); }
   border-bottom: 1px solid var(--hairline-soft);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.clash-table > div:nth-child(-n+4) {
+.clash-table > div:nth-child(-n+3) {
   background: var(--card-strong);
   font-size: var(--fs-xs); font-weight: 700; color: var(--muted);
   letter-spacing: .02em;
 }
-.clash-table > div:nth-last-child(-n+4) { border-bottom: 0; }
+.clash-table > div:nth-last-child(-n+3) { border-bottom: 0; }
 .clash-table .mono { font-family: var(--font-mono); font-size: var(--fs-xs); }
 .clash-ok { color: var(--success); font-weight: 600; }
 .clash-no { color: var(--error); font-weight: 600; }
