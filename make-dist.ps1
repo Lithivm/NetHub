@@ -16,6 +16,60 @@ $ErrorActionPreference = 'Stop'
 function Info($m) { Write-Host $m }
 function Die($m) { Write-Host "错误: $m" -ForegroundColor Red; exit 1 }
 
+# Fix-ZipEntryNames 修正 .NET 打包出来的两处不合规：
+#
+#  1) **没设 UTF-8 文件名标志**（通用位 11 = 0x0800）。
+#     .NET Framework 的 ZipFile.CreateFromDirectory 即使传了 UTF8Encoding，
+#     名字字节按 UTF-8 写，但标志位不设（已知问题）—— 读的一方会按旧代码页
+#     （中文机器上是 GBK）解释，非 ASCII 名字变乱码。
+#     注意 flags 是 2 字节小端：低字节在偏移 8，高字节在 9。
+#     bit11 = 0x0800 → 要改的是**偏移 9 的 0x08**。
+#
+#  2) **用反斜杠做路径分隔符**（NetHub\file）。zip 规范要求正斜杠 "/"，
+#     部分工具（Info-ZIP unzip）会警告甚至解压失败。
+#     '\'→'/' 是单字节替换，不改变长度，可以原地改。
+function Fix-ZipEntryNames($zipPath) {
+    $b = [IO.File]::ReadAllBytes($zipPath)
+
+    $eocd = -1
+    for ($i = $b.Length - 22; $i -ge 0; $i--) {
+        if ($b[$i] -eq 0x50 -and $b[$i + 1] -eq 0x4B -and $b[$i + 2] -eq 0x05 -and $b[$i + 3] -eq 0x06) { $eocd = $i; break }
+    }
+    if ($eocd -lt 0) { throw '找不到 zip 的 EOCD，归档可能损坏' }
+
+    $count = [BitConverter]::ToUInt16($b, $eocd + 10)
+    $p = [BitConverter]::ToUInt32($b, $eocd + 16)   # 中央目录起始偏移
+
+    # 本地文件头：flags 在 +6/+7，nameLen 在 +26，name 在 +30
+    $fixLocal = {
+        param($off)
+        if ($b[$off] -eq 0x50 -and $b[$off + 1] -eq 0x4B -and $b[$off + 2] -eq 0x03 -and $b[$off + 3] -eq 0x04) {
+            $b[$off + 7] = $b[$off + 7] -bor 0x08
+            $ln = [BitConverter]::ToUInt16($b, $off + 26)
+            for ($j = 0; $j -lt $ln; $j++) {
+                if ($b[$off + 30 + $j] -eq 0x5C) { $b[$off + 30 + $j] = 0x2F }
+            }
+        }
+    }
+
+    for ($k = 0; $k -lt $count; $k++) {
+        if (-not ($b[$p] -eq 0x50 -and $b[$p + 1] -eq 0x4B -and $b[$p + 2] -eq 0x01 -and $b[$p + 3] -eq 0x02)) {
+            throw "中央目录第 $k 项头不合法"
+        }
+        $b[$p + 9] = $b[$p + 9] -bor 0x08          # UTF-8 文件名标志（高字节的 0x08）
+        $nameLen = [BitConverter]::ToUInt16($b, $p + 28)
+        $extraLen = [BitConverter]::ToUInt16($b, $p + 30)
+        $cmtLen = [BitConverter]::ToUInt16($b, $p + 32)
+        for ($j = 0; $j -lt $nameLen; $j++) {
+            if ($b[$p + 46 + $j] -eq 0x5C) { $b[$p + 46 + $j] = 0x2F }
+        }
+        & $fixLocal ([BitConverter]::ToUInt32($b, $p + 42))
+        $p += 46 + $nameLen + $extraLen + $cmtLen
+    }
+    [IO.File]::WriteAllBytes($zipPath, $b)
+    Info "   已修正 $count 个条目：UTF-8 文件名标志 + 路径分隔符改正斜杠"
+}
+
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $dist = Join-Path $here 'dist'
 
@@ -105,15 +159,45 @@ $readmePath = Join-Path $dist '使用说明.txt'
 [IO.File]::WriteAllText($readmePath, $readme, (New-Object Text.UTF8Encoding $true))
 Info '  已放入 使用说明.txt'
 
-# ── 4) 校验 ─────────────────────────────────────────────────
+# ── 4) 打 zip（方便直接发出去） ─────────────────────────────
+# 归档里带一层 NetHub/ 目录，对方解压不会把文件撒一地。
+# 用 ZipFile.CreateFromDirectory 的 5 参重载显式指定 UTF-8 条目名 ——
+# PowerShell 5.1 的 Compress-Archive 会用默认编码写条目名，
+# 「使用说明.txt」这种中文名在别的工具里会变成乱码。
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$stage = Join-Path $env:TEMP 'nethub-zip-stage'
+$outer = Join-Path $stage 'NetHub'
+if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+New-Item -ItemType Directory -Path $outer -Force | Out-Null
+Get-ChildItem $dist -File | Copy-Item -Destination $outer -Force
+
+$zip = Join-Path $dist 'NetHub.zip'
+if (Test-Path $zip) { Remove-Item $zip -Force }
+[System.IO.Compression.ZipFile]::CreateFromDirectory(
+    $outer, $zip,
+    [System.IO.Compression.CompressionLevel]::Optimal,
+    $true,                                  # includeBaseDirectory -> 顶层 NetHub/
+    (New-Object Text.UTF8Encoding $false)
+)
+Remove-Item $stage -Recurse -Force
+Fix-ZipEntryNames $zip
+Info ('  已生成 {0} ({1:N1} MB)' -f (Split-Path $zip -Leaf), ((Get-Item $zip).Length / 1MB))
+
+# 校验归档内容（也确认中文文件名没乱码）
+$arch = [System.IO.Compression.ZipFile]::OpenRead($zip)
+Info '  zip 内容:'
+foreach ($e in $arch.Entries) { Info ('    {0,-26} {1,10:N0}' -f $e.FullName, $e.Length) }
+$arch.Dispose()
+
+# ── 5) 校验 ─────────────────────────────────────────────────
 Info ''
 Info "dist 目录: $dist"
 $total = 0
 Get-ChildItem $dist | Sort-Object Name | ForEach-Object {
-    $total += $_.Length
     Info ("  {0,-20} {1,10:N0} 字节" -f $_.Name, $_.Length)
+    if ($_.Extension -ne '.zip') { $total += $_.Length }
 }
-Info ("  合计 {0:N1} MB" -f ($total / 1MB))
+Info ("  文件合计 {0:N1} MB（不含 zip）" -f ($total / 1MB))
 
 # exe 里是否真的带上了图标资源
 Add-Type @"

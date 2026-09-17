@@ -339,6 +339,20 @@ powershell -ExecutionPolicy Bypass -File install-task.ps1     # 注册开机自�
 `dist/` 是“拿到就能跑”的集合（exe + ico + WinDivert + config + README + 使用说明），
 **含上游凭据，别往公开地方传**；它不进 git（`.gitignore` 已排除，里面是二进制产物）。
 
+同目录会额外生成 **`dist/NetHub.zip`**（约 5 MB）—— 归档里带一层 `NetHub/` 目录，
+对方解压不会把文件撒一地，可直接发出去。
+
+> 打 zip 时手动修正了 .NET 的两个不合规（见 `make-dist.ps1` 的 `Fix-ZipEntryNames`）：
+> 1. **没设 UTF-8 文件名标志**（通用位 11 = 0x0800）。`ZipFile.CreateFromDirectory`
+>    即使传了 `UTF8Encoding`，名字字节按 UTF-8 写但不设标志位 —— 读的一方按旧代码页
+>    （中文机器上是 GBK）解释，`使用说明.txt` 会显示成乱码。
+>    ⚠️ flags 是 2 字节小端：低字节在偏移 8，高字节在 9；bit11 要改的是**偏移 9 的 0x08**。
+> 2. **用反斜杠做路径分隔符**（`NetHub\file`）。zip 规范要求正斜杠，
+>    部分工具（Info-ZIP `unzip`）会警告甚至解压失败。
+>
+> （注：Info-ZIP `unzip 6.00` 不支持 UTF-8 标志位，在它下面看中文名仍是乱码 ——
+> 那是它的限制，Windows 资源管理器 / 7-Zip / .NET 解压都正常。）
+
 三个脚本的路径都从**自身所在目录**推导，所以整个文件夹拷到任何地方都能用。
 
 ---
