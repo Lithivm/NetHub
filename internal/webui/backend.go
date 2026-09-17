@@ -118,7 +118,6 @@ type StateView struct {
 	HostsInFile bool   `json:"hostsInFile"` // hosts 里已存在我们的标记区块
 	Autostart   bool   `json:"autostart"`
 	AutoDetail  string `json:"autoDetail"`
-	Elevated    bool   `json:"elevated"`
 }
 
 type ChainView struct {
@@ -214,7 +213,6 @@ func (b *Backend) GetState() StateView {
 		HostsInFile: hostsInFile,
 		Autostart:   b.autostartCached(),
 		AutoDetail:  b.autostartDetailCached(),
-		Elevated:    isElevated(),
 	}
 }
 

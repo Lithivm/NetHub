@@ -151,13 +151,6 @@ code, .mono { font-family: var(--font-mono); }
 }
 .titlebar .subtitle { color: var(--muted); font-weight: 400; }
 .titlebar-spacer { flex: 1; }
-.pill {
-  font-size: var(--fs-xs); font-weight: 600;
-  padding: 1px var(--s2); border-radius: var(--r-pill);
-  background: var(--primary-soft); color: var(--primary);
-  border: 1px solid var(--primary-ring);
-}
-.pill.is-hidden { display: none; }
 
 .winbtns { display: flex; height: 100%; }
 .winbtn {
@@ -227,27 +220,39 @@ code, .mono { font-family: var(--font-mono); }
 .btn:disabled { opacity: .45; cursor: not-allowed; }
 .btn:disabled:hover { background: var(--card); color: var(--body); }
 
-/* ═══════════════ 标签条 ═══════════════ */
+/* ═══════════════ 标签条（分段式胶囊组） ═══════════════ */
 
-.tabs {
+/* 不是文件夹书签：整组包在一个圆角容器里，选中项是一块填充的胶囊 */
+.tabbar {
   flex: 0 0 auto;
-  display: flex; gap: var(--s1);
-  padding: var(--s2) var(--s4) 0;
+  display: flex; align-items: center;
+  padding: var(--s2) var(--s4);
   border-bottom: 1px solid var(--hairline);
   background: var(--canvas);
 }
+.tabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--canvas-soft);
+  border: 1px solid var(--hairline);
+  border-radius: calc(var(--r-chip) + 3px);
+}
 .tab {
   font-family: inherit; font-size: var(--fs-sm); font-weight: 600;
-  padding: 8px var(--s4);
-  border: 0; border-radius: var(--r-chip) var(--r-chip) 0 0;
+  padding: 6px var(--s4);
+  border: 0; border-radius: var(--r-chip);
   background: transparent; color: var(--muted);
   cursor: pointer;
   display: inline-flex; align-items: center; gap: var(--s2);
-  position: relative;
   transition: background var(--ease), color var(--ease);
 }
-.tab:hover { background: var(--canvas-soft); color: var(--ink); }
-.tab.is-active { background: var(--primary); color: var(--on-primary); }
+.tab:hover { color: var(--ink); background: var(--card-strong); }
+.tab.is-active {
+  background: var(--primary); color: var(--on-primary);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .18);
+}
+.tab.is-active:hover { background: var(--primary); color: var(--on-primary); }
 .tab-badge {
   font-size: var(--fs-xs); font-weight: 700;
   min-width: 18px; padding: 0 5px; border-radius: var(--r-pill);
@@ -353,14 +358,6 @@ code, .mono { font-family: var(--font-mono); }
   font-size: var(--fs-sm);
 }
 
-.tag {
-  display: inline-block;
-  font-size: var(--fs-xs); font-weight: 600;
-  padding: 1px 7px; border-radius: var(--r-pill);
-  background: var(--primary-soft); color: var(--primary);
-  border: 1px solid var(--primary-ring);
-}
-.tag.is-off { background: var(--card-strong); color: var(--muted); border-color: var(--hairline); }
 
 /* ═══════════════ 表单 ═══════════════ */
 
@@ -391,7 +388,7 @@ code, .mono { font-family: var(--font-mono); }
 .input-sm { min-width: 160px; }
 .input.mono { font-family: var(--font-mono); font-size: var(--fs-xs); }
 .textarea {
-  resize: vertical; min-height: 80px; line-height: 1.6;
+  resize: vertical; min-height: 96px; line-height: 1.6;
   font-family: var(--font-mono) !important; font-size: var(--fs-xs) !important;
 }
 .input-row { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
@@ -416,6 +413,9 @@ code, .mono { font-family: var(--font-mono); }
   display: flex; flex-direction: column; gap: var(--s3);
   padding-right: var(--s1);
 }
+/* 关键：卡片不能被 flex 压扁，否则内部控件会被裁切 */
+.settings-scroll > .card { flex: 0 0 auto; }
+.settings-scroll > .card > .card-body { flex: 0 0 auto; overflow: visible; }
 .settings-actions {
   flex: 0 0 auto;
   display: flex; align-items: center; gap: var(--s2);

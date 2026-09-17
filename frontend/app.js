@@ -127,8 +127,6 @@ async function refreshState() {
   document.getElementById('hostsInfo').textContent =
     (s.hostsInFile ? '标记区块已存在' : '未写入标记区块') + ' · ' + (s.hostsPath || '');
 
-  document.getElementById('elevPill').classList.toggle('is-hidden', !s.elevated);
-
   // 主题以后端为准（只在变化时同步，避免打断用户刚点的切换）
   if (s.theme && s.theme !== state.theme) applyTheme(s.theme);
 

@@ -14,7 +14,6 @@
     <span class="logo"></span>
     <span class="title">netproxy</span>
     <span class="subtitle">内网隧道代理</span>
-    <span class="pill" id="elevPill" title="驱动程序需要管理员权限">管理员</span>
   </div>
   <div class="titlebar-spacer"></div>
   <div class="winbtns">
@@ -41,13 +40,15 @@
   </div>
 </header>
 
-<!-- ── 标签条 ── -->
-<nav class="tabs" id="tabs">
-  <button class="tab is-active" data-page="log">运行日志</button>
-  <button class="tab" data-page="chain">隧道链路<span class="tab-badge" id="badgeChain">0</span></button>
-  <button class="tab" data-page="rule">路由规则<span class="tab-badge" id="badgeRule">0</span></button>
-  <button class="tab" data-page="settings">设置</button>
-</nav>
+<!-- ── 标签条（分段式，不是文件夹书签） ── -->
+<div class="tabbar">
+  <nav class="tabs" id="tabs">
+    <button class="tab is-active" data-page="log">运行日志</button>
+    <button class="tab" data-page="chain">隧道链路<span class="tab-badge" id="badgeChain">0</span></button>
+    <button class="tab" data-page="rule">路由规则<span class="tab-badge" id="badgeRule">0</span></button>
+    <button class="tab" data-page="settings">设置</button>
+  </nav>
+</div>
 
 <main class="content">
 
