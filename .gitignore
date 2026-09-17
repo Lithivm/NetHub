@@ -21,7 +21,8 @@ config.yaml.*
 NetHub-task.xml
 
 # logo 源图（图标由 tools_mkicon.go 从它生成，要入库）
-!assets/logo.png
+!assets/logo.jpg
+!frontend/logo.png
 
 # make-dist.ps1 的产物（二进制，含凭据，不入库）
 dist/

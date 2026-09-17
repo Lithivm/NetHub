@@ -149,6 +149,7 @@ func runGUI(a *app.App, bus *logbus.Bus, cfgPath string) {
 		func() { go func() { _ = a.Start() }() },
 		func() { a.Stop() },
 		func() { b.Quit() },
+		func(m string) { a.Bus.Info("托盘: %s", m) },
 	)
 	b.SetTray(tray)
 

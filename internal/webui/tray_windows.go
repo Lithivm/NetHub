@@ -143,11 +143,14 @@ type Tray struct {
 	onStart func()
 	onStop  func()
 	onQuit  func()
+	// onEvent 上报托盘生命周期事件（注册成功、任务栏重启后重注册…），
+	// 不然托盘出问题完全不可观测——只能靠盯屏幕猜。
+	onEvent func(string)
 }
 
 // NewTray 创建托盘。回调必须传进来（避免 Tray 反向依赖 Backend）。
-func NewTray(iconPath string, onShow, onStart, onStop, onQuit func()) *Tray {
-	t := &Tray{ready: make(chan struct{}), onShow: onShow, onStart: onStart, onStop: onStop, onQuit: onQuit}
+func NewTray(iconPath string, onShow, onStart, onStop, onQuit func(), onEvent func(string)) *Tray {
+	t := &Tray{ready: make(chan struct{}), onShow: onShow, onStart: onStart, onStop: onStop, onQuit: onQuit, onEvent: onEvent}
 	go t.run(iconPath)
 	<-t.ready
 	return t
@@ -211,7 +214,11 @@ func (t *Tray) run(iconPath string) {
 		hIcon:            hIcon,
 	}
 	copyUTF16(t.nid.szTip[:], "NetHub · 内网隧道代理")
-	pShellNotifyIconW.Call(nimAdd, uintptr(unsafe.Pointer(&t.nid)))
+	if r, _, _ := pShellNotifyIconW.Call(nimAdd, uintptr(unsafe.Pointer(&t.nid))); r == 0 {
+		t.event("托盘图标注册失败（Shell_NotifyIconW 返回 0）")
+	} else {
+		t.event("托盘图标已注册")
+	}
 
 	close(t.ready)
 
@@ -226,10 +233,20 @@ func (t *Tray) run(iconPath string) {
 	}
 }
 
+func (t *Tray) event(msg string) {
+	if t != nil && t.onEvent != nil {
+		t.onEvent(msg)
+	}
+}
+
 func (t *Tray) wndProc(hwnd windows.Handle, msg uint32, wParam, lParam uintptr) uintptr {
 	// 任务栏重启 → 重新挂上图标（此时旧图标已经被系统清掉了）
 	if wmTaskbarCreated != 0 && msg == wmTaskbarCreated {
-		pShellNotifyIconW.Call(nimAdd, uintptr(unsafe.Pointer(&t.nid)))
+		if r, _, _ := pShellNotifyIconW.Call(nimAdd, uintptr(unsafe.Pointer(&t.nid))); r != 0 {
+			t.event("任务栏(Explorer)重启，已重新注册托盘图标")
+		} else {
+			t.event("任务栏(Explorer)重启，重新注册托盘图标失败")
+		}
 		return 0
 	}
 

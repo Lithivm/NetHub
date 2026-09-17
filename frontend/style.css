@@ -149,10 +149,17 @@ code, .mono { font-family: var(--font-mono); }
   font-weight: 700; color: var(--ink);
   font-size: var(--fs-sm);
 }
+/* 标题栏品牌图：用 logo 透明 PNG（由 tools_mkicon.go 从 assets/logo 生成）。
+   以前这里是个 CSS 画的蓝色渐变小方块 —— 跟品牌没关系，已换掉。 */
 .logo {
-  width: 14px; height: 14px; border-radius: 4px;
-  background: linear-gradient(135deg, var(--primary), var(--primary-hover));
-  box-shadow: 0 0 0 1px var(--primary-ring);
+  width: 16px; height: 16px;
+  display: block;
+  object-fit: contain;
+  flex: 0 0 auto;
+}
+/* 低分辨率下隐藏图形细节、只用文字时（屏幕窄）把 logo 收掉 */
+@media (max-width: 620px) {
+  .logo { display: none; }
 }
 .titlebar .subtitle { color: var(--muted); font-weight: 400; }
 .titlebar-spacer { flex: 1; }
