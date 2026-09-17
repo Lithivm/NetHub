@@ -9,3 +9,6 @@ build/
 config.yaml
 config.yaml.*
 !config.yaml.example
+*.exe~
+*.log
+README.md

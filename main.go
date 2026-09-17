@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"unicode/utf16"
 	"unsafe"
 
 	_ "github.com/ying32/govcl/pkgs/winappres"
@@ -109,24 +111,123 @@ func runHeadless(a *app.App, bus *logbus.Bus) {
 }
 
 // ───────────────────────── 开机启动 ─────────────────────────
+//
+// 用「计划任务 + 最高权限」而不是 HKCU\Run：
+// WinDivert 要管理员才能加载，而 Run 键拉起的进程是普通权限，
+// 只能靠自动提权再弹一次 UAC —— 每次开机都要手点一下，不可接受。
+// 计划任务设 RunLevel=HighestAvailable，开机静默拿到管理员令牌。
+
+const taskName = "netproxy"
 
 func setAutostart(on bool) error {
-	k, err := registry.OpenKey(registry.CURRENT_USER, runKeyPath, registry.SET_VALUE|registry.QUERY_VALUE)
-	if err != nil {
-		return err
-	}
-	defer k.Close()
+	// 早期版本写过 HKCU\Run，清掉它，避免两个实例抢驱动
+	removeRunKey()
+
 	if !on {
-		if err := k.DeleteValue(runValueName); err != nil && err != windows.ERROR_FILE_NOT_FOUND {
-			return err
+		out, err := exec.Command("schtasks", "/delete", "/f", "/tn", taskName).CombinedOutput()
+		if err != nil {
+			s := string(out)
+			if strings.Contains(s, "找不到") || strings.Contains(s, "cannot find") ||
+				strings.Contains(s, "does not exist") {
+				return nil // 本来就没有
+			}
+			return fmt.Errorf("schtasks /delete: %v (%s)", err, strings.TrimSpace(s))
 		}
 		return nil
 	}
+
 	exe, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	return k.SetStringValue(runValueName, fmt.Sprintf(`"%s"`, exe))
+	if abs, e := filepath.Abs(exe); e == nil {
+		exe = abs
+	}
+
+	// schtasks 只吃 UTF-16LE + BOM 的 XML
+	tmp, err := os.CreateTemp("", "netproxy-task-*.xml")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(utf16BOM(taskXML(exe, filepath.Dir(exe)))); err != nil {
+		tmp.Close()
+		return err
+	}
+	tmp.Close()
+
+	out, err := exec.Command("schtasks", "/create", "/f", "/tn", taskName, "/xml", tmp.Name()).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("schtasks /create: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func utf16BOM(s string) []byte {
+	u := utf16.Encode([]rune(s))
+	b := make([]byte, 0, 2+len(u)*2)
+	b = append(b, 0xFF, 0xFE)
+	for _, v := range u {
+		b = append(b, byte(v), byte(v>>8))
+	}
+	return b
+}
+
+// taskXML：ExecutionTimeLimit=PT0S 是必须的（默认 PT72H，跑满 3 天会被计划任务掐死）；
+// DisallowStartIfOnBatteries=false 是必须的（笔记本用电池时否则不启动）。
+func taskXML(exe, dir string) string {
+	return `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>netproxy 内网隧道代理：拦截内网网段并转发到 gost 链路</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <Delay>PT20S</Delay>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>` + xmlEsc(exe) + `</Command>
+      <WorkingDirectory>` + xmlEsc(dir) + `</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+`
+}
+
+func xmlEsc(s string) string {
+	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&apos;").Replace(s)
+}
+
+func removeRunKey() {
+	k, err := registry.OpenKey(registry.CURRENT_USER, runKeyPath, registry.SET_VALUE|registry.QUERY_VALUE)
+	if err != nil {
+		return
+	}
+	defer k.Close()
+	_ = k.DeleteValue(runValueName)
 }
 
 // ───────────────────────── 提权 ─────────────────────────

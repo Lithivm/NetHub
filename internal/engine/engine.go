@@ -16,7 +16,9 @@ package engine
 import (
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -410,7 +412,46 @@ func buildFilter(rs []rules.Range, relayPort uint16) string {
 
 // openDivert 打开 WinDivert；首次安装驱动会失败一次（服务被创建但启动失败，
 // 报 ERROR_NO_SYSTEM_RESOURCES），所以这里带重试 + 主动拉起服务。
+// ensureDriverPath：WinDivert 的驱动服务一旦注册，就固定指向某个目录下的 .sys。
+// 整个文件夹被挪走/改名后，服务里的旧路径失效，Open 会一直失败且报错很难懂。
+// 检测到路径和当前目录不符就先删掉服务，交给 WinDivert 按当前目录自己重装。
+func ensureDriverPath(bus *logbus.Bus) {
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	want := filepath.Join(filepath.Dir(exe), "WinDivert64.sys")
+
+	out, err := exec.Command("sc", "qc", "WinDivert").CombinedOutput()
+	if err != nil {
+		return // 服务不存在，WinDivert 会自己装
+	}
+	i := strings.Index(string(out), "BINARY_PATH_NAME")
+	if i < 0 {
+		return
+	}
+	line := string(out)[i:]
+	if j := strings.IndexAny(line, "\r\n"); j >= 0 {
+		line = line[:j]
+	}
+	if !strings.Contains(line, ".sys") {
+		return // 解析不出路径就别乱动
+	}
+	cur := strings.TrimSpace(line[strings.Index(line, ":")+1:])
+	cur = strings.TrimSpace(strings.TrimPrefix(cur, `\??\`))
+	if strings.EqualFold(cur, want) {
+		return
+	}
+
+	bus.Warn("驱动服务指向旧路径（%s），按当前目录 %s 重建", cur, want)
+	_ = exec.Command("sc", "stop", "WinDivert").Run()
+	time.Sleep(600 * time.Millisecond)
+	_ = exec.Command("sc", "delete", "WinDivert").Run()
+	time.Sleep(600 * time.Millisecond)
+}
+
 func openDivert(bus *logbus.Bus, filter string) (*divert.Handle, error) {
+	ensureDriverPath(bus)
 	var lastErr error
 	for attempt := 1; attempt <= 6; attempt++ {
 		h, err := divert.Open(filter, divert.LayerNetwork, divert.PriorityDefault, divert.FlagDefault)

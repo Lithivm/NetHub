@@ -35,9 +35,15 @@ type TMainForm struct {
 
 var mainForm *TMainForm
 
+// theApp 必须是包级变量：govcl 的 CreateForm 会用反射新建一个 TMainForm 实例
+// 并把 mainForm 指针改指过去（见 vcl/resform.go newGoFormInstance），
+// 我们在 Run() 里塞进结构体的字段会被丢掉。所以共享状态一律走包级变量。
+var theApp *app.App
+
 // Run 启动界面（阻塞直到退出）。
 func Run(a *app.App) {
-	mainForm = &TMainForm{a: a}
+	theApp = a
+	mainForm = &TMainForm{}
 	vcl.Application.Initialize()
 	vcl.Application.SetMainFormOnTaskBar(true)
 	vcl.Application.CreateForm(&mainForm, true)
@@ -47,10 +53,26 @@ func Run(a *app.App) {
 // ───────────────────────── 建界面 ─────────────────────────
 
 func (f *TMainForm) OnFormCreate(sender vcl.IObject) {
+	// 界面构建是一长串 FFI 调用，任何一步 nil/参数错都会 panic；
+	// 拦下来并记入日志，避免"窗口起了但服务没起"这种诡异状态。
+	step := "开始"
+	defer func() {
+		if r := recover(); r != nil {
+			if f.a != nil {
+				f.a.Bus.Error("界面初始化在「%s」处崩溃: %v", step, r)
+			}
+		}
+	}()
+	mark := func(s string) { step = s; f.a.Bus.Info("界面初始化: %s", s) }
+
+	// 实例是 govcl 反射新建的，字段为空，这里把 app 引用补上（不能依赖 Run 里塞的那个）
+	f.a = theApp
+	f.a.Bus.Info("界面初始化: 开始（实例 %p）", f)
 	f.SetCaption("netproxy · 内网隧道代理")
 	f.SetWidth(940)
 	f.SetHeight(640)
 	f.SetOnCloseQuery(f.onCloseQuery)
+	mark("窗口属性已设置")
 
 	// 顶部工具条
 	top := vcl.NewPanel(f)
@@ -92,6 +114,7 @@ func (f *TMainForm) OnFormCreate(sender vcl.IObject) {
 	f.lblStat.SetTop(18)
 	f.lblStat.SetWidth(540)
 	f.lblStat.SetCaption("状态：未启动")
+	mark("顶部工具条")
 
 	// 主体
 	pc := vcl.NewPageControl(f)
@@ -170,12 +193,16 @@ func (f *TMainForm) OnFormCreate(sender vcl.IObject) {
 	f.loadChains()
 
 	pc.SetActivePageIndex(0)
+	mark("日志页/规则页/链路页")
 
 	// 托盘 + 系统通知
 	f.tray = vcl.NewTrayIcon(f)
-	f.tray.SetIcon(vcl.Application.Icon())
+	if ic := vcl.Application.Icon(); ic != nil {
+		f.tray.SetIcon(ic)
+	}
 	f.tray.SetHint("netproxy · 内网隧道代理")
 	f.tray.SetOnDblClick(func(vcl.IObject) { f.showWindow() })
+	mark("托盘图标")
 
 	menu := vcl.NewPopupMenu(f)
 	addItem := func(cap string, fn func()) {
@@ -191,6 +218,7 @@ func (f *TMainForm) OnFormCreate(sender vcl.IObject) {
 	addItem("退出", func() { f.quit() })
 	f.tray.SetPopupMenu(menu)
 	f.tray.SetVisible(true)
+	mark("托盘菜单")
 
 	// GUI 起来后接管通知回调
 	f.a.Notify = f.Balloon
@@ -203,10 +231,12 @@ func (f *TMainForm) OnFormCreate(sender vcl.IObject) {
 	f.logSub = f.a.Bus.Subscribe()
 	go f.pumpLog()
 	go f.pumpStatus()
+	mark("日志订阅完成，界面初始化完毕")
 
 	// 起来就自动开始（符合"开机就干活"的预期）
 	go func() {
 		time.Sleep(600 * time.Millisecond)
+		f.a.Bus.Info("开始自动启动服务…")
 		f.doStart()
 	}()
 }
