@@ -114,6 +114,7 @@ ui:
 ```powershell
 powershell -ExecutionPolicy Bypass -File porttest.ps1            # 内网 6 个目标
 powershell -ExecutionPolicy Bypass -File porttest-internet.ps1   # 公网对照（必须全通）
+powershell -ExecutionPolicy Bypass -File clash-check.ps1         # 与 Clash 的共存判定（只读）
 powershell -ExecutionPolicy Bypass -File final-accept.ps1        # 端到端全量验收（需管理员）
 ```
 
@@ -138,17 +139,69 @@ sc delete WinDivert
 
 ---
 
-## 6. 必须遵守的外部约束
+## 6. 与 Clash 共存（实测结论）
 
-- **Clash Verge 不要开 TUN，也不要让 PAC 把内网域名判为走代理。**
-  - 开 TUN 的 `auto-route` 会写 `0.0.0.0/1` + `128.0.0.0/1` 默认路由，把 `10.x`/`172.30.x` 一起吞掉。
-  - PAC 若把内网域名判 PROXY，浏览器会把**域名**（不是 IP）交给 Clash，
-    而 **Clash 用自己的 DNS 解析、看不见你的 hosts 文件**，很可能解析成公网 IP 而失败。
-  - 判定方法（走的就是浏览器那条路）：
-    ```powershell
-    [System.Net.WebRequest]::GetSystemWebProxy().GetProxy([uri]'http://app.example.com/')
-    ```
-    返回自己 = DIRECT（安全）；返回 `127.0.0.1:7897` 之类 = 会被代理（有风险）。
+netproxy 不改变系统代理设置，也不动路由表，所以**在“谁写什么”这个层面上不会和 Clash 打架**。
+真正的冲突点只有一个：**谁负责把内网域名解析成内网 IP**。
+
+### 先把分层说清楚
+
+我们的拦截在**最后一跳**：不管哪个进程最终发起对内网 IP 的 TCP 连接，只要目标落在拦截网段里就会被接管。
+所以下面两类东西**天然不受 Clash 影响**：
+
+- 业务客户端、Navicat、DBHub(node)、任何直接读 hosts 的程序 → 自己解析成 `10.0.0.10` → 被我们接管
+- Clash 自己（例如你让它去访问一个内网 IP）→ 它发出的连接也会被我们接管
+
+**唯一会坏的是浏览器跟随系统代理（PAC）的情况**：浏览器把**域名**（不是 IP）交给 Clash，
+而 **Clash 用自己的 DNS 解析、看不到系统的 hosts 文件**，于是它永远到不了内网。
+此时我们的内核拦截救不了 —— 那时候命中过滤器的只是“Clash → 某个公网地址”这条连接。
+
+### 实测证据（本机 2026-09-17，Clash 开着 PAC）
+
+```
+系统代理状态: ProxyEnable=0  AutoConfigURL=http://127.0.0.1:33331/commands/pac   ← PAC 模式
+
+浏览器那条路的判定（.NET 的 GetSystemWebProxy，与浏览器同一套逻辑）:
+  http://app.example.com/    -> 走代理 127.0.0.1:7897      ← 内网域名没被排除
+
+同一目标两种解析方式:
+  Clash 解析域名  (--socks5-hostname) -> TLS/连接失败     ← 它解析不到内网 IP
+  直连（= 我们接管）                    -> HTTP 200，连接 IP=10.0.0.10  ✓
+
+内网 6 个目标: 6/6 REACHABLE ✓
+```
+
+**结论**："内网和 ChatGPT 都通"是错觉 —— 你的 业务系统 走的是不走代理的那条路（应用直读 hosts）；
+一旦用浏览器跟随 PAC 访问 `app.example.com`，就会失败。
+
+### 关于 `ProxyOverride` 绕过列表
+
+注册表里那份绕过列表（含 `10.*`、`10.0.*`）**只在普通系统代理模式下生效**（`ProxyEnable=1` + `ProxyServer`）。
+**PAC 模式下 WinINET 不看它**，去向完全由 PAC 脚本决定——这就是上面内网域名被交给代理的原因。
+
+### 该怎么配
+
+| 模式 | 能开吗 | 说明 |
+|---|---|---|
+| **TUN** | ❌ **绝对不要** | `auto-route` 会写 `0.0.0.0/1` + `128.0.0.0/1` 默认路由，把 `10.x`/`172.30.x` 一起吞掉，还有 DNS 劫持 |
+| **PAC** | ⚠️ 能用但**对内网最不友好** | 绕过列表失效；内网域名会被交给 Clash 解析 → 必坏 |
+| **普通系统代理** | ✅ 推荐 | `ProxyOverride` 生效，把 `10.*` / `172.*` 加进绕过列表即可 |
+| **都关掉** | ✅ 也可以 | 浏览器全直连；公网走不走 Clash 就与你无关了 |
+
+**不管选哪种，判据只有一条：内网请求不能经过 Clash 的 DNS。**
+
+### 一键判定
+
+```powershell
+powershell -ExecutionPolicy Bypass -File clash-check.ps1
+```
+
+它会（只读，不改任何设置）报出系统代理模式、浏览器对几个域名的判定、
+"Clash 解析域名"与"直连"的对比结果，以及内网 6 个目标的可达性。
+**第 3 节 (a) 失败而 (b) 成功 = 问题在 Clash 的 DNS，不在路由。**
+
+### 其他两条约束
+
 - **不要同时用 Proxifier**：两套驱动层拦截会互相干扰。
 - **`config.yaml` 含上游凭据**（`auth=` 是 `用户:口令` 的 base64），已加入 `.gitignore`，不要贴到聊天/文档/仓库里。
 
