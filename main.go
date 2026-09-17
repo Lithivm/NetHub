@@ -51,7 +51,21 @@ func main() {
 	doAutostart := flag.Bool("autostart", false, "把本程序加入开机启动（计划任务，最高权限），随后退出")
 	noAutostart := flag.Bool("no-autostart", false, "从开机启动中移除，随后退出")
 	noElevate := flag.Bool("no-elevate", false, "不要自动提权（调试用）")
+	clashCheck := flag.Bool("clash-check", false, "只检测系统代理/Clash 会不会把内网送进代理，然后退出（不需管理员）")
 	flag.Parse()
+
+	// -clash-check 只读系统代理设置，不需管理员，所以放在提权之前
+	if *clashCheck {
+		if *cfgPath == "" {
+			*cfgPath = config.DefaultPath()
+		}
+		cfg, err := config.Load(*cfgPath)
+		if err != nil {
+			fatal("%v", err)
+		}
+		webui.PrintClashCheck(cfg)
+		return
+	}
 
 	// 需要管理员：装 WinDivert 驱动、改 hosts、起驱动服务
 	if !*noElevate && !isElevated() {

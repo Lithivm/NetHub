@@ -382,6 +382,76 @@ async function delRoute(i) {
   catch (e) { fail(e); }
 }
 
+/* ═══════════════ Clash 共存检测 ═══════════════ */
+
+
+function renderClash(v) {
+  const st = document.getElementById('clashState');
+  st.textContent = v.verdict || '';
+  st.className = 'clash-state ' + (v.needFix ? 'is-warn' : (v.items && v.items.length ? 'is-ok' : ''));
+
+  const det = document.getElementById('clashDetail');
+  det.replaceChildren();
+
+  const modeName = { none: '未开启系统代理', system: '普通系统代理', pac: 'PAC（自动配置脚本）' }[v.mode] || v.mode;
+  const meta = el('div', 'hint');
+  meta.textContent = '模式：' + modeName
+    + (v.proxyAddr ? '　代理：' + v.proxyAddr : '')
+    + (v.bypassCount ? '　绕过条目：' + v.bypassCount + ' 条' : '')
+    + '　隧道自检：' + v.tunnelOk + '/' + v.tunnelTotal;
+  det.appendChild(meta);
+
+  if (v.items && v.items.length) {
+    const t = el('div', 'clash-table');
+    ['内网域名', '直连', '经代理（域名交给它解析）'].forEach(h => t.appendChild(el('div', null, h)));
+    v.items.forEach(it => {
+      t.appendChild(el('div', 'mono', it.host));
+      t.appendChild(el('div', it.directOk ? 'clash-ok' : 'clash-no', it.directOk ? '通（' + it.directKind + '）' : '不通'));
+      t.appendChild(el('div', it.proxyOk ? 'clash-ok' : 'clash-no', it.proxyOk ? '通（' + it.proxyKind + '）' : '不通'));
+    });
+    det.appendChild(t);
+
+    const pub = el('div', 'hint');
+    pub.textContent = v.publicProxy
+      ? '公网对照（www.baidu.com 经代理）：通　—— 说明代理本身是好的'
+      : '公网对照（www.baidu.com 经代理）：不通　—— 代理本身可能有问题：' + (v.publicErr || '');
+    det.appendChild(pub);
+  }
+
+  const wrap = document.getElementById('clashFixWrap');
+  wrap.hidden = !v.needFix;
+  if (v.needFix) document.getElementById('clashBypass').value = v.bypassList || '';
+}
+
+async function clashCheck() {
+  const st = document.getElementById('clashState');
+  st.className = 'clash-state';
+  st.textContent = '检测中…（每个域名会实跑直连与经代理两条路，约 10 秒）';
+  try {
+    renderClash(await call('ClashCheck'));
+  } catch (e) {
+    st.className = 'clash-state is-error';
+    st.textContent = '检测失败：' + ((e && e.message) || String(e));
+  }
+}
+
+async function copyBypass() {
+  const inp = document.getElementById('clashBypass');
+  const text = inp.value;
+  let ok = false;
+  try {
+    await navigator.clipboard.writeText(text);
+    ok = true;
+  } catch (_) {
+    // WebView2 里 clipboard API 可能要权限，回退到选中+execCommand
+    inp.removeAttribute('readonly');
+    inp.select();
+    try { ok = document.execCommand('copy'); } catch (__) { ok = false; }
+    inp.setAttribute('readonly', '');
+  }
+  toast(ok ? '已复制' : '复制失败', ok ? '粘贴到 Clash Verge 的「绕过地址」' : '请手动选中复制', ok ? 'success' : 'warn');
+}
+
 /* ═══════════════ 设置 ═══════════════ */
 
 async function loadSettings() {
@@ -477,6 +547,10 @@ function wire() {
     catch (e) { fail(e); }
   };
 
+  // Clash 共存检测
+  document.getElementById('btnClashCheck').onclick = () => clashCheck();
+  document.getElementById('btnCopyBypass').onclick = () => copyBypass();
+
   // 开机自启：一变就生效
   const cbAuto = document.getElementById('setAutostart');
   cbAuto.onchange = async () => {
@@ -531,6 +605,7 @@ async function boot() {
   await Promise.all([loadLogs(), loadChains(), loadRoutes(), loadSettings()]);
   refreshState();
   setInterval(refreshState, 1500);
+  clashCheck();   // 进界面就跑一次共存检测（失败不影响其他）
 }
 
 window.addEventListener('DOMContentLoaded', () => boot().catch(e => toast('初始化失败', String(e), 'error')));

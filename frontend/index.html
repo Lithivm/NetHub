@@ -123,6 +123,28 @@
       </div>
 
       <div class="card">
+        <div class="card-head">
+          <h2>与 Clash 共存</h2>
+          <span class="hint">检测「浏览器那条路」会不会把内网送进 Clash（只读，不改任何设置）</span>
+          <div class="spacer"></div>
+          <button class="btn btn-sm" id="btnClashCheck">重新检测</button>
+        </div>
+        <div class="card-body form">
+          <div class="clash-state" id="clashState">尚未检测。点右上角「重新检测」。</div>
+          <div id="clashDetail"></div>
+          <div class="field" id="clashFixWrap" hidden>
+            <label>把下面这段填进 Clash Verge 的「绕过地址」
+              <em>为什么要你手动填：这份配置由 Clash Verge 自己维护，它每次应用系统代理都会重写该值 —— 实测我们写进去 5 秒内就被冲掉。两个程序抢一个全局设置，得不偿失。</em>
+            </label>
+            <div class="input-row">
+              <input type="text" id="clashBypass" class="input mono" readonly>
+              <button class="btn btn-sm btn-primary" id="btnCopyBypass">复制</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
         <div class="card-head"><h2>系统 hosts 接管</h2></div>
         <div class="card-body form">
           <label class="check">

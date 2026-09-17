@@ -13,3 +13,6 @@ build/
 config.yaml
 config.yaml.*
 !config.yaml.example
+
+# Clash 绕过列表的实验备份（一次性）
+.proxyoverride.bak

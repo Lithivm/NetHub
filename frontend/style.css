@@ -406,6 +406,43 @@ code, .mono { font-family: var(--font-mono); }
   border-radius: 6px; word-break: break-all; user-select: text;
 }
 
+/* ═══════════════ Clash 共存检测 ═══════════════ */
+
+.clash-state {
+  padding: var(--s3) var(--s4);
+  border-radius: var(--r-btn);
+  border: 1px solid var(--hairline);
+  background: var(--canvas-soft);
+  font-size: var(--fs-sm);
+  color: var(--body);
+}
+.clash-state.is-ok { border-color: color-mix(in srgb, var(--success) 45%, transparent); background: var(--success-soft); }
+.clash-state.is-warn { border-color: color-mix(in srgb, var(--warning) 45%, transparent); background: var(--warning-soft); }
+.clash-state.is-error { border-color: color-mix(in srgb, var(--error) 45%, transparent); background: var(--error-soft); }
+
+.clash-table {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.2fr) 110px 150px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-btn);
+  overflow: hidden;
+  font-size: var(--fs-sm);
+}
+.clash-table > div {
+  padding: 6px var(--s3);
+  border-bottom: 1px solid var(--hairline-soft);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.clash-table > div:nth-child(-n+3) {
+  background: var(--card-strong);
+  font-size: var(--fs-xs); font-weight: 700; color: var(--muted);
+  letter-spacing: .02em;
+}
+.clash-table > div:nth-last-child(-n+3) { border-bottom: 0; }
+.clash-table .mono { font-family: var(--font-mono); font-size: var(--fs-xs); }
+.clash-ok { color: var(--success); font-weight: 600; }
+.clash-no { color: var(--error); font-weight: 600; }
+
 /* ═══════════════ 设置页布局 ═══════════════ */
 
 .settings-scroll {
