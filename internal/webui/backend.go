@@ -69,6 +69,10 @@ func (b *Backend) OnStartup(ctx context.Context) {
 		}
 	}()
 
+	// 后台巡检 Clash 绕过覆盖：内网被交给 Clash 是红线（DNS 外泄/封号风险），
+	// 不能只靠用户打开界面才发现 —— 每 60 秒查一次（只读注册表，不发网络请求）
+	go b.clashWatch()
+
 	// 起来就把服务拉起（计划任务开机自启靠这个：进程起来 = 隧道就绪）
 	go func() {
 		time.Sleep(600 * time.Millisecond)

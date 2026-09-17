@@ -387,44 +387,52 @@ async function delRoute(i) {
 
 function renderClash(v) {
   const st = document.getElementById('clashState');
-  st.textContent = v.verdict || '';
-  st.className = 'clash-state ' + (v.needFix ? 'is-warn' : (v.items && v.items.length ? 'is-ok' : ''));
+  const good = v.allCorrect && v.publicOk;
+  st.textContent = (v.headline ? v.headline + '\n' : '') + (v.verdict || '');
+  st.className = 'clash-state ' + (good ? 'is-ok' : (v.needFix ? 'is-error' : 'is-warn'));
 
   const det = document.getElementById('clashDetail');
   det.replaceChildren();
 
   const modeName = { none: '未开启系统代理', system: '普通系统代理', pac: 'PAC（自动配置脚本）' }[v.mode] || v.mode;
   const meta = el('div', 'hint');
-  meta.textContent = '模式：' + modeName
-    + (v.proxyAddr ? '　代理：' + v.proxyAddr : '')
-    + (v.bypassCount ? '　绕过条目：' + v.bypassCount + ' 条' : '')
-    + '　隧道自检：' + v.tunnelOk + '/' + v.tunnelTotal;
+  meta.textContent = '系统代理：' + modeName + (v.server ? '　' + v.server : '');
   det.appendChild(meta);
 
-  if (v.items && v.items.length) {
+  if (v.hosts && v.hosts.length) {
     const t = el('div', 'clash-table');
-    ['内网域名', '直连（实测）', '系统代理判定', '交给代理能到吗（实测）'].forEach(h =>
-      t.appendChild(el('div', null, h)));
-    v.items.forEach(it => {
+    ['内网目标', '数据走向', '判定'].forEach(h => t.appendChild(el('div', null, h)));
+    v.hosts.forEach(it => {
+      const good2 = it.correct && it.reachable;
       t.appendChild(el('div', 'mono', it.host));
-      t.appendChild(el('div', it.directOk ? 'clash-ok' : 'clash-no',
-        it.directOk ? '通（' + it.directKind + '）' : '不通'));
-      t.appendChild(el('div', it.bypassed ? 'clash-ok' : 'clash-warn',
-        it.bypassed ? '走直连' : '交给代理'));
-      t.appendChild(el('div', it.proxyOk ? 'clash-ok' : 'clash-no',
-        it.proxyOk ? '通（' + it.proxyKind + '）' : '不通'));
+      t.appendChild(el('div', it.correct ? null : 'clash-no',
+        it.correct ? '直连（我们的隧道）' : '交给 Clash（代理节点）'));
+      let txt;
+      if (it.correct && it.reachable) txt = '✓ 正确（实测可达 ' + it.kind + '）';
+      else if (it.correct && !it.reachable) txt = '✗ 走向对但隧道不通';
+      else if (it.reachable) txt = '✗ 错误：内网被代理了';
+      else txt = '✗ 错误：内网被代理了，且到不了' + (it.altPath && it.altOk ? '（直连是通的）' : '');
+      t.appendChild(el('div', good2 ? 'clash-ok' : 'clash-no', txt));
     });
     det.appendChild(t);
+  }
 
-    const leg = el('div', 'hint');
-    leg.textContent = '读法：浏览器实际走哪条路由「系统代理判定」决定 —— 判定为「走直连」时只需第一列通（最后一列无关紧要）；'
-      + '判定为「交给代理」时必须最后一列也通，否则浏览器就打不开内网域名。';
-    det.appendChild(leg);
+  if (v.coverage && v.coverage.checked && v.coverage.checked.length) {
+    const hit = v.coverage.checked.length - ((v.coverage.missed || []).length);
+    const c = el('div', 'hint');
+    c.textContent = '绕过覆盖：' + hit + '/' + v.coverage.checked.length + ' 命中（含内网网段代表 IP）';
+    if (v.coverage.missed && v.coverage.missed.length) {
+      c.textContent += '　✗ 未覆盖：' + v.coverage.missed.join(';');
+      c.className = 'hint clash-no';
+    }
+    det.appendChild(c);
+  }
 
+  if (v.mode !== 'none') {
     const pub = el('div', 'hint');
-    pub.textContent = v.publicProxy
-      ? '公网对照（www.baidu.com 经代理）：通　—— 说明代理本身是好的'
-      : '公网对照（www.baidu.com 经代理）：不通　—— 代理本身可能有问题：' + (v.publicErr || '');
+    pub.textContent = v.publicOk
+      ? '公网（走 Clash）：通（' + v.publicKind + '）'
+      : '公网（走 Clash）：不通　' + (v.publicErr || '');
     det.appendChild(pub);
   }
 
@@ -436,7 +444,7 @@ function renderClash(v) {
 async function clashCheck() {
   const st = document.getElementById('clashState');
   st.className = 'clash-state';
-  st.textContent = '检测中…（每个域名会实跑直连与经代理两条路，约 10 秒）';
+  st.textContent = '检测中…（每个内网目标会实跑它实际会走的那条路，约 10 秒）';
   try {
     renderClash(await call('ClashCheck'));
   } catch (e) {

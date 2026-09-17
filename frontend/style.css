@@ -410,6 +410,7 @@ code, .mono { font-family: var(--font-mono); }
 
 .clash-state {
   padding: var(--s3) var(--s4);
+  white-space: pre-line;
   border-radius: var(--r-btn);
   border: 1px solid var(--hairline);
   background: var(--canvas-soft);
