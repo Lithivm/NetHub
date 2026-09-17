@@ -47,6 +47,7 @@ type ProxyMode struct {
 	Server      string // 显式系统代理的地址
 	PacURL      string // PAC 地址
 	BypassCount int    // 绕过条目数
+	BypassRaw   string // 绕过列表原值（用于本地匹配）
 }
 
 func readProxyMode() ProxyMode {
@@ -76,20 +77,31 @@ func readProxyMode() ProxyMode {
 		m.Mode = "none"
 	}
 	if ov, _, err := k.GetStringValue("ProxyOverride"); err == nil && ov != "" {
-		m.BypassCount = len(strings.Split(ov, ";"))
+		m.BypassRaw = ov
+		m.BypassCount = len(strings.FieldsFunc(ov, func(r rune) bool {
+			return r == ';' || r == ',' || r == ' ' || r == '\t'
+		}))
 	}
 	return m
 }
 
-// ClashItem 一个内网域名的两条路实测结果。
+// ClashItem 一个内网域名的三格实测/判定结果。
 type ClashItem struct {
-	Host       string `json:"host"`
+	Host string `json:"host"`
+
+	// 座 1：直连（浏览器不走代理时）能不能真到内网 —— 真实测量
 	DirectOK   bool   `json:"directOk"`
-	DirectKind string `json:"directKind"` // https | http
+	DirectKind string `json:"directKind"`
 	DirectErr  string `json:"directErr"`
-	ProxyOK    bool   `json:"proxyOk"`
-	ProxyKind  string `json:"proxyKind"`
-	ProxyErr   string `json:"proxyErr"`
+
+	// 座 2：系统代理会不会把这个域名交给代理 —— 按绕过列表匹配得出
+	Bypassed bool `json:"bypassed"`
+
+	// 座 3：假如交给了代理，代理自己能不能到内网 —— 真实测量
+	// （这测的是代理的 DNS 能力，绕过列表不会改变它；绕过生效时座 3 无关紧要）
+	ProxyOK   bool   `json:"proxyOk"`
+	ProxyKind string `json:"proxyKind"`
+	ProxyErr  string `json:"proxyErr"`
 }
 
 // ClashCheckView 给前端的完整检测结果。
@@ -217,12 +229,79 @@ func firstN(s string, n int) string {
 	return s[:n] + "…"
 }
 
+// proxyBypassHit 判断 host 是否命中 WinINET 的 ProxyOverride 绕过列表。
+//
+// 规则（Windows 文档 + 实测对照）：
+//   - 分号分隔；`*` 是通配符；匹配不区分大小写
+//   - 普通条目（如 app.example.com）只匹配该主机本身，不匹配子域
+//   - `<local>` 匹配不带点的主机名
+//
+// 为什么这里可以自己实现（前面明明说过不自己实现匹配）：
+//   - 前面坑的是 PAC（脚本）和 .NET 那套——那些真的不能推
+//   - 静态绕过列表本身是“通配符匹配主机名字符串”这个简单规则，
+//     而且我们手上有**真实 WinINET 观测**做验证向量（见 clash_test.go）
+//   - 更根本的原因：**系统没有提供任何 API 能问"这个 URL 会不会绕过静态代理"**。
+//     WinHttpGetProxyForUrl 只支持 AUTO_DETECT / CONFIG_URL 两条自动代理路径
+func proxyBypassHit(host, list string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return false
+	}
+	for _, raw := range strings.FieldsFunc(list, func(r rune) bool {
+		return r == ';' || r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	}) {
+		entry := strings.ToLower(strings.TrimSpace(raw))
+		if entry == "" {
+			continue
+		}
+		if entry == "<local>" {
+			if !strings.Contains(host, ".") {
+				return true
+			}
+			continue
+		}
+		if wildcardMatch(entry, host) {
+			return true
+		}
+	}
+	return false
+}
+
+// wildcardMatch 把 ent 里的 '*' 当任意长度通配符，整体锚定匹配 s。
+func wildcardMatch(ent, s string) bool {
+	parts := strings.Split(ent, "*")
+	if len(parts) == 1 {
+		return ent == s
+	}
+	if !strings.HasPrefix(s, parts[0]) {
+		return false
+	}
+	s = s[len(parts[0]):]
+	for i := 1; i < len(parts)-1; i++ {
+		p := parts[i]
+		if p == "" {
+			continue
+		}
+		j := strings.Index(s, p)
+		if j < 0 {
+			return false
+		}
+		s = s[j+len(p):]
+	}
+	last := parts[len(parts)-1]
+	if last == "" {
+		return true
+	}
+	return strings.HasSuffix(s, last)
+}
+
 // ClashCheck 检测内网是否会被送进代理。纯只读，不改任何设置。
 func (b *Backend) ClashCheck() ClashCheckView {
 	pm := readProxyMode()
 	v := ClashCheckView{Mode: pm.Mode, Server: pm.Server, PacURL: pm.PacURL, BypassCount: pm.BypassCount}
+	v.BypassList = pm.BypassRaw
 
-	// 要检查的内网域名：配置里的 hosts 条目 → hosts 文件标记区块 → 内置默认
+	// hosts 条目：配置 → hosts 文件标记区块 → 内置默认
 	// （不能只读配置：默认配置的 entries 是空的，那样最关键的域名检查就不会跑）
 	entries := b.a.Cfg.Hosts.Entries
 	if len(entries) == 0 {
@@ -251,7 +330,9 @@ func (b *Backend) ClashCheck() ClashCheckView {
 	}
 	v.ProxyAddr = proxyAddr
 
-	// ── 逐域名并发实测两条路 ──
+	// 没开系统代理 = 浏览器全直连，绕过判定无意义
+	proxyActive := pm.Mode != "none"
+
 	v.Items = make([]ClashItem, len(hosts))
 	var wg sync.WaitGroup
 	for i, h := range hosts {
@@ -260,7 +341,7 @@ func (b *Backend) ClashCheck() ClashCheckView {
 			defer wg.Done()
 			it := ClashItem{Host: h}
 
-			// 路 1：直连。用域名 → 系统解析走 hosts → 内网 IP → 被我们接管 → 隧道
+			// 座 1：直连（域名 → 系统解析走 hosts → 内网 IP → 被我们接管 → 隧道）
 			direct := func(port int) (net.Conn, error) {
 				return net.DialTimeout("tcp", net.JoinHostPort(h, fmt.Sprint(port)), probeTimeout())
 			}
@@ -271,7 +352,10 @@ func (b *Backend) ClashCheck() ClashCheckView {
 				it.DirectErr = shortErr(err)
 			}
 
-			// 路 2：经代理，把域名交给代理去解析（= 浏览器走代理的真实行为）
+			// 座 2：系统代理会不会把它交给代理
+			it.Bypassed = !proxyActive || proxyBypassHit(h, pm.BypassRaw)
+
+			// 座 3：如交代理，代理能不能到内网
 			viaProxy := func(port int) (net.Conn, error) {
 				return socks.DialHost(proxyAddr, h, uint16(port), probeTimeout())
 			}
@@ -285,7 +369,7 @@ func (b *Backend) ClashCheck() ClashCheckView {
 		}(i, h)
 	}
 
-	// 公网对照：代理本身是不是好的
+	// 公网对照：代理本身是好的吗
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -301,22 +385,20 @@ func (b *Backend) ClashCheck() ClashCheckView {
 	}()
 	wg.Wait()
 
-	// ── 我们这一侧的自检：直接测内网 IP（不涉域名/代理）──
 	v.TunnelTotal, v.TunnelOK = tunnelProbe(b.a.Cfg.Routes)
 
-	// ── 结论 ──
-	var needDomains []string
-	anyDirectFail := false
-	anyProxyOK := false
+	// ── 结论：只看“浏览器实际会走哪条路，而那条路能不能到内网”──
+	var broken, needDomains []string
 	for _, it := range v.Items {
-		if !it.DirectOK {
-			anyDirectFail = true
-		}
-		if it.ProxyOK {
-			anyProxyOK = true
-		}
-		if !it.ProxyOK {
+		// 会走代理、而代理到不了 → 坏
+		if !it.Bypassed && !it.ProxyOK {
+			broken = append(broken, it.Host)
 			needDomains = append(needDomains, it.Host)
+			continue
+		}
+		// 走直连、而直连到不了 → 我们这一侧的问题
+		if it.Bypassed && !it.DirectOK {
+			broken = append(broken, it.Host)
 		}
 	}
 	v.BypassList = strings.Join(needDomains, ";")
@@ -324,25 +406,30 @@ func (b *Backend) ClashCheck() ClashCheckView {
 	switch {
 	case len(v.Items) == 0:
 		v.Verdict = "配置里没有内网域名可检（hosts.entries 为空）。"
-	case anyDirectFail:
+	case len(broken) > 0 && len(needDomains) == 0:
 		v.Verdict = "有内网域名【直连也不通】—— 这跟 Clash 无关，是我们这一侧的问题（看运行日志里的引擎/链路状态）。"
-	case anyProxyOK:
-		v.Verdict = "内网域名经代理也能真正访问到（实测到 HTTP 层），当前配置无需处理。"
-	case pm.Mode == "none":
-		v.Verdict = "系统代理未开启，浏览器直连，内网正常。"
-	default:
-		v.NeedFix = len(needDomains) > 0
+	case len(broken) > 0:
+		v.NeedFix = true
+		v.BypassList = strings.Join(needDomains, ";")
 		if pm.Mode == "pac" {
-			v.Verdict = "内网域名经代理到不了（实测到 HTTP 层）。PAC 模式下绕过列表不生效，建议改用普通系统代理，" +
-				"并把下面的域名加进 Clash Verge 的「绕过地址」（设置 → 系统代理 左侧小齿轮）。"
+			v.Verdict = "有内网域名会被交给代理（实测代理到不了内网）。PAC 模式下绕过列表不生效，建议改用普通系统代理；" +
+				"把域名加进 Clash Verge 的「绕过地址」（设置 → 系统代理 左侧小齿轮）。"
 		} else {
-			v.Verdict = "内网域名经代理到不了（实测到 HTTP 层），但直连可达。把下面的域名加进 Clash Verge 的「绕过地址」" +
-				"（入口：设置 → 系统代理 那一行左侧的小齿轮），让浏览器访问内网时走直连（= 我们的隧道），公网仍走 Clash。" +
-				"若你不需要用浏览器打开内网域名，这一步可跳过。"
+			v.Verdict = "有内网域名会被交给代理（实测代理到不了内网）。把下面的域名加进 Clash Verge 的「绕过地址」——" +
+				"（设置 → 系统代理 那一行左侧的小齿轮），让浏览器访问内网时走直连（= 我们的隧道），公网仍走 Clash。"
 		}
+	case pm.Mode == "none":
+		v.Verdict = "系统代理未开启，浏览器全部直连；内网走我们的隧道，公网不受影响。"
+	default:
+		v.Verdict = "内网域名全部走直连（绕过列表已覆盖），且直连可达 —— 浏览器可正常访问内网，公网仍走 Clash。无需处理。"
 	}
-	if len(needDomains) == 0 {
-		v.NeedFix = false
+
+	for _, it := range v.Items {
+		if it.Bypassed && !it.DirectOK {
+			v.Verdict = "有内网域名【直连不通】—— 这跟 Clash 无关，是我们这一侧的问题（看运行日志）。"
+			v.NeedFix = false
+			break
+		}
 	}
 	return v
 }
@@ -422,19 +509,25 @@ func PrintClashCheck(cfg *config.Config) {
 	fmt.Printf("  绕过条目数  : %d\n", v.BypassCount)
 	fmt.Printf("  实测用代理  : %s\n", v.ProxyAddr)
 
-	fmt.Println("\n=== 内网域名：两条路实测（直连 vs 经代理，都验到 HTTP 层）===")
-	fmt.Printf("  %-26s %-16s %s\n", "域名", "直连", "经代理（把域名交给代理解析）")
+	fmt.Println("\n=== 内网域名：三格（前两格与实跑/判定，最后一格是实测）===")
+	fmt.Printf("  %-24s %-14s %-12s %s\n", "域名", "直连(实测)", "系统代理", "交给代理能到吗(实测)")
 	for _, it := range v.Items {
 		d := "不通"
 		if it.DirectOK {
 			d = "通(" + it.DirectKind + ")"
 		}
+		by := "交给代理"
+		if it.Bypassed {
+			by = "走直连"
+		}
 		p := "不通"
 		if it.ProxyOK {
 			p = "通(" + it.ProxyKind + ")"
 		}
-		fmt.Printf("  %-26s %-16s %s\n", it.Host, d, p)
+		fmt.Printf("  %-24s %-14s %-12s %s\n", it.Host, d, by, p)
 	}
+	fmt.Println("\n  读法：浏览器走哪条路由「系统代理」那一列决定；" +
+		"判定为走直连时只需直连通（最后一列无关紧要），判定为交给代理时最后一列也必须通。")
 	if v.PublicProxy {
 		fmt.Printf("\n  公网对照 www.baidu.com 经代理: 通(%s) —— 代理本身是好的\n", v.PublicKind)
 	} else {

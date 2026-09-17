@@ -403,13 +403,23 @@ function renderClash(v) {
 
   if (v.items && v.items.length) {
     const t = el('div', 'clash-table');
-    ['内网域名', '直连', '经代理（域名交给它解析）'].forEach(h => t.appendChild(el('div', null, h)));
+    ['内网域名', '直连（实测）', '系统代理判定', '交给代理能到吗（实测）'].forEach(h =>
+      t.appendChild(el('div', null, h)));
     v.items.forEach(it => {
       t.appendChild(el('div', 'mono', it.host));
-      t.appendChild(el('div', it.directOk ? 'clash-ok' : 'clash-no', it.directOk ? '通（' + it.directKind + '）' : '不通'));
-      t.appendChild(el('div', it.proxyOk ? 'clash-ok' : 'clash-no', it.proxyOk ? '通（' + it.proxyKind + '）' : '不通'));
+      t.appendChild(el('div', it.directOk ? 'clash-ok' : 'clash-no',
+        it.directOk ? '通（' + it.directKind + '）' : '不通'));
+      t.appendChild(el('div', it.bypassed ? 'clash-ok' : 'clash-warn',
+        it.bypassed ? '走直连' : '交给代理'));
+      t.appendChild(el('div', it.proxyOk ? 'clash-ok' : 'clash-no',
+        it.proxyOk ? '通（' + it.proxyKind + '）' : '不通'));
     });
     det.appendChild(t);
+
+    const leg = el('div', 'hint');
+    leg.textContent = '读法：浏览器实际走哪条路由「系统代理判定」决定 —— 判定为「走直连」时只需第一列通（最后一列无关紧要）；'
+      + '判定为「交给代理」时必须最后一列也通，否则浏览器就打不开内网域名。';
+    det.appendChild(leg);
 
     const pub = el('div', 'hint');
     pub.textContent = v.publicProxy
