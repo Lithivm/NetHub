@@ -44,9 +44,9 @@ import (
 
 	"golang.org/x/sys/windows/registry"
 
-	"netproxy/internal/app"
-	"netproxy/internal/config"
-	"netproxy/internal/socks"
+	"nethub/internal/app"
+	"nethub/internal/config"
+	"nethub/internal/socks"
 )
 
 // ProxyMode 系统代理模式（只从注册表读，不涉及任何匹配语义）。
@@ -226,7 +226,7 @@ func tryPlainGet(c net.Conn, host string) (string, error) {
 }
 
 func sendGet(w io.Writer, host string) error {
-	req := "GET / HTTP/1.0\r\nHost: " + host + "\r\nUser-Agent: netproxy-check\r\nConnection: close\r\n\r\n"
+	req := "GET / HTTP/1.0\r\nHost: " + host + "\r\nUser-Agent: NetHub-check\r\nConnection: close\r\n\r\n"
 	_, err := io.WriteString(w, req)
 	return err
 }
@@ -601,7 +601,7 @@ func shortErr(err error) string {
 	return s
 }
 
-// PrintClashCheck 命令行诊断入口（netproxy.exe -clash-check），不需要管理员权限。
+// PrintClashCheck 命令行诊断入口（nethub.exe -clash-check），不需要管理员权限。
 func PrintClashCheck(cfg *config.Config) {
 	b := &Backend{a: &app.App{Cfg: cfg}}
 	v := b.ClashCheck()

@@ -1,4 +1,4 @@
-/* netproxy 样式 —— 严格按 DESIGN.md 的 token 实现。
+/* NetHub 样式 —— 严格按 DESIGN.md 的 token 实现。
    改色只改这里的 :root / [data-theme="dark"]，不要在别处写死颜色。 */
 
 /* ═══════════════ Token ═══════════════ */
@@ -134,7 +134,12 @@ code, .mono { font-family: var(--font-mono); }
   align-items: center;
   background: var(--canvas-soft);
   border-bottom: 1px solid var(--hairline);
-  -webkit-app-region: drag;
+  /* 窗口拖拽：Wails 读的是 --wails-draggable，而且【只看鼠标按下的那个元素本身】，
+     不会往上找父元素（见 wails runtime 的 mousedown 处理）。
+     所以：标题栏本体标 drag；里面的文字/空白区 pointer-events:none，
+     保证事件目标永远是标题栏本体；按钮再单独把指针事件打开。 */
+  --wails-draggable: drag;
+  -webkit-app-region: drag; /* 留着兼容，无副作用 */
   position: relative;
   z-index: 30;
 }
@@ -151,10 +156,15 @@ code, .mono { font-family: var(--font-mono); }
 }
 .titlebar .subtitle { color: var(--muted); font-weight: 400; }
 .titlebar-spacer { flex: 1; }
+/* 让 mousedown 的 target 落到标题栏本体上 */
+.titlebar-brand, .titlebar-spacer { pointer-events: none; }
 
-.winbtns { display: flex; height: 100%; }
+.winbtns { display: flex; height: 100%; pointer-events: auto; }
 .winbtn {
   width: 44px; height: 100%;
+  pointer-events: auto;
+  --wails-draggable: no-drag; /* 按钮上不拖拽 */
+  -webkit-app-region: no-drag;
   border: 0; background: transparent; color: var(--muted);
   font-size: var(--fs-sm); cursor: pointer;
   display: flex; align-items: center; justify-content: center;

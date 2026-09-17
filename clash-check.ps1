@@ -1,4 +1,4 @@
-﻿# Clash 与 netproxy 的共存判定（只读，不改任何设置）
+﻿# Clash 与 NetHub 的共存判定（只读，不改任何设置）
 #
 # 判定三件事：
 #   1) 系统代理当前是什么模式（PAC / 普通系统代理 / 关）
@@ -30,7 +30,7 @@ if ($pac) {
         if ($ov -like "*$need*") { OK "绕过列表含 $need" } else { BAD "绕过列表缺 $need" }
     }
 } else {
-    OK "系统代理关闭 —— 浏览器直连，解析走 hosts，交给 netproxy 内核拦截"
+    OK "系统代理关闭 —— 浏览器直连，解析走 hosts，交给 NetHub 内核拦截"
 }
 
 Sec "2) 浏览器那条路会把内网域名判成什么"
@@ -65,14 +65,14 @@ else {
         INFO "原因：Clash 用自己的 DNS（或 fake-ip），看不到系统 hosts 文件"
     }
 
-    INFO "b) 直连（= netproxy 内核拦截接管的路径）"
+    INFO "b) 直连（= NetHub 内核拦截接管的路径）"
     $out2 = & cmd /c "`"$curl`" -k -sS -o NUL -w `"%{http_code}|%{remote_ip}`" --max-time 15 https://app.example.com/ 2>&1"
     $code2 = ($out2 | Out-String).Trim()
     if ($code2 -match '^(\d{3})\|(.+)$') { OK ("HTTP " + $Matches[1] + "  连接IP=" + $Matches[2]) }
     else { BAD ("失败：" + $code2) }
 }
 
-Sec "4) 内网 6 个目标（netproxy 视角，与应用无关）"
+Sec "4) 内网 6 个目标（NetHub 视角，与应用无关）"
 $targets = @(
     @('10.0.1.10', 5432, 'DBHub PostgreSQL'),
     @('10.0.1.11', 6446, 'DBHub MySQL'),

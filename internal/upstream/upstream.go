@@ -41,7 +41,7 @@ import (
 	"strings"
 	"time"
 
-	"netproxy/internal/socks"
+	"nethub/internal/socks"
 )
 
 // Upstream 一条上游链路。

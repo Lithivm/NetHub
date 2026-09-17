@@ -10,7 +10,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"netproxy/internal/upstream"
+	"nethub/internal/upstream"
 )
 
 // Chain 一条隧道链 = 一个上游代理。
@@ -111,7 +111,7 @@ func (c *Config) Save() error {
 	if err != nil {
 		return err
 	}
-	header := "# netproxy 配置 —— 由程序读写，手工改也生效\n" +
+	header := "# NetHub 配置 —— 由程序读写，手工改也生效\n" +
 		"# forward 里的凭据是本机敏感信息，不要外传、不要提交进 git。\n"
 	tmp := c.path + ".tmp"
 	if err := os.WriteFile(tmp, append([]byte(header), b...), 0o600); err != nil {
@@ -385,8 +385,8 @@ func (c *Config) SaveAs(path string) error {
 	if err != nil {
 		return err
 	}
-	header := "# netproxy 配置 —— 由程序导出\n" +
-		"# 同事拿到后放到 netproxy.exe 同目录、改名 config.yaml 即可使用。\n" +
+	header := "# NetHub 配置 —— 由程序导出\n" +
+		"# 同事拿到后放到 nethub.exe 同目录、改名 config.yaml 即可使用。\n" +
 		"# ⚠ forward 里含上游凭据（auth= 是 用户:口令 的 base64），请通过安全渠道分发。\n"
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, append([]byte(header), b...), 0o600); err != nil {

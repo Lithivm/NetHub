@@ -1,4 +1,4 @@
-// netproxy —— 内网隧道透明代理（Wails/WebView2 界面）。
+// NetHub —— 内网隧道透明代理（Wails/WebView2 界面）。
 //
 // 替代 Proxifier + 两个 gost .bat：一个进程管链路、一个驱动管拦截、一个界面管规则。
 //
@@ -10,7 +10,7 @@
 //
 // 构建（**必须带 production 标签**，否则 Wails 会弹 "will not build without the correct build tags"）：
 //
-//	go build -tags production -ldflags "-H=windowsgui -s -w" -o netproxy.exe .
+//	go build -tags production -ldflags "-H=windowsgui -s -w" -o nethub.exe .
 //
 // 不需要 wails CLI，也不需要 npm：bindings 由 Wails 在运行时从 options.Bind 自动生成。
 package main
@@ -33,12 +33,12 @@ import (
 	wopts "github.com/wailsapp/wails/v2/pkg/options/windows"
 	"golang.org/x/sys/windows"
 
-	"netproxy/internal/app"
-	"netproxy/internal/autostart"
-	"netproxy/internal/config"
-	"netproxy/internal/gostbat"
-	"netproxy/internal/logbus"
-	"netproxy/internal/webui"
+	"nethub/internal/app"
+	"nethub/internal/autostart"
+	"nethub/internal/config"
+	"nethub/internal/gostbat"
+	"nethub/internal/logbus"
+	"nethub/internal/webui"
 )
 
 //go:embed all:frontend
@@ -118,8 +118,8 @@ func main() {
 
 	bus := logbus.New(3000)
 	logDir := filepath.Dir(p)
-	_ = bus.SetFile(filepath.Join(logDir, "netproxy.log"))
-	bus.Info("netproxy 启动，配置 %s", p)
+	_ = bus.SetFile(filepath.Join(logDir, "nethub.log"))
+	bus.Info("NetHub 启动，配置 %s", p)
 	if !isElevated() {
 		bus.Warn("当前不是管理员权限，驱动加载可能失败")
 	}
@@ -144,7 +144,7 @@ func runGUI(a *app.App, bus *logbus.Bus, cfgPath string) {
 	b := webui.New(a)
 
 	// 托盘：先建好，点 X 才有地方可去
-	tray := webui.NewTray(filepath.Join(filepath.Dir(cfgPath), "netproxy.ico"),
+	tray := webui.NewTray(filepath.Join(filepath.Dir(cfgPath), "nethub.ico"),
 		func() { webui.ShowMainWindow(b) }, // 显示主界面
 		func() { go func() { _ = a.Start() }() },
 		func() { a.Stop() },
@@ -160,7 +160,7 @@ func runGUI(a *app.App, bus *logbus.Bus, cfgPath string) {
 	}
 
 	err := wails.Run(&options.App{
-		Title:     "netproxy · 内网隧道代理",
+		Title:     "NetHub · 内网隧道代理",
 		Width:     1120,
 		Height:    720,
 		MinWidth:  880,
@@ -178,8 +178,9 @@ func runGUI(a *app.App, bus *logbus.Bus, cfgPath string) {
 		OnStartup:     b.OnStartup,
 		OnDomReady:    b.OnDomReady,
 		OnBeforeClose: b.OnBeforeClose,
+		OnShutdown:    b.OnShutdown,
 		SingleInstanceLock: &options.SingleInstanceLock{
-			UniqueId: "netproxy-single-instance",
+			UniqueId: "NetHub-single-instance",
 			OnSecondInstanceLaunch: func(options.SecondInstanceData) {
 				webui.ShowMainWindow(b)
 			},

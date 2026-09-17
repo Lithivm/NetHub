@@ -12,9 +12,24 @@ import (
 )
 
 const (
-	beginMark = "# >>> netproxy 自动维护开始（勿手改本段内的内容）"
-	endMark   = "# <<< netproxy 自动维护结束"
+	beginMark = "# >>> NetHub 自动维护开始（勿手改本段内的内容）"
+	endMark   = "# <<< NetHub 自动维护结束"
+
+	// 改名前的旧标记。本程序原来叫 netproxy，如果某台机器上已经有旧区块，
+	// 要能识别并当自己的处理（否则会留下一段孤儿内容，而且再写入会重复）。
+	beginMarkOld = "# >>> netproxy 自动维护开始（勿手改本段内的内容）"
+	endMarkOld   = "# <<< netproxy 自动维护结束"
 )
+
+// isBegin 判定是否是"我们的区块开始"（新旧标记都算）。
+func isBegin(line string) bool {
+	return strings.HasPrefix(line, beginMark) || strings.HasPrefix(line, beginMarkOld)
+}
+
+// isEnd 判定是否是"我们的区块结束"（新旧标记都算）。
+func isEnd(line string) bool {
+	return strings.HasPrefix(line, endMark) || strings.HasPrefix(line, endMarkOld)
+}
 
 // Path 返回系统 hosts 路径。
 func Path() string {
@@ -37,9 +52,9 @@ func Read() (block []string, exists bool, full string, err error) {
 	for _, l := range lines {
 		t := strings.TrimRight(l, "\r")
 		switch {
-		case strings.HasPrefix(t, beginMark):
+		case isBegin(t):
 			in, exists = true, true
-		case strings.HasPrefix(t, endMark):
+		case isEnd(t):
 			in = false
 		case in:
 			if s := strings.TrimSpace(t); s != "" && !strings.HasPrefix(s, "#") {
@@ -51,7 +66,7 @@ func Read() (block []string, exists bool, full string, err error) {
 }
 
 // Apply 把 entries 写进标记块（替换旧的块；没有块就追加到文件末尾）。
-// 会先备份一次到 hosts.netproxy.bak（只在备份不存在时创建，避免覆盖最初的原件）。
+// 会先备份一次到 hosts.nethub.bak（只在备份不存在时创建，避免覆盖最初的原件）。
 func Apply(entries []string) error {
 	p := Path()
 	_, _, full, err := Read()
@@ -60,7 +75,7 @@ func Apply(entries []string) error {
 	}
 
 	// 备份（仅首次）
-	bak := p + ".netproxy.bak"
+	bak := p + ".nethub.bak"
 	if _, err := os.Stat(bak); os.IsNotExist(err) {
 		if err := os.WriteFile(bak, []byte(full), 0o644); err != nil {
 			return fmt.Errorf("备份 hosts 失败: %w", err)
@@ -78,10 +93,10 @@ func Apply(entries []string) error {
 	for _, l := range lines {
 		t := strings.TrimRight(l, "\r")
 		switch {
-		case strings.HasPrefix(t, beginMark):
+		case isBegin(t):
 			skip = true
 			continue
-		case strings.HasPrefix(t, endMark):
+		case isEnd(t):
 			skip = false
 			continue
 		}
@@ -110,7 +125,7 @@ func Apply(entries []string) error {
 	}
 	out.WriteString(endMark + "\n")
 
-	tmp := p + ".netproxy.tmp"
+	tmp := p + ".nethub.tmp"
 	if err := os.WriteFile(tmp, []byte(out.String()), 0o644); err != nil {
 		return fmt.Errorf("写临时文件失败: %w", err)
 	}
@@ -137,10 +152,10 @@ func Remove() error {
 	for _, l := range strings.Split(body, "\n") {
 		t := strings.TrimRight(l, "\r")
 		switch {
-		case strings.HasPrefix(t, beginMark):
+		case isBegin(t):
 			skip = true
 			continue
-		case strings.HasPrefix(t, endMark):
+		case isEnd(t):
 			skip = false
 			continue
 		}

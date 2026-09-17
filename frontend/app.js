@@ -1,4 +1,4 @@
-/* netproxy 前端逻辑。
+/* NetHub 前端逻辑。
    后端调用约定（Wails 运行时自动生成的 bindings）：
      window.go.webui.Backend.<Method>(...)
    Go 侧返回值末尾带 error 的方法，Promise 会 reject —— 统一在 call() 里兜住。 */
@@ -107,7 +107,17 @@ function showPage(name) {
 
 async function refreshState() {
   let s;
-  try { s = await call('GetState'); } catch (_) { return; }
+  try { s = await call('GetState'); } catch (e) {
+    // 不再静默 return —— 之前这里 catch 到底，绑定一坏就永久停在“未启动”，
+    // 完全看不出出事了。只提示一次，避免每 1.5 秒刷屏。
+    if (!refreshState._warned) {
+      refreshState._warned = true;
+      console.error('GetState 失败', e);
+      toast('状态获取失败', String((e && e.message) || e), 'error');
+    }
+    return;
+  }
+  refreshState._warned = false;
   state = Object.assign(state, s);
 
   const on = !!s.running;
@@ -118,7 +128,6 @@ async function refreshState() {
   document.getElementById('btnToggle').className = on ? 'btn' : 'btn btn-primary';
 
   document.getElementById('stRelay').textContent = s.relay || '-';
-  document.getElementById('stPids').textContent = s.gostPids || '-';
   document.getElementById('stTotal').textContent = s.totalConns;
   document.getElementById('stActive').textContent = s.activeConns;
 
@@ -473,21 +482,34 @@ async function copyBypass() {
 async function loadSettings() {
   let s;
   try { s = await call('GetSettings'); } catch (e) { return fail(e); }
-  document.getElementById('setRelay').value = s.relay || '';
-  document.getElementById('setHostsManage').checked = s.hostsManage;
-  document.getElementById('setHostsEntries').value = (s.hostsEntries || []).join('\n');
+  // 只用界面上确实存在的字段（别再引用已被移除的 setRelay，
+  // 那会抛 TypeError 把 boot() 整个搞挂，导致状态轮询都注册不上）
+  setChecked('setHostsManage', s.hostsManage);
+  setValue('setHostsEntries', (s.hostsEntries || []).join('\n'));
+}
+
+// 安全地取元素：元素不存在时返回 null 而不是报错，
+// 避免某个面板改版后把整页初始化连带打挂。
+function setChecked(id, v) {
+  const e = document.getElementById(id);
+  if (e) e.checked = !!v;
+}
+function setValue(id, v) {
+  const e = document.getElementById(id);
+  if (e) e.value = v;
 }
 
 async function saveSettings(restart) {
+  const elEntries = document.getElementById('setHostsEntries');
+  const elManage = document.getElementById('setHostsManage');
   const payload = {
-    relay: document.getElementById('setRelay').value,
-    hostsManage: document.getElementById('setHostsManage').checked,
-    hostsEntries: document.getElementById('setHostsEntries').value.split('\n').map(s => s.trim()).filter(Boolean),
+    hostsManage: !!(elManage && elManage.checked),
+    hostsEntries: elEntries ? elEntries.value.split('\n').map(s => s.trim()).filter(Boolean) : [],
     theme: state.theme,
   };
   try {
     await call('SaveSettings', payload);
-    toast('设置已保存', restart ? '正在重启服务…' : 'gost 托管 / relay 的改动需要重启才生效', 'success');
+    toast('设置已保存', restart ? '正在重启服务…' : 'hosts 托管 / relay 的改动需要重启才生效', 'success');
     if (restart) { await call('Restart'); await refreshState(); }
   } catch (e) { fail(e); }
 }
@@ -620,11 +642,22 @@ async function boot() {
 
   wire();
   applyTheme('light');
+
+  // 状态轮询【先注册】：任何面板加载失败都不能让状态栏冻在启动前的快照上。
+  setInterval(refreshState, 1500);
+
   await refreshState();
   applyTheme(state.theme);
-  await Promise.all([loadLogs(), loadChains(), loadRoutes(), loadSettings()]);
+
+  // 各面板独立加载：一个坏了不影响其他，而且要把错误显性报出来
+  const panels = await Promise.allSettled([loadLogs(), loadChains(), loadRoutes(), loadSettings()]);
+  const bad = panels.filter(p => p.status === 'rejected');
+  if (bad.length) {
+    console.error('面板加载失败', bad.map(p => p.reason));
+    toast('部分面板加载失败', bad.map(p => String(p.reason)).join('；'), 'error');
+  }
+
   refreshState();
-  setInterval(refreshState, 1500);
   clashCheck();   // 进界面就跑一次共存检测（失败不影响其他）
 }
 

@@ -1,11 +1,11 @@
 ---
 version: 2.0
-name: netproxy-design
-description: netproxy 内网隧道代理的设计系统。明暗两套:浅色=中性(白底+深蓝主色#1e3a8a,产品感高对比),深色=暖黑画布+提亮蓝主色。载体是 Wails v2 + WebView2 + 手写 HTML/CSS/JS,故圆角/阴影/字体栈/动画全部原生支持。token 与 frontend/style.css 保持同步,style.css 是唯一事实来源,本文件为阅读型规范。
+name: NetHub-design
+description: NetHub 内网隧道代理的设计系统。明暗两套:浅色=中性(白底+深蓝主色#1e3a8a,产品感高对比),深色=暖黑画布+提亮蓝主色。载体是 Wails v2 + WebView2 + 手写 HTML/CSS/JS,故圆角/阴影/字体栈/动画全部原生支持。token 与 frontend/style.css 保持同步,style.css 是唯一事实来源,本文件为阅读型规范。
 source: v1.1 移植自 另一个内部项目的 DESIGN.md；v2.0 随界面栈换成 Web 而重写载体章节
 ---
 
-# netproxy — 设计系统
+# NetHub — 设计系统
 
 工具型桌面应用（替代 Proxifier + 两个 gost .bat），面向开发者/运维。设计目标：**信息密度优先、状态一眼可辨、长时间盯着不累**。不是营销页，不模仿任何外部品牌。
 
@@ -141,7 +141,7 @@ source: v1.1 移植自 另一个内部项目的 DESIGN.md；v2.0 随界面栈换
 Win10 的原生标题栏本身就很"工程软件"，所以窗口设为 `Frameless`，标题栏自己画：
 
 - 高 `36px`，底 `--canvas-soft`，下边框 `--hairline`
-- 左侧：蓝渐变方块 logo（14px，圆角 4）+ `netproxy`（700）+ 灰色副标题 + 可选的「管理员」pill
+- 左侧：蓝渐变方块 logo（14px，圆角 4）+ `NetHub`（700）+ 灰色副标题 + 可选的「管理员」pill
 - 右侧：最小化 / 最大化 / 关闭 三个方形按钮，宽 `44px`，hover 变 `--card-strong`
 - 关闭按钮 hover 变 `--error` 底 + 白字；**它的行为是最小化到托盘，不是退出**（提示文案写明）
 - 拖动靠 Wails 的 `-webkit-app-region: drag`
@@ -242,7 +242,7 @@ Win10 的原生标题栏本身就很"工程软件"，所以窗口设为 `Framele
 
 **构建必须带 `production` 标签**：
 ```bash
-go build -tags production -ldflags "-H=windowsgui -s -w" -o netproxy.exe .
+go build -tags production -ldflags "-H=windowsgui -s -w" -o nethub.exe .
 ```
 不带标签时 Wails 会在启动时弹一个 "Wails applications will not build without the correct build tags" 的错误框。
 
@@ -258,8 +258,29 @@ go build -tags production -ldflags "-H=windowsgui -s -w" -o netproxy.exe .
 不用 systray 那类库——它们会起自己的消息泵，与 Wails 的 UI 线程互相干扰。
 通知走 `NIF_INFO` 气泡，Win10/11 会渲染成标准通知并进操作中心。
 
+**必须处理 `TaskbarCreated`**：Explorer（任务栏）重启时，**所有托盘图标都会被系统清空**，
+应用必须收到这条广播消息后重新 `NIM_ADD`，否则图标永久消失（直到进程重启）。
+消息号由 `RegisterWindowMessageW("TaskbarCreated")` 动态分配，**不能写死**。
+
+**退出时必须 `NIM_DELETE`**：`Backend.Quit` 走 `tray.Remove()`，另加 `OnShutdown` 兜底。
+否则图标变成孤儿 —— 会堆积在托盘的**折叠飞出面板**里，打开折叠面板看到一堆重复图标，
+鼠标划过去才被系统清理掉。
+（注意：进程被强杀 —— 任务管理器 / `Stop-Process -Force` —— 时来不及注销，**任何程序都会留孤儿**，
+这不是产品 bug。清掉历史孤儿的办法是重启 `explorer.exe`。）
+
 **点 X = 最小化到托盘**：靠 Wails 的 `OnBeforeClose` 返回 `true` 拦下关闭，然后 `WindowHide`。
 真退出走托盘菜单的「退出」（或 `Backend.Quit`）。
+
+**前端初始化不能一荣俱荣一损俱损**（踩过的坑）：`boot()` 里曾经是
+`await Promise.all([logs, chains, routes, settings])`，而某个面板抛异常（例如引用了已被删除的 DOM 元素）
+会让整个 `Promise.all` reject，后面的 `setInterval(refreshState, 1500)` **根本没注册上** ——
+结果就是状态条永久冻在启动前那一帧（显示“未启动”、relay 显示 `-`），
+而日志还在实时滚，看上去像“后端没上报状态”。现在改成：
+
+- **状态轮询先注册**，再跑各面板
+- 面板用 `Promise.allSettled`，失败只 toast 不阻断
+- `refreshState` 不再静默 `catch(_) { return }`，失败会提示一次（否则坏掉完全看不出来）
+- 取 DOM 一律走 `setChecked/setValue`（元素不存在就跳过）
 
 ---
 
@@ -271,4 +292,4 @@ go build -tags production -ldflags "-H=windowsgui -s -w" -o netproxy.exe .
 - **`dpr` 报告 1.25 但布局按 1:1 走**：WebView2 在 125% 缩放下报告 devicePixelRatio=1.25，
   实际 CSS 像素与物理像素近似 1:1，所以 1px 边框在物理上可能落在半个像素上（轻微发虚），不影响可用性
 - **前端无构建链**：手写 HTML/CSS/JS，没有 lint/类型检查；复杂度上来后考虑加一个极简构建步骤
-- **`netproxy.ico` 由 `tools_mkicon.go` 生成**，不是设计稿导出；要换正式图标改那个脚本
+- **`nethub.ico` 由 `tools_mkicon.go` 生成**，不是设计稿导出；要换正式图标改那个脚本

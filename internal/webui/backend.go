@@ -23,14 +23,14 @@ import (
 	wruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 	"golang.org/x/sys/windows"
 
-	"netproxy/internal/app"
-	"netproxy/internal/autostart"
-	"netproxy/internal/config"
-	"netproxy/internal/gostbat"
-	"netproxy/internal/hostsmgr"
-	"netproxy/internal/logbus"
-	"netproxy/internal/upstream"
-	"netproxy/internal/winrun"
+	"nethub/internal/app"
+	"nethub/internal/autostart"
+	"nethub/internal/config"
+	"nethub/internal/gostbat"
+	"nethub/internal/hostsmgr"
+	"nethub/internal/logbus"
+	"nethub/internal/upstream"
+	"nethub/internal/winrun"
 )
 
 // Backend 是绑定给前端的对象。
@@ -90,6 +90,18 @@ func (b *Backend) OnDomReady(ctx context.Context) {
 	b.a.Bus.Info("界面已就绪")
 }
 
+// OnShutdown Wails 退出回调：兜底注销托盘图标。
+//
+// 正常退出（托盘菜单 → 退出）走 Quit()，那里已经 Remove 过了；
+// 但窗口被强制关闭、或者别的退出路径不能让图标变成孤儿 ——
+// 孤儿图标会堆在托盘折叠面板里，显得像“注册了一堆图标”。
+func (b *Backend) OnShutdown(ctx context.Context) {
+	if b.tray != nil {
+		b.tray.Remove()
+		b.tray = nil
+	}
+}
+
 // OnBeforeClose 点 X → 收进托盘继续跑，返回 true 阻止关闭。
 func (b *Backend) OnBeforeClose(ctx context.Context) bool {
 	if b.quitting {
@@ -97,7 +109,7 @@ func (b *Backend) OnBeforeClose(ctx context.Context) bool {
 	}
 	wruntime.WindowHide(ctx)
 	if b.tray != nil {
-		b.tray.Balloon("netproxy 仍在运行", "已最小化到托盘，双击托盘图标恢复窗口", app.NotifyInfo)
+		b.tray.Balloon("NetHub 仍在运行", "已最小化到托盘，双击托盘图标恢复窗口", app.NotifyInfo)
 	}
 	return true
 }
@@ -112,9 +124,9 @@ func (b *Backend) emit(name string, data any) {
 // ───────────────────────── 视图类型（与前端 JSON 对齐）─────────────────────────
 
 type StateView struct {
-	Running     bool   `json:"running"`
-	Relay       string `json:"relay"`
-	GostPIDs    string `json:"gostPids"`
+	Running bool   `json:"running"`
+	Relay   string `json:"relay"`
+	// GostPIDs 已移除：上游为原生实现，不再有子进程。
 	TotalConns  uint64 `json:"totalConns"`
 	ActiveConns int    `json:"activeConns"`
 	ConfigPath  string `json:"configPath"`
@@ -153,7 +165,8 @@ type NotifyView struct {
 }
 
 type SettingsView struct {
-	Relay        string   `json:"relay"`
+	// 注意：没有 relay 字段 —— relay 是内部实现细节（127.0.0.1:0 自动分配端口），
+	// 不暴露到界面。前端不再传它，SaveSettings 也就不再覆写它。
 	HostsManage  bool     `json:"hostsManage"`
 	HostsEntries []string `json:"hostsEntries"`
 	Theme        string   `json:"theme"`
@@ -195,12 +208,10 @@ func logView(l logbus.Line) LogView {
 func (b *Backend) GetState() StateView {
 	total, active := b.a.Engine.Stats()
 	relay := b.a.Engine.RelayAddr()
-	pids := "-" // 上游为原生实现，不再有子进程
 	_, hostsInFile, _, _ := hostsmgr.Read()
 	return StateView{
 		Running:     b.a.Running(),
 		Relay:       relay,
-		GostPIDs:    pids,
 		TotalConns:  total,
 		ActiveConns: active,
 		ConfigPath:  b.a.Cfg.Path(),
@@ -280,7 +291,6 @@ func (b *Backend) GetSettings() SettingsView {
 		entries = defaultHostsEntries()
 	}
 	return SettingsView{
-		Relay:        b.a.Cfg.Relay,
 		HostsManage:  b.a.Cfg.Hosts.Manage,
 		HostsEntries: entries,
 		Theme:        b.a.Cfg.UI.Theme,
@@ -459,7 +469,8 @@ func (b *Backend) ImportBatDir() (*ImportResult, error) {
 
 func (b *Backend) SaveSettings(s SettingsView) error {
 	cfg := b.a.Cfg
-	cfg.Relay = strings.TrimSpace(s.Relay)
+	// 不动 cfg.Relay：界面上没有这个字段，前端不会传。
+	// （之前这里写 cfg.Relay = s.Relay，前端不传时会被清成空串，直接校验失败）
 	cfg.Hosts.Manage = s.HostsManage
 	if len(s.HostsEntries) > 0 {
 		cfg.Hosts.Entries = s.HostsEntries
@@ -467,7 +478,7 @@ func (b *Backend) SaveSettings(s SettingsView) error {
 	if err := b.a.SaveConfig(); err != nil {
 		return err
 	}
-	b.a.Bus.Info("设置已保存（relay=%s，hosts 托管=%v）", cfg.Relay, cfg.Hosts.Manage)
+	b.a.Bus.Info("设置已保存（hosts 托管=%v）", cfg.Hosts.Manage)
 	return nil
 }
 
@@ -711,10 +722,10 @@ func ShowMainWindow(b *Backend) {
 //   - 界面上的按钮要有明确提示
 //   - 日志里不打印导出内容，只打印路径
 func (b *Backend) ExportConfig() (string, error) {
-	name := "netproxy-config.yaml"
+	name := "nethub-config.yaml"
 	if p := b.a.Cfg.Path(); p != "" {
 		dir := dirOf(p)
-		name = filepath.Join(dir, "netproxy-config.yaml")
+		name = filepath.Join(dir, "nethub-config.yaml")
 	}
 	path, err := wruntime.SaveFileDialog(b.ctx, wruntime.SaveDialogOptions{
 		Title:           "导出设置（含上游凭据，请通过安全渠道分发）",
@@ -743,7 +754,7 @@ func (b *Backend) ExportConfig() (string, error) {
 // ExportSummary 导出一份**不含凭据**的纯文本说明：上游（遮蔽后）+ 规则 + 用法。
 // 适合贴在群里让人先看懂配置，需要真配置时再单独发 ExportConfig 的产物。
 func (b *Backend) ExportSummary() (string, error) {
-	name := "netproxy-配置说明.txt"
+	name := "nethub-配置说明.txt"
 	path, err := wruntime.SaveFileDialog(b.ctx, wruntime.SaveDialogOptions{
 		Title:           "导出配置说明（不含凭据）",
 		DefaultFilename: name,
@@ -762,7 +773,7 @@ func (b *Backend) ExportSummary() (string, error) {
 	}
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "netproxy 配置说明（不含凭据）\n")
+	fmt.Fprintf(&sb, "NetHub 配置说明（不含凭据）\n")
 	fmt.Fprintf(&sb, "生成时间：%s\n\n", time.Now().Format("2006-01-02 15:04:05"))
 
 	sb.WriteString("【链路 / 上游】\n")
@@ -784,9 +795,9 @@ func (b *Backend) ExportSummary() (string, error) {
 	fmt.Fprintf(&sb, "  界面主题：%s\n", b.a.Cfg.UI.Theme)
 
 	sb.WriteString("\n【同事怎么用】\n")
-	sb.WriteString("  1. 把 netproxy.exe、WinDivert.dll、WinDivert64.sys、netproxy.ico 和 config.yaml\n")
+	sb.WriteString("  1. 把 nethub.exe、WinDivert.dll、WinDivert64.sys、nethub.ico 和 config.yaml\n")
 	sb.WriteString("     放在同一个文件夹里\n")
-	sb.WriteString("  2. 双击 netproxy.exe（会弹一次 UAC，因为要加载内核驱动）\n")
+	sb.WriteString("  2. 双击 nethub.exe（会弹一次 UAC，因为要加载内核驱动）\n")
 	sb.WriteString("  3. 界面会显示「内网 N/N 全部走直连 …… 走向正确」就说明好了\n")
 	sb.WriteString("  4. 如需开机自启：界面「设置 → 开机自启」勾上（计划任务 + 最高权限，不弹 UAC）\n")
 	sb.WriteString("\n【注意】\n")

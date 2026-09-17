@@ -15,8 +15,8 @@ package engine
 
 import (
 	"fmt"
-	"netproxy/internal/winrun"
 	"net"
+	"nethub/internal/winrun"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,10 +25,10 @@ import (
 
 	"github.com/imgk/divert-go"
 
-	"netproxy/internal/config"
-	"netproxy/internal/logbus"
-	"netproxy/internal/rules"
-	"netproxy/internal/upstream"
+	"nethub/internal/config"
+	"nethub/internal/logbus"
+	"nethub/internal/rules"
+	"nethub/internal/upstream"
 )
 
 const (
@@ -425,47 +425,86 @@ func buildFilter(rs []rules.Range, relayPort uint16) string {
 
 // openDivert 打开 WinDivert；首次安装驱动会失败一次（服务被创建但启动失败，
 // 报 ERROR_NO_SYSTEM_RESOURCES），所以这里带重试 + 主动拉起服务。
-// ensureDriverPath：WinDivert 的驱动服务一旦注册，就固定指向某个目录下的 .sys。
-// 整个文件夹被挪走/改名后，服务里的旧路径失效，Open 会一直失败且报错很难懂。
-// 检测到路径和当前目录不符就先删掉服务，交给 WinDivert 按当前目录自己重装。
-func ensureDriverPath(bus *logbus.Bus) {
+// driverPathMatches 看驱动服务登记的 .sys 是不是就在当前目录旁边。
+// 返回 (路径相符/无法判断, 当前登记的路径)。
+func driverPathMatches() (bool, string) {
 	exe, err := os.Executable()
 	if err != nil {
-		return
+		return true, "" // 判断不了就不要动它
 	}
 	want := filepath.Join(filepath.Dir(exe), "WinDivert64.sys")
 
 	out, err := winrun.Command("sc", "qc", "WinDivert").CombinedOutput()
 	if err != nil {
-		return // 服务不存在，WinDivert 会自己装
+		return true, "" // 服务不存在，WinDivert 会自己装
 	}
 	i := strings.Index(string(out), "BINARY_PATH_NAME")
 	if i < 0 {
-		return
+		return true, ""
 	}
 	line := string(out)[i:]
 	if j := strings.IndexAny(line, "\r\n"); j >= 0 {
 		line = line[:j]
 	}
 	if !strings.Contains(line, ".sys") {
-		return // 解析不出路径就别乱动
+		return true, "" // 解析不出路径就别乱动
 	}
 	cur := strings.TrimSpace(line[strings.Index(line, ":")+1:])
 	cur = strings.TrimSpace(strings.TrimPrefix(cur, `\??\`))
-	if strings.EqualFold(cur, want) {
-		return
-	}
+	return strings.EqualFold(cur, want), cur
+}
 
-	bus.Warn("驱动服务指向旧路径（%s），按当前目录 %s 重建", cur, want)
+// serviceState 查服务状态（STOPPED / RUNNING / 不存在）。
+func serviceState(name string) string {
+	out, err := winrun.Command("sc", "query", name).CombinedOutput()
+	if err != nil {
+		return "MISSING"
+	}
+	s := string(out)
+	for _, st := range []string{"RUNNING", "STOPPED", "START_PENDING", "STOP_PENDING"} {
+		if strings.Contains(s, st) {
+			return st
+		}
+	}
+	return "UNKNOWN"
+}
+
+// rebuildDriverService 把驱动服务重建到当前目录。
+//
+// **关键（这是踩过的坑）**：不能“停一下马上就删”。驱动还挂在内核里的时候强行删服务，
+// 会留下残留状态，之后加载会一直报 1450（Insufficient system resources）——
+// 而且这个错误会把人往“杀毒软件拦截”上带，很难查。
+// 所以：先 stop，**轮询等它真的 STOPPED**，再 delete，**再等它真的消失**。
+func rebuildDriverService(bus *logbus.Bus, oldPath string) {
+	exe, _ := os.Executable()
+	want := filepath.Join(filepath.Dir(exe), "WinDivert64.sys")
+	bus.Warn("驱动服务指向旧路径（%s），重建为 %s", oldPath, want)
+
 	_ = winrun.Command("sc", "stop", "WinDivert").Run()
-	time.Sleep(600 * time.Millisecond)
+	if !waitFor(func() bool { return serviceState("WinDivert") != "RUNNING" }, 15*time.Second) {
+		bus.Warn("驱动服务 15 秒内没停下来，仍继续尝试重建")
+	}
 	_ = winrun.Command("sc", "delete", "WinDivert").Run()
-	time.Sleep(600 * time.Millisecond)
+	if !waitFor(func() bool { return serviceState("WinDivert") == "MISSING" }, 15*time.Second) {
+		bus.Warn("驱动服务 15 秒内没删除干净（可能还有句柄），继续尝试")
+	}
+}
+
+func waitFor(cond func() bool, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return true
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	return false
 }
 
 func openDivert(bus *logbus.Bus, filter string) (*divert.Handle, error) {
-	ensureDriverPath(bus)
 	var lastErr error
+	// 先直接试。【不要】一上来就动驱动服务 —— 服务重建本身有风险，
+	// 而且如果服务路径只是“看起来旧”但驱动已经加载着，它其实能用。
 	for attempt := 1; attempt <= 6; attempt++ {
 		h, err := divert.Open(filter, divert.LayerNetwork, divert.PriorityDefault, divert.FlagDefault)
 		if err == nil {
@@ -475,6 +514,13 @@ func openDivert(bus *logbus.Bus, filter string) (*divert.Handle, error) {
 			return h, nil
 		}
 		lastErr = err
+
+		// 失败时区分两种情况：只在“路径确实不符”时重建服务，否则只是把服务启起来
+		if ok, cur := driverPathMatches(); !ok && attempt == 1 {
+			rebuildDriverService(bus, cur)
+			continue
+		}
+
 		bus.Warn("WinDivert 打开失败(第 %d/6 次): %v", attempt, err)
 		out, serr := winrun.Command("sc", "start", "WinDivert").CombinedOutput()
 		if serr != nil {
@@ -484,7 +530,16 @@ func openDivert(bus *logbus.Bus, filter string) (*divert.Handle, error) {
 		}
 		time.Sleep(time.Duration(attempt) * 700 * time.Millisecond)
 	}
-	return nil, fmt.Errorf("重试 6 次仍失败（驱动被安全软件拦截？或需要管理员权限）: %w", lastErr)
+
+	// 报错要能指向正确方向：1450 在内存池健康时通常不是“真的缺资源”，
+	// 而是残留状态或安全软件拦截，别让人去查内存。
+	hint := ""
+	if strings.Contains(lastErr.Error(), "resources") {
+		hint = "\n  提示：内存池健康时出现这个错误，通常不是真的缺资源，而是：\n" +
+			"    ① 反复加载/卸载驱动留下的残留状态 → 重启系统即可恢复\n" +
+			"    ② 安全软件（火绒/360 等）拦截了驱动加载 → 检查其拦截记录，把 nethub.exe 与 WinDivert 加入信任"
+	}
+	return nil, fmt.Errorf("重试 6 次仍失败: %w%s", lastErr, hint)
 }
 
 func parseIPv4(p []byte) (src, dst net.IP, ihl int, proto uint8, ok bool) {

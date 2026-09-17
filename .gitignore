@@ -16,3 +16,12 @@ config.yaml.*
 
 # Clash 绕过列表的实验备份（一次性）
 .proxyoverride.bak
+
+# install-task.ps1 生成的计划任务定义
+NetHub-task.xml
+
+# logo 源图（图标由 tools_mkicon.go 从它生成，要入库）
+!assets/logo.png
+
+# make-dist.ps1 的产物（二进制，含凭据，不入库）
+dist/

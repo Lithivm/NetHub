@@ -1,6 +1,6 @@
 ﻿# 最终验收：连通性 + 真实数据 + 公网对照 + gost 崩溃自愈（提权运行）
 $ErrorActionPreference = 'Continue'
-$root = 'C:\Users\Administrator\Desktop\netproxy'
+$root = 'C:\Users\Administrator\Desktop\NetHub'
 $log  = Join-Path $root 'final-accept.log'
 Remove-Item $log -ErrorAction SilentlyContinue
 function Say($m) { $m | Out-File -FilePath $log -Append -Encoding utf8 }
@@ -16,7 +16,7 @@ function Probe($ip, $port, $ms = 6000) {
 Say "=== 最终验收 $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ==="
 
 Say "`n[1] 进程与监听"
-Get-Process netproxy -EA SilentlyContinue | ForEach-Object { Say "  netproxy PID=$($_.Id)  窗口='$($_.MainWindowTitle)'  启动于 $($_.StartTime.ToString('HH:mm:ss'))" }
+Get-Process nethub -EA SilentlyContinue | ForEach-Object { Say "  nethub PID=$($_.Id)  窗口='$($_.MainWindowTitle)'  启动于 $($_.StartTime.ToString('HH:mm:ss'))" }
 $g = Get-Process gost -EA SilentlyContinue
 Say "  gost 子进程数 = $(@($g).Count)  PID=$(($g | ForEach-Object { $_.Id }) -join ',')"
 netstat -ano | Select-String ':1080\s|:1081\s' | Where-Object { $_ -match 'LISTENING' } | ForEach-Object { Say ("  " + $_.Line.Trim()) }
@@ -98,6 +98,6 @@ Say "  Run 键 Proxifier: $(if ((Get-ItemProperty 'HKCU:\Software\Microsoft\Wind
 Say "  旧 bat 已停用: $(Test-Path 'C:\Users\Administrator\Desktop\gost\gost-proxy-a.bat.disabled') / $(Test-Path 'C:\Users\Administrator\Desktop\gost\gost-proxy-b.bat.disabled')"
 
 Say "`n[8] 日志尾部"
-$f = Join-Path $root 'netproxy.log'
+$f = Join-Path $root 'nethub.log'
 if (Test-Path $f) { Get-Content $f -Encoding UTF8 | Select-Object -Last 12 | ForEach-Object { Say "  $_" } }
 Say "=== done ==="

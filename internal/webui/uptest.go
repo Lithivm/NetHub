@@ -1,4 +1,4 @@
-// 原生上游链路的实测入口：netproxy.exe -test-upstream
+// 原生上游链路的实测入口：nethub.exe -test-upstream
 //
 // 这是"能不能不依赖 gost.exe"的实验装置：它绕过本地 gost 监听，
 // 直接用 internal/upstream 连真实上游，再对每个链对应的内网目标发一个 HTTP 请求。
@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"netproxy/internal/config"
-	"netproxy/internal/hostsmgr"
-	"netproxy/internal/upstream"
+	"nethub/internal/config"
+	"nethub/internal/hostsmgr"
+	"nethub/internal/upstream"
 )
 
 // TestUpstream 对每条链的原生上游做一次真实探测。不需要管理员权限。

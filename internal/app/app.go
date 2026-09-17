@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"sync"
 
-	"netproxy/internal/config"
-	"netproxy/internal/engine"
-	"netproxy/internal/hostsmgr"
-	"netproxy/internal/logbus"
-	"netproxy/internal/rules"
+	"nethub/internal/config"
+	"nethub/internal/engine"
+	"nethub/internal/hostsmgr"
+	"nethub/internal/logbus"
+	"nethub/internal/rules"
 )
 
 // NotifyKind 通知级别，对应托盘气泡图标。
@@ -114,7 +114,7 @@ func (a *App) Start() error {
 	total := len(a.Rules.List())
 	text := fmt.Sprintf("已接管 %d 条规则，relay %s", total, a.Engine.RelayAddr())
 	a.Bus.Info("✓ 服务已就绪：%s", text)
-	a.notify("netproxy 已启动", text, NotifyInfo)
+	a.notify("NetHub 已启动", text, NotifyInfo)
 	return nil
 }
 
@@ -130,7 +130,7 @@ func (a *App) Stop() {
 	a.Bus.Info("正在停止…")
 	a.Engine.Stop()
 	a.Bus.Info("✓ 已停止")
-	a.notify("netproxy 已停止", "拦截与隧道均已关闭", NotifyWarn)
+	a.notify("NetHub 已停止", "拦截与隧道均已关闭", NotifyWarn)
 }
 
 // Restart 重启（改完配置后调用）。

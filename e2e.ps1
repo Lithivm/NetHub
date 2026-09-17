@@ -1,15 +1,15 @@
-﻿# netproxy 端到端验收（提权运行）
+﻿# NetHub 端到端验收（提权运行）
 #   1) 清掉旧 bat 起的 gost
-#   2) 无界面启动 netproxy
+#   2) 无界面启动 NetHub
 #   3) 内网目标连通性 + 真实数据穿透（MySQL 握手包 / 内部 API HTTP）
-#   4) 强杀 netproxy，验证 gost 子进程不残留（Job Object 生效）
+#   4) 强杀 NetHub，验证 gost 子进程不残留（Job Object 生效）
 $ErrorActionPreference = 'Continue'
-$root = 'C:\Users\Administrator\Desktop\netproxy'
+$root = 'C:\Users\Administrator\Desktop\NetHub'
 $log  = Join-Path $root 'e2e.log'
 Remove-Item $log -ErrorAction SilentlyContinue
 function Say($m) { $m | Out-File -FilePath $log -Append -Encoding utf8 }
 
-Say "=== netproxy 端到端验收  $(Get-Date -Format 'HH:mm:ss') ==="
+Say "=== NetHub 端到端验收  $(Get-Date -Format 'HH:mm:ss') ==="
 Say ("管理员: " + (New-Object Security.Principal.WindowsPrincipal(
     [Security.Principal.WindowsIdentity]::GetCurrent())
 ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))
@@ -33,9 +33,9 @@ Get-Process gost -ErrorAction SilentlyContinue | ForEach-Object {
 }
 Start-Sleep -Seconds 2
 
-Say "`n--- 2) 启动 netproxy -headless ---"
-Remove-Item (Join-Path $root 'netproxy.log') -ErrorAction SilentlyContinue
-$p = Start-Process -FilePath (Join-Path $root 'netproxy.exe') -ArgumentList '-headless' `
+Say "`n--- 2) 启动 NetHub -headless ---"
+Remove-Item (Join-Path $root 'nethub.log') -ErrorAction SilentlyContinue
+$p = Start-Process -FilePath (Join-Path $root 'nethub.exe') -ArgumentList '-headless' `
     -PassThru -WindowStyle Hidden
 Say "  PID=$($p.Id)"
 
@@ -44,7 +44,7 @@ $ready = $false
 for ($i = 1; $i -le 25; $i++) {
     Start-Sleep -Seconds 1
     if ($p.HasExited) { Say "  !! 进程退出 exitCode=$($p.ExitCode)"; break }
-    $f = Join-Path $root 'netproxy.log'
+    $f = Join-Path $root 'nethub.log'
     if ((Test-Path $f) -and (Get-Content $f -Raw -Encoding UTF8 -ErrorAction SilentlyContinue) -match '服务已就绪') {
         Say "  ✓ 就绪（耗时约 ${i}s）"; $ready = $true; break
     }
@@ -86,7 +86,7 @@ Say "`n--- 3d) 对照组：公网应保持直连（不经我们）---"
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'porttest-internet.ps1') |
     ForEach-Object { Say "  $_" }
 
-Say "`n--- 4) 强杀 netproxy，验证子进程回收 ---"
+Say "`n--- 4) 强杀 NetHub，验证子进程回收 ---"
 if (-not $p.HasExited) { $p | Stop-Process -Force }
 Start-Sleep -Seconds 3
 $left = Get-Process gost -ErrorAction SilentlyContinue
@@ -97,8 +97,8 @@ if ($left) {
 }
 Say ("  relay 端口是否释放: " + $(if ((netstat -ano | Select-String ':1080 .*LISTENING')) { '1080 仍在监听!' } else { '1080 已释放' }))
 
-Say "`n--- netproxy.log 尾部 ---"
-$f = Join-Path $root 'netproxy.log'
+Say "`n--- nethub.log 尾部 ---"
+$f = Join-Path $root 'nethub.log'
 if (Test-Path $f) {
     Get-Content $f -Encoding UTF8 -Tail 45 | ForEach-Object { Say "  $_" }
 } else { Say "  (无日志文件)" }

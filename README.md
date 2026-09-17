@@ -1,4 +1,4 @@
-# netproxy —— 内网隧道透明代理
+# NetHub —— 内网隧道透明代理
 
 替代 **Proxifier + 两个 gost .bat**：一个进程管链路、一个驱动管拦截、一个界面管规则。
 
@@ -13,18 +13,50 @@
 
 ---
 
+> ## ⚠️ 首次使用前必做：让安全软件放行驱动
+>
+> NetHub 要在内核层拦截 TCP，需要加载 `WinDivert64.sys`。**火绒（以及 360、腾讯管家等）默认会拦截这个驱动加载**，表现是日志里连续报：
+>
+> ```
+> WinDivert 打开失败(第 N/6 次): Insufficient system resources exist to complete the requested service.
+> ```
+>
+> 即 **1450**。**这个错误码会骗人** —— 它写着“资源不足”，但内存池其实是健康的，真实含义是“驱动加载被挡了”。
+>
+> **两步都要做，缺一不可：**
+>
+> 1. **火绒 → 主界面「安全日志」→ 找到 `WinDivert64.sys` 的「已阻止」记录 → 右键 → 信任**。
+>    更保险的是在火绒「信任区」里**同时**加入 `nethub.exe` 和 `WinDivert64.sys`。
+> 2. **重启火绒**（或退出后重新打开）。← **这一步最容易漏，但必须做**
+>
+> **为什么第 2 步不能省（实测踩了很久）：** 火绒的白名单是**启动时读进内存的**。
+> 加完白名单**不重启火绒就不生效**，重试依然报 1450。我们一度以为是驱动本身的兼容性问题，
+> 甚至差点因此改架构 —— 所以特意写在这里。
+>
+> **验证放行成功：** 日志里**没有** `打开失败(第 N/6 次)` 这种重试行，直接从
+> `内核过滤器: (...)` 走到 `引擎已接管`。
+>
+> 注：火绒的「文件白名单 / 信任区」和「HIPS 驱动加载规则」是**两套独立的表**。
+> 只在文件白名单里加文件、不在拦截记录上点信任，可能不生效。
+
+---
+
 ## 1. 目录里哪些文件是必须的
 
 | 文件 | 必须 | 说明 |
 |---|---|---|
-| `netproxy.exe` | ✅ | 主程序（约 12.6 MB，前端已内嵌） |
+| `nethub.exe` | ✅ | 主程序（约 12.6 MB，前端已内嵌） |
 | `config.yaml` | ✅ | 配置（**含上游凭据，不要外传/入库**） |
 | `WinDivert.dll` | ✅ | WinDivert 运行库 |
 | `WinDivert64.sys` | ✅ | WinDivert 内核驱动 |
-| `netproxy.ico` | ⚠️ | 托盘图标；缺了就用系统默认图标 |
-| `netproxy.log` | ❌ | 运行日志，自动生成，可随时删 |
+| `nethub.ico` | ⚠️ | 托盘图标；缺了就用系统默认图标 |
+| `assets/logo.png` | ─ | **logo 源图**（仅构建时用；`tools_mkicon.go` 从它生成 ico） |
+| `nethub.syso` | ─ | **exe 图标资源**（构建时必需，否则 exe 没图标；已入库） |
+| `nethub.log` | ❌ | 运行日志，自动生成，可随时删 |
+| `nethub-256.png` | ❌ | 图标预览图，由 `tools_mkicon.go` 顺带生成 |
 | `gost.exe` / `gost-*.bat` | ❌ | **不再需要**（导入完配置就可以删） |
-| `*.ps1` / `*.log` | ❌ | 测试脚本和历史输出，可删 |
+| `dist/` | ❌ | `make-dist.ps1` 的产物（分发用），不进 git |
+| `*.ps1` / `*.log` | ❌ | 测试脚本和历史输出，可删（`install-task.ps1` / `make-dist.ps1` / `make-shortcut.ps1` 要留） |
 
 > **整个文件夹可以随便挪位置、改名。** 程序启动时会检查驱动服务里登记的 `.sys` 路径，
 > 发现是旧路径会自动重建服务。
@@ -34,9 +66,9 @@
 ## 2. 日常使用
 
 ### 启动
-- **开机自动启动**：已注册计划任务 `netproxy`（登录后延迟 20 秒启动）。
+- **开机自动启动**：已注册计划任务 `NetHub`（登录后延迟 20 秒启动）。
   用「计划任务 + 最高权限」而不是注册表 Run 键，是为了**静默拿到管理员权限、不弹 UAC**。
-- **手动启动**：双击 `netproxy.exe`（会弹一次 UAC，因为要装/加载内核驱动）。
+- **手动启动**：双击 `nethub.exe`（会弹一次 UAC，因为要装/加载内核驱动）。
 - 程序起来后会**自动拉起服务**，不需要再点一次。
 
 ### 界面
@@ -116,10 +148,11 @@ ui:
 
 | 症状 | 先看什么 |
 |---|---|
+| **驱动加载失败（报 1450）** | **先看本文档开头的「首次使用前必做：让安全软件放行驱动」** —— 绝大多数就是火绒拦了驱动，或者白名单加了但**没重启火绒** |
 | 内网连不上 | 界面「运行日志」。正常应看到 `内核过滤器: (...)` 和 `引擎已接管` |
 | 程序起来了但没拦到 | 是不是没管理员权限（日志会有 `当前不是管理员权限` 警告） |
-| 驱动加载失败 | 日志会有 `打开失败(第 N/6 次)`。自动重试 + `sc start WinDivert` 兜底 |
-| 想单独验证链路 | 界面「链路自检」：它绕过内核拦截，直接走原生上游发一个真实请求；或 `netproxy.exe -test-upstream` |
+| 反复加载/卸载驱动后 1450 一直不恢复 | 驱动残留状态。**重启系统**即可（重启后若又报 1450，回到第一行查火绒） |
+| 想单独验证链路 | 界面「链路自检」：它绕过内核拦截，直接走原生上游发一个真实请求；或 `nethub.exe -test-upstream` |
 | 有一堆窗口在闪 | 不该发生。若出现，说明某处 `exec` 漏了 `internal/winrun`（见 DESIGN.md） |
 
 命令行自检：
@@ -135,7 +168,7 @@ powershell -ExecutionPolicy Bypass -File final-accept.ps1        # 端到端全�
 ## 5. 卸载 / 回退
 
 ```powershell
-netproxy.exe -no-autostart   # 移除开机自启
+nethub.exe -no-autostart   # 移除开机自启
 # 退出程序后整个文件夹删掉即可
 # 驱动残留（可选，需要管理员）：
 sc stop WinDivert
@@ -144,7 +177,7 @@ sc delete WinDivert
 
 **退回 Proxifier**：安装包在 `C:\Users\Administrator\Desktop\gost\新建文件夹\ProxifierSetup.exe`。
 旧脚本改名保留了：`gost-proxy-a.bat.disabled` / `gost-proxy-b.bat.disabled`（改回 `.bat` 即可用）。
-退回前记得先 `netproxy.exe -no-autostart` 并退出，否则两边会抢驱动层拦截。
+退回前记得先 `nethub.exe -no-autostart` 并退出，否则两边会抢驱动层拦截。
 
 > 退回 Proxifier 后需要自己跑 gost。原来那两个 `.bat` 里的 `-L` 监听地址是 `127.0.0.1:1080/1081`，
 > 而本程序现在**不需要也不使用**这两个端口（上游是原生直连的），所以两边不会抢端口。
@@ -153,7 +186,7 @@ sc delete WinDivert
 
 ## 6. 与 Clash 共存（实测结论）
 
-netproxy 不改变系统代理设置，也不动路由表，所以**在“谁写什么”这个层面上不会和 Clash 打架**。
+NetHub 不改变系统代理设置，也不动路由表，所以**在“谁写什么”这个层面上不会和 Clash 打架**。
 真正的冲突点只有一个：**谁负责把内网域名解析成内网 IP**。
 
 ### 先把分层说清楚
@@ -251,9 +284,9 @@ powershell -ExecutionPolicy Bypass -File clash-check.ps1
 export PATH="/c/Users/Administrator/go-sdk/go/bin:$PATH"
 export GOPROXY="https://goproxy.cn,direct"
 export GOSUMDB=off
-cd /c/Users/Administrator/Desktop/netproxy
+cd /c/Users/Administrator/Desktop/NetHub
 go mod tidy
-go build -tags production -ldflags "-H=windowsgui -s -w" -o netproxy.exe .
+go build -tags production -ldflags "-H=windowsgui -s -w" -o nethub.exe .
 ```
 
 **`-tags production` 是必需的** —— 不带它 Wails 会在启动时弹
@@ -265,18 +298,48 @@ bindings 由 Wails 在运行时从 `options.Bind` 自动生成。
 
 命令行参数：
 ```
-netproxy.exe                     # 正常：带界面
-netproxy.exe -headless           # 无界面，只跑引擎（自动化测试用）
-netproxy.exe -config D:\x.yaml   # 指定配置文件
-netproxy.exe -import-bats "C:\Users\Administrator\Desktop\gost"  # 从旧 gost .bat 导入链路（只取 -F），然后退出
-netproxy.exe -test-upstream      # 实测原生上游链路（真发 HTTP 请求），不需管理员
-netproxy.exe -clash-check        # 与 Clash 的共存检测，不需管理员
-netproxy.exe -autostart          # 装开机自启（计划任务），然后退出
-netproxy.exe -no-autostart       # 移除开机自启，然后退出
-netproxy.exe -no-elevate         # 不自动提权（调试）
+nethub.exe                     # 正常：带界面
+nethub.exe -headless           # 无界面，只跑引擎（自动化测试用）
+nethub.exe -config D:\x.yaml   # 指定配置文件
+nethub.exe -import-bats "C:\Users\Administrator\Desktop\gost"  # 从旧 gost .bat 导入链路（只取 -F），然后退出
+nethub.exe -test-upstream      # 实测原生上游链路（真发 HTTP 请求），不需管理员
+nethub.exe -clash-check        # 与 Clash 的共存检测，不需管理员
+nethub.exe -autostart          # 装开机自启（计划任务），然后退出
+nethub.exe -no-autostart       # 移除开机自启，然后退出
+nethub.exe -no-elevate         # 不自动提权（调试）
 ```
 
-重新生成托盘图标：`go run tools_mkicon.go netproxy.ico`
+重新生成图标（改了 logo 就重跑这两条）：
+
+```bash
+# 1) 从 logo 源图生成多尺寸 ico（Lanczos3 缩放 + 自动裁剪）
+go run tools_mkicon.go assets/logo.png nethub.ico
+# 2) 生成 exe 资源文件，把图标嵌进 exe（任务栏/Alt-Tab 用的是它）
+rsrc -ico nethub.ico -arch amd64 -o nethub.syso
+```
+
+`nethub.syso` 是 Go 链接器会自动拾取的资源文件（同目录下任何 `*.syso`），
+**生成一次后要留着** —— 没有它 exe 就没有图标资源，任务栏显示系统默认图标。
+`rsrc` 的安装：`go install github.com/akavel/rsrc@latest`。
+
+> 图标里 16/20/24/32/40/48/64 是 **DIB** 条目、128/256 是 **PNG** 条目。
+> 不能全用 PNG：Windows Shell 认 PNG 条目，但 **GDI+（`System.Drawing.Icon`）、
+> 部分老工具和安装程序读不了**，会渲染成彩色噪点。这是 Windows SDK 自己的做法。
+
+---
+
+## 7.1 打包与快捷方式
+
+```powershell
+powershell -ExecutionPolicy Bypass -File make-dist.ps1        # 打包 dist/（含编译）
+powershell -ExecutionPolicy Bypass -File make-shortcut.ps1    # 在桌面建快捷方式
+powershell -ExecutionPolicy Bypass -File install-task.ps1     # 注册开机自启（计划任务）
+```
+
+`dist/` 是“拿到就能跑”的集合（exe + ico + WinDivert + config + README + 使用说明），
+**含上游凭据，别往公开地方传**；它不进 git（`.gitignore` 已排除，里面是二进制产物）。
+
+三个脚本的路径都从**自身所在目录**推导，所以整个文件夹拷到任何地方都能用。
 
 ---
 
@@ -290,10 +353,15 @@ netproxy.exe -no-elevate         # 不自动提权（调试）
    否则 Windows 在环回口丢弃"非环回源地址"的包，劫持会静默失败。
 2. 注入时**必须保留** `addr.Flags` 的 Outbound 位，翻转它就失效。
 
-**首次加载驱动会失败一次**：报 `Insufficient system resources ... (1450)`，
-紧接着 `sc start WinDivert` 就成功。所以 `openDivert` 里是重试 6 次 + 兜底启动。
+**1450 不是“首次加载的正常现象”（早期本文档写错过）**：它写着“资源不足”，但内存池是健康的。
+真实原因只有两个：① 安全软件拦了驱动加载（见开头的「首次使用前必做」）② 反复加载/卸载留下的驱动残留状态（重启系统恢复）。
 
-**驱动路径会自愈**：`ensureDriverPath` 检查服务里登记的 `.sys` 是否在当前目录，不符就重建服务。
+因此 `openDivert` 的顺序是：**先直接 Open，成功了就绝不碰驱动服务**；
+失败才在路径确实不符时重建服务（`sc stop` → **轮询等它真的 STOPPED** → `sc delete` → **再等它真的消失**）。
+早期版本用固定 `Sleep(600ms)` 赌，会在驱动还挂在内核里时就删服务，留下残留状态，之后一律 1450 —— 这个 bug 已修。
+
+**驱动路径会自愈**：`driverPathMatches` 只在 **Open 失败之后**才去比对服务里登记的 `.sys` 是否在当前目录，
+不符才重建服务；不在启动路径上无脑动驱动服务。
 
 **上游是原生实现，不跑 gost**：`internal/upstream` 在 Go 里完成 TLS + RFC1929 SOCKS5 认证 + CONNECT。
 原来那条链是 `relay → 本地 gost(SOCKS5) → TLS → 上游`，现在直接 `relay → TLS → 上游`：

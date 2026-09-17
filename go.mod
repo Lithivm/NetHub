@@ -1,4 +1,4 @@
-module netproxy
+module nethub
 
 go 1.25.0
 

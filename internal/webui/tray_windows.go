@@ -15,7 +15,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
-	"netproxy/internal/app"
+	"nethub/internal/app"
 )
 
 const (
@@ -97,7 +97,16 @@ var (
 	pShellNotifyIconW   = shell32.NewProc("Shell_NotifyIconW")
 	pGetModuleHandleW   = kernel32.NewProc("GetModuleHandleW")
 	pGetCurrentThreadID = kernel32.NewProc("GetCurrentThreadId")
+
+	pRegisterWindowMessageW = user32.NewProc("RegisterWindowMessageW")
 )
+
+// wmTaskbarCreated：Explorer（任务栏）启动/重启时向所有顶层窗口广播的消息。
+//
+// 任务栏重启后，**所有托盘图标都会被清空**，应用必须收到这条消息后重新 NIM_ADD，
+// 否则图标就永久消失了（直到进程重启）。这是托盘应用的标准做法。
+// 消息号由 RegisterWindowMessage 动态分配，不能写死。
+var wmTaskbarCreated uint32
 
 type wndClassExW struct {
 	cbSize        uint32
@@ -150,7 +159,14 @@ func (t *Tray) run(iconPath string) {
 	defer runtime.UnlockOSThread()
 
 	hInst, _, _ := pGetModuleHandleW.Call(0)
-	className, _ := syscall.UTF16PtrFromString("netproxyTrayWnd")
+	className, _ := syscall.UTF16PtrFromString("nethubTrayWnd")
+
+	// 动态取 "TaskbarCreated" 的消息号（用于任务栏重启后重新注册图标）
+	if name, err := syscall.UTF16PtrFromString("TaskbarCreated"); err == nil {
+		if r, _, _ := pRegisterWindowMessageW.Call(uintptr(unsafe.Pointer(name))); r != 0 {
+			wmTaskbarCreated = uint32(r)
+		}
+	}
 
 	wc := wndClassExW{
 		cbSize:        uint32(unsafe.Sizeof(wndClassExW{})),
@@ -194,7 +210,7 @@ func (t *Tray) run(iconPath string) {
 		uCallbackMessage: wmTrayMsg,
 		hIcon:            hIcon,
 	}
-	copyUTF16(t.nid.szTip[:], "netproxy · 内网隧道代理")
+	copyUTF16(t.nid.szTip[:], "NetHub · 内网隧道代理")
 	pShellNotifyIconW.Call(nimAdd, uintptr(unsafe.Pointer(&t.nid)))
 
 	close(t.ready)
@@ -211,6 +227,12 @@ func (t *Tray) run(iconPath string) {
 }
 
 func (t *Tray) wndProc(hwnd windows.Handle, msg uint32, wParam, lParam uintptr) uintptr {
+	// 任务栏重启 → 重新挂上图标（此时旧图标已经被系统清掉了）
+	if wmTaskbarCreated != 0 && msg == wmTaskbarCreated {
+		pShellNotifyIconW.Call(nimAdd, uintptr(unsafe.Pointer(&t.nid)))
+		return 0
+	}
+
 	switch msg {
 	case wmTrayMsg:
 		switch uint32(lParam) & 0xffff {

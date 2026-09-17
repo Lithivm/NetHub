@@ -12,7 +12,7 @@ import (
 	"sort"
 	"strings"
 
-	"netproxy/internal/config"
+	"nethub/internal/config"
 )
 
 // BatEntry 一个 .bat 解析出来的结果。

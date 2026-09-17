@@ -8,7 +8,7 @@ package autostart
 
 import (
 	"fmt"
-	"netproxy/internal/winrun"
+	"nethub/internal/winrun"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,10 +19,10 @@ import (
 
 const (
 	// TaskName 计划任务名。
-	TaskName = "netproxy"
+	TaskName = "NetHub"
 	// RunKeyPath / RunValueName 早期版本用的注册表自启位置，现在只用来清理。
 	RunKeyPath   = `Software\Microsoft\Windows\CurrentVersion\Run`
-	RunValueName = "netproxy"
+	RunValueName = "NetHub"
 )
 
 // Enabled 计划任务是否存在。
@@ -67,7 +67,7 @@ func Enable() error {
 	}
 
 	// schtasks 只吃 UTF-16LE + BOM 的 XML
-	tmp, err := os.CreateTemp("", "netproxy-task-*.xml")
+	tmp, err := os.CreateTemp("", "nethub-task-*.xml")
 	if err != nil {
 		return err
 	}
@@ -116,7 +116,7 @@ func taskXML(exe, dir string) string {
 	return `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
-    <Description>netproxy 内网隧道代理：拦截内网网段并转发到 gost 链路</Description>
+    <Description>NetHub 内网隧道代理：拦截内网网段并转发到 gost 链路</Description>
   </RegistrationInfo>
   <Triggers>
     <LogonTrigger>

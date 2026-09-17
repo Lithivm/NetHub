@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>netproxy · 内网隧道代理</title>
+<title>NetHub · 内网隧道代理</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
 <div class="titlebar" id="titlebar">
   <div class="titlebar-brand">
     <span class="logo"></span>
-    <span class="title">netproxy</span>
+    <span class="title">NetHub</span>
     <span class="subtitle">内网隧道代理</span>
   </div>
   <div class="titlebar-spacer"></div>
@@ -29,7 +29,6 @@
     <span class="runstate" id="runState"><span class="dot"></span><span id="runStateText">未启动</span></span>
     <span class="sep"></span>
     <span class="kv">relay <b id="stRelay">-</b></span>
-    <span class="kv">gost <b id="stPids">-</b></span>
     <span class="kv">累计 <b id="stTotal">0</b></span>
     <span class="kv">活跃 <b id="stActive">0</b></span>
   </div>
@@ -57,7 +56,7 @@
     <div class="card card-fill">
       <div class="card-head">
         <h2>运行日志</h2>
-        <span class="hint">同时写到程序目录的 netproxy.log</span>
+        <span class="hint">同时写到程序目录的 nethub.log</span>
         <div class="spacer"></div>
         <button class="btn btn-sm" id="btnSelfTest">链路自检</button>
         <button class="btn btn-sm" id="btnOpenLog">打开日志目录</button>
@@ -154,7 +153,7 @@
 
       <div class="card">
         <div class="card-head"><h2>分发与备份</h2>
-          <span class="hint">导出后同事放到 netproxy.exe 同目录即可用</span>
+          <span class="hint">导出后同事放到 nethub.exe 同目录即可用</span>
         </div>
         <div class="card-body form">
           <div class="input-row">
@@ -162,10 +161,10 @@
             <button class="btn btn-sm" id="btnExportDoc">导出配置说明（无凭据）</button>
           </div>
           <div class="hint">
-            <b>导出配置</b>：完整的 config.yaml（含链路、上游、规则、设置）。
-            <span class="clash-no">里面有上游凭据（auth= 是 用户:口令 的 base64），请通过安全渠道分发。</span><br>
-            <b>导出配置说明</b>：纯文本，上游地址已遮蔽、无凭据，适合先发给同事看，
-            末尾附了他们拿到真配置后该怎么用。
+            <b>导出配置</b>：完整的配置文件（链路、上游、规则、设置），同事放到程序目录就能用。<br>
+            <span class="clash-no">⚠ 这个文件里含上游登录口令，别发到群里或公共仓库，请私发。</span><br><br>
+            <b>导出配置说明</b>：一份纯文本，上游地址已打码、没有口令。
+            适合先发出去让人看懂配置，末尾会自动附上对方拿到真配置后的使用步骤。
           </div>
         </div>
       </div>

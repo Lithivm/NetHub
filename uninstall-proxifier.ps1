@@ -1,6 +1,6 @@
 ﻿# 静默卸载 Proxifier 并清理驱动残留（提权运行）
 $ErrorActionPreference = 'Continue'
-$log = 'C:\Users\Administrator\Desktop\netproxy\uninstall-proxifier.log'
+$log = 'C:\Users\Administrator\Desktop\NetHub\uninstall-proxifier.log'
 Remove-Item $log -ErrorAction SilentlyContinue
 function Say($m) { $m | Out-File -FilePath $log -Append -Encoding utf8; }
 function Say2($m) { $m | Out-File -FilePath $log -Append -Encoding utf8; }
