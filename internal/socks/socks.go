@@ -1,10 +1,14 @@
-// Package socks 实现最小 SOCKS5 客户端（no-auth）。
+// Package socks 实现最小 SOCKS5 客户端（支持 no-auth 与用户名/口令认证）。
 //
-// 我们连的是本机 gost，明文 SOCKS5 即可；TLS 那一层由 gost 负责连上游，
-// 所以这里不需要实现 gost 的 tls/tls-auth 私有扩展方法。
+// 两种用途：
+//  1. 连本机 gost 的 socks5 监听（no-auth）—— 旧路径，链路自检还在用
+//  2. 在 TLS 隧道内连上游 socks5 代理（需要 RFC 1929 认证）—— 原生链路要用的
+//
+// 注意：我们不需要实现 gost 的 tls/auth 私有扩展方法，标准 SOCKS5 即可。
 package socks
 
 import (
+	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -13,105 +17,174 @@ import (
 )
 
 const (
-	methodNoAuth = 0x00
-	cmdConnect   = 0x01
-	atypIPv4     = 0x01
-	atypDomain   = 0x03
+	methodNoAuth   = 0x00
+	methodUserPass = 0x02
+	cmdConnect     = 0x01
+	atypIPv4       = 0x01
+	atypDomain     = 0x03
 )
 
-// Dial 通过 proxy（如 127.0.0.1:1080）连到 dstIP:dstPort。
+// Creds SOCKS5 用户名/口令（RFC 1929）。空表示 no-auth。
+type Creds struct {
+	User string
+	Pass string
+}
+
+func (c Creds) empty() bool { return c.User == "" && c.Pass == "" }
+
+// Dial 通过 proxy（如 127.0.0.1:1080）连到 dstIP:dstPort，无认证。
 func Dial(proxy string, dstIP net.IP, dstPort uint16, timeout time.Duration) (net.Conn, error) {
+	return DialAuth(proxy, Creds{}, dstIP, dstPort, timeout)
+}
+
+// DialHost 把**域名**交给代理解析后再连（等价 curl 的 --socks5-hostname），无认证。
+func DialHost(proxy, host string, dstPort uint16, timeout time.Duration) (net.Conn, error) {
+	return DialAuthHost(proxy, Creds{}, host, dstPort, timeout)
+}
+
+// DialAuth 带认证连到 dstIP:dstPort。
+func DialAuth(proxy string, c Creds, dstIP net.IP, dstPort uint16, timeout time.Duration) (net.Conn, error) {
 	v4 := dstIP.To4()
 	if v4 == nil {
 		return nil, fmt.Errorf("仅支持 IPv4 目标: %v", dstIP)
 	}
-	return dialWith(proxy, atypIPv4, v4, dstPort, timeout)
+	return dialWith(proxy, c, nil, atypIPv4, v4, dstPort, timeout)
 }
 
-// DialHost 把**域名**交给代理解析后再连（等价 curl 的 --socks5-hostname）。
-//
-// 为什么不复用 Dial：判断"浏览器走代理时能不能到内网"必须用这条路。
-// 浏览器经代理时交给代理的是域名，**解析权在代理手里**，
-// 而代理通常看不到系统 hosts 文件 —— 这正是内网域名经代理必坏的原因。
-func DialHost(proxy, host string, dstPort uint16, timeout time.Duration) (net.Conn, error) {
+// DialAuthHost 带认证，把域名交给代理解析后再连。
+func DialAuthHost(proxy string, c Creds, host string, dstPort uint16, timeout time.Duration) (net.Conn, error) {
 	if ip := net.ParseIP(host); ip != nil {
-		if v4 := ip.To4(); v4 != nil {
-			return dialWith(proxy, atypIPv4, v4, dstPort, timeout)
-		}
-		return nil, fmt.Errorf("仅支持 IPv4 目标: %v", host)
+		return DialAuth(proxy, c, ip, dstPort, timeout)
 	}
 	if len(host) == 0 || len(host) > 255 {
 		return nil, fmt.Errorf("域名长度非法: %q", host)
 	}
 	body := append([]byte{byte(len(host))}, []byte(host)...)
-	return dialWith(proxy, atypDomain, body, dstPort, timeout)
+	return dialWith(proxy, c, nil, atypDomain, body, dstPort, timeout)
 }
 
-// dialWith 发 SOCKS5 CONNECT。addr 是 ATYP 对应的地址体（IPv4 4 字节 / 域名 = 长度+字节）。
-func dialWith(proxy string, atyp byte, addr []byte, dstPort uint16, timeout time.Duration) (net.Conn, error) {
+// dialWith 发 SOCKS5 握手 + CONNECT。
+//
+// tlsConf 非 nil 时先在连接上做 TLS（= 上游用 socks5+tls 的情况）。
+// addr 是 ATYP 对应的地址体（IPv4 4 字节 / 域名 = 长度+字节）。
+func dialWith(proxy string, c Creds, tlsConf *tls.Config, atyp byte, addr []byte,
+	dstPort uint16, timeout time.Duration) (net.Conn, error) {
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
-	c, err := net.DialTimeout("tcp", proxy, timeout)
+	raw, err := net.DialTimeout("tcp", proxy, timeout)
 	if err != nil {
-		return nil, fmt.Errorf("连本地 socks 失败: %w", err)
+		return nil, fmt.Errorf("连代理失败: %w", err)
 	}
-	// 握手阶段设个总超时，成功后再清掉，避免长连接被读超时打断
-	_ = c.SetDeadline(time.Now().Add(timeout))
-	if _, err := c.Write([]byte{0x05, 0x01, methodNoAuth}); err != nil {
-		c.Close()
-		return nil, fmt.Errorf("socks 握手写入失败: %w", err)
+	_ = raw.SetDeadline(time.Now().Add(timeout))
+
+	var conn net.Conn = raw
+	if tlsConf != nil {
+		tc := tls.Client(raw, tlsConf)
+		if err := tc.Handshake(); err != nil {
+			raw.Close()
+			return nil, fmt.Errorf("TLS 握手失败: %w", err)
+		}
+		conn = tc
+	}
+
+	if err := handshake(conn, c, atyp, addr, dstPort); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	_ = conn.SetDeadline(time.Time{}) // 清掉超时，之后是长连接
+	return conn, nil
+}
+
+func handshake(conn net.Conn, c Creds, atyp byte, addr []byte, dstPort uint16) error {
+	// ① 方法协商。有凭据就优先提认证，同时也提 no-auth（有些代理允许匿名）
+	methods := []byte{methodNoAuth}
+	if !c.empty() {
+		methods = []byte{methodUserPass, methodNoAuth}
+	}
+	greet := append([]byte{0x05, byte(len(methods))}, methods...)
+	if _, err := conn.Write(greet); err != nil {
+		return fmt.Errorf("socks 握手写入失败: %w", err)
 	}
 	var rep [2]byte
-	if _, err := io.ReadFull(c, rep[:]); err != nil {
-		c.Close()
-		return nil, fmt.Errorf("socks 握手读取失败: %w", err)
+	if _, err := io.ReadFull(conn, rep[:]); err != nil {
+		return fmt.Errorf("socks 握手读取失败: %w", err)
 	}
-	if rep[0] != 0x05 || rep[1] != methodNoAuth {
-		c.Close()
-		return nil, fmt.Errorf("socks 服务端拒绝 no-auth: %v", rep)
+	if rep[0] != 0x05 {
+		return fmt.Errorf("socks 版本不对: %d", rep[0])
 	}
+	switch rep[1] {
+	case methodNoAuth:
+		// 不需要认证
+	case methodUserPass:
+		if err := authUserPass(conn, c); err != nil {
+			return err
+		}
+	default:
+		if rep[1] == 0xff {
+			return fmt.Errorf("socks 服务端不接受我们提供的方法（需要认证？凭据没配？）")
+		}
+		return fmt.Errorf("socks 服务端选择了不支持的方法: 0x%02x", rep[1])
+	}
+
+	// ② CONNECT
 	req := make([]byte, 0, 10+len(addr))
 	req = append(req, 0x05, cmdConnect, 0x00, atyp)
 	req = append(req, addr...)
 	req = binary.BigEndian.AppendUint16(req, dstPort)
-	if _, err := c.Write(req); err != nil {
-		c.Close()
-		return nil, fmt.Errorf("socks CONNECT 写入失败: %w", err)
+	if _, err := conn.Write(req); err != nil {
+		return fmt.Errorf("socks CONNECT 写入失败: %w", err)
 	}
-	// 应答：VER REP RSV ATYP BND.ADDR BND.PORT
+
 	var head [4]byte
-	if _, err := io.ReadFull(c, head[:]); err != nil {
-		c.Close()
-		return nil, fmt.Errorf("socks CONNECT 应答读取失败: %w", err)
+	if _, err := io.ReadFull(conn, head[:]); err != nil {
+		return fmt.Errorf("socks CONNECT 应答读取失败: %w", err)
 	}
 	if head[1] != 0x00 {
-		c.Close()
-		return nil, fmt.Errorf("socks CONNECT 被拒: %s", replyText(head[1]))
+		return fmt.Errorf("socks CONNECT 被拒: %s", replyText(head[1]))
 	}
 	var addrLen int
 	switch head[3] {
 	case atypIPv4:
 		addrLen = 4
-	case 0x03: // 域名
+	case atypDomain:
 		var l [1]byte
-		if _, err := io.ReadFull(c, l[:]); err != nil {
-			c.Close()
-			return nil, err
+		if _, err := io.ReadFull(conn, l[:]); err != nil {
+			return err
 		}
 		addrLen = int(l[0])
 	case 0x04: // IPv6
 		addrLen = 16
 	default:
-		c.Close()
-		return nil, fmt.Errorf("socks 应答 ATYP 未知: %d", head[3])
+		return fmt.Errorf("socks 应答 ATYP 未知: %d", head[3])
 	}
-	if _, err := io.ReadFull(c, make([]byte, addrLen+2)); err != nil {
-		c.Close()
-		return nil, err
+	_, err := io.ReadFull(conn, make([]byte, addrLen+2))
+	return err
+}
+
+// authUserPass 走 RFC 1929 用户名/口令认证。
+func authUserPass(conn net.Conn, c Creds) error {
+	u, p := []byte(c.User), []byte(c.Pass)
+	if len(u) > 255 || len(p) > 255 {
+		return fmt.Errorf("socks 凭据过长")
 	}
-	_ = c.SetDeadline(time.Time{}) // 清掉超时，之后是长连接
-	return c, nil
+	buf := make([]byte, 0, 3+len(u)+len(p))
+	buf = append(buf, 0x01, byte(len(u)))
+	buf = append(buf, u...)
+	buf = append(buf, byte(len(p)))
+	buf = append(buf, p...)
+	if _, err := conn.Write(buf); err != nil {
+		return fmt.Errorf("socks 认证写入失败: %w", err)
+	}
+	var rep [2]byte
+	if _, err := io.ReadFull(conn, rep[:]); err != nil {
+		return fmt.Errorf("socks 认证读取失败: %w", err)
+	}
+	if rep[1] != 0x00 {
+		// 不把凭据打进错误里
+		return fmt.Errorf("socks 认证被拒（用户名或口令不对）")
+	}
+	return nil
 }
 
 func replyText(code byte) string {
@@ -132,6 +205,19 @@ func replyText(code byte) string {
 		return "command not supported"
 	case 0x08:
 		return "address type not supported"
+	default:
+		return fmt.Sprintf("unknown 0x%02x", code)
 	}
-	return fmt.Sprintf("unknown(%d)", code)
+}
+
+// DialTLS 带认证 + 可选 TLS 地连到 dstIP:dstPort。
+// tlsConf 非 nil 时先在连接上做 TLS（= 上游是 socks5+tls 的情况）。
+// 这是给 internal/upstream 用的入口 —— 原生链路不再需要本地 gost。
+func DialTLS(addr string, c Creds, tlsConf *tls.Config, dstIP net.IP, dstPort uint16,
+	timeout time.Duration) (net.Conn, error) {
+	v4 := dstIP.To4()
+	if v4 == nil {
+		return nil, fmt.Errorf("仅支持 IPv4 目标: %v", dstIP)
+	}
+	return dialWith(addr, c, tlsConf, atypIPv4, v4, dstPort, timeout)
 }

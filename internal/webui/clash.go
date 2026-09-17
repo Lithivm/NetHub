@@ -46,7 +46,6 @@ import (
 
 	"netproxy/internal/app"
 	"netproxy/internal/config"
-	"netproxy/internal/hostsmgr"
 	"netproxy/internal/socks"
 )
 
@@ -341,15 +340,7 @@ func (b *Backend) clashCoverage() Coverage {
 //   - hosts 里的内网域名（按域名访问时才会踩到 DNS 那道坎）
 //   - 每条规则网段的代表 IP（按 IP 访问同样不能进 Clash）
 func (b *Backend) clashTargets() []string {
-	entries := b.a.Cfg.Hosts.Entries
-	if len(entries) == 0 {
-		if block, ok, _, err := hostsmgr.Read(); err == nil && ok {
-			entries = block
-		}
-	}
-	if len(entries) == 0 {
-		entries = defaultHostsEntries()
-	}
+	entries := hostsEntriesFrom(b.a.Cfg)
 
 	var out []string
 	seen := map[string]bool{}
@@ -448,15 +439,7 @@ func (b *Backend) ClashCheck() ClashCheckView {
 	v := ClashCheckView{Mode: pm.Mode, Server: pm.Server, PacURL: pm.PacURL}
 
 	// hosts 条目：配置 → hosts 文件标记区块 → 内置默认
-	entries := b.a.Cfg.Hosts.Entries
-	if len(entries) == 0 {
-		if block, ok, _, err := hostsmgr.Read(); err == nil && ok {
-			entries = block
-		}
-	}
-	if len(entries) == 0 {
-		entries = defaultHostsEntries()
-	}
+	entries := hostsEntriesFrom(b.a.Cfg)
 	hosts := make([]string, 0, len(entries))
 	seen := map[string]bool{}
 	for _, e := range entries {

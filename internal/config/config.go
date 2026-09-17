@@ -72,7 +72,7 @@ func Default() *Config {
 			{Target: "10.0.1.0/24", Chain: "proxy-a"},
 			{Target: "192.168.100.0/24", Chain: "proxy-b"},
 		},
-		Gost:  GostCfg{Enabled: true, Exe: `C:\Users\Administrator\Desktop\gost\gost.exe`},
+		Gost:  GostCfg{Enabled: false}, // 上游能力已内置（internal/upstream），默认不再需要 gost.exe
 		Hosts: HostsCfg{Manage: false},
 		UI:    UICfg{Theme: "light"},
 	}
@@ -142,16 +142,19 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("链名重复: %s", ch.Name)
 		}
 		seen[ch.Name] = true
-		if !strings.Contains(ch.Listen, ":") {
+		if strings.TrimSpace(ch.Forward) == "" && strings.TrimSpace(ch.Listen) == "" {
+			return fmt.Errorf("链 %s: forward（上游 URL）与 listen（本地 socks5）至少要有一个。"+
+				"正常只需 forward：上游能力已内置，不再需要本地 gost", ch.Name)
+		}
+		if ch.Listen != "" && !strings.Contains(ch.Listen, ":") {
 			return fmt.Errorf("链 %s: listen 应为 host:port，当前 %q", ch.Name, ch.Listen)
 		}
-		// 两条链监听同一个端口，后起的 gost 会直接绑定失败
-		if other, dup := seenListen[ch.Listen]; dup {
-			return fmt.Errorf("链 %s 和链 %s 的监听端口相同（%s），后启动的会绑定失败", ch.Name, other, ch.Listen)
-		}
-		seenListen[ch.Listen] = ch.Name
-		if c.Gost.Enabled && strings.TrimSpace(ch.Forward) == "" {
-			return fmt.Errorf("链 %s: 开了 gost 托管就必须填 forward（上游转发 URL）", ch.Name)
+		// 两条链监听同一个端口会直接绑定失败
+		if ch.Listen != "" {
+			if other, dup := seenListen[ch.Listen]; dup {
+				return fmt.Errorf("链 %s 和链 %s 的监听端口相同（%s）", ch.Name, other, ch.Listen)
+			}
+			seenListen[ch.Listen] = ch.Name
 		}
 	}
 	for i, r := range c.Routes {

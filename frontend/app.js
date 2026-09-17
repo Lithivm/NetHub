@@ -183,7 +183,7 @@ async function loadChains() {
   t.replaceChildren();
 
   const head = el('div', 'trow thead chain-grid');
-  ['链名', '本地 socks5 监听', '上游转发（凭据已遮蔽）', '说明', ''].forEach(h =>
+  ['链名', '上游（凭据已遮蔽）', '本地 socks5（可选）', '说明', ''].forEach(h =>
     head.appendChild(el('div', 'cell', h)));
   t.appendChild(head);
 
@@ -196,8 +196,8 @@ async function loadChains() {
   chains.forEach((c, i) => {
     const row = el('div', 'trow chain-grid');
     row.appendChild(el('div', 'cell strong', c.name));
-    row.appendChild(el('div', 'cell mono', c.listen));
-    row.appendChild(el('div', 'cell mono dim', c.forward));
+    row.appendChild(el('div', 'cell mono', c.forward));
+    row.appendChild(el('div', 'cell mono dim', c.listen || '—'));
     row.appendChild(el('div', 'cell dim', c.note || ''));
 
     const acts = el('div', 'cell actions');
@@ -240,7 +240,8 @@ function chainForm(index, preset) {
 
   const warn = el('p', 'hint', '凭据会明文保存在 config.yaml，别外传。');
   const nodes = [
-    field('链名', name), field('本地监听', listen), field('上游转发', forward),
+    field('链名', name), field('上游转发', forward, 'gost -F 的值；可直接选旧 .bat 自动填入'),
+    field('本地 socks5（可选）', listen, '只在另外托管 gost、或用外置 socks5 时才需要'),
     field('', importBtn), field('备注', note), field('', warn),
   ];
 

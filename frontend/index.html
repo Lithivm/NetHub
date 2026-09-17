@@ -72,10 +72,10 @@
     <div class="card card-fill">
       <div class="card-head">
         <h2>隧道链路</h2>
-        <span class="hint">一条链 = 一个 gost 子进程（<code>-L</code> 本地监听 + <code>-F</code> 上游）；规则按链名引用它</span>
+        <span class="hint">一条链 = 一个上游（<code>socks5+tls://…?auth=…</code>）。可直接导入旧 gost 的 .bat 脚本</span>
         <div class="spacer"></div>
         <button class="btn btn-sm btn-primary" id="btnChainAdd">添加链路</button>
-        <button class="btn btn-sm" id="btnChainImport">从 .bat 批量导入</button>
+        <button class="btn btn-sm" id="btnChainImport">从 gost .bat 导入</button>
       </div>
       <div class="table" id="chainTable"></div>
     </div>
@@ -99,14 +99,18 @@
     <div class="settings-scroll">
 
       <div class="card">
-        <div class="card-head"><h2>gost 链路托管</h2></div>
+        <div class="card-head">
+          <h2>gost 链路托管</h2>
+          <span class="hint">上游能力已内置，通常不需要开这个</span>
+        </div>
         <div class="card-body form">
           <label class="check">
             <input type="checkbox" id="setGostEnabled">
-            <span>由本程序托管 gost 子进程<em>关掉则假定外部已有 socks5 在监听</em></span>
+            <span>另外托管 gost 子进程<em>默认关闭。上游（socks5+tls + 认证 + CONNECT）已由本程序原生实现，
+              不需要 gost.exe。只在你想保留外置 gost 时才开。</em></span>
           </label>
           <div class="field">
-            <label for="setGostExe">gost.exe 路径</label>
+            <label for="setGostExe">gost.exe 路径<em>仅在上面勾选时才用到</em></label>
             <div class="input-row">
               <input type="text" id="setGostExe" class="input" spellcheck="false">
               <button class="btn btn-sm" id="btnPickGost">浏览…</button>

@@ -14,6 +14,7 @@ import (
 	"netproxy/internal/hostsmgr"
 	"netproxy/internal/logbus"
 	"netproxy/internal/rules"
+	"netproxy/internal/upstream"
 )
 
 // NotifyKind 通知级别，对应托盘气泡图标。
@@ -104,23 +105,25 @@ func (a *App) Start() error {
 		}
 	}
 
-	// 2) gost 子进程
+	// 2) gost 子进程（现在通常不需要：上游能力已内置在 internal/upstream）
 	if a.Cfg.Gost.Enabled {
-		if err := a.Gost.Start(); err != nil {
+		if a.allChainsNative() {
+			a.Bus.Warn("gost 托管开着，但所有链的上游都能原生直连 —— 已跳过启动 gost。" +
+				"可在「设置 → gost 链路托管」里关掉（省两个进程）")
+		} else if err := a.Gost.Start(); err != nil {
 			a.Bus.Error("%v", err)
 			a.notify("gost 启动失败", err.Error(), NotifyError)
 			return err
-		}
-		// 等 gost 的 socks 端口就绪（最多 10 秒）
-		if bad := a.waitChains(10 * time.Second); len(bad) > 0 {
+		} else if bad := a.waitChains(10 * time.Second); len(bad) > 0 {
 			msg := "以下链的本地 socks 端口未就绪: " + strings.Join(bad, ", ")
 			a.Bus.Error("%s", msg)
 			a.notify("链路未就绪", msg, NotifyError)
 			return fmt.Errorf("%s", msg)
+		} else {
+			a.Bus.Info("所有链的本地 socks 端口已就绪")
 		}
-		a.Bus.Info("所有链的本地 socks 端口已就绪")
 	} else {
-		a.Bus.Info("gost 托管已关闭，假定外部的 socks 服务已就绪")
+		a.Bus.Info("上游能力已内置，不使用 gost 子进程")
 	}
 
 	// 3) 拦截
@@ -171,12 +174,28 @@ func (a *App) Restart() error {
 	return a.Start()
 }
 
+// allChainsNative 是否所有带 forward 的链都能原生直连（= 不需要 gost 子进程）。
+func (a *App) allChainsNative() bool {
+	n := 0
+	for _, ch := range a.Cfg.Chains {
+		if strings.TrimSpace(ch.Forward) == "" {
+			continue // 没有 forward 的链靠 listen（外部 socks），本地托管也帮不上
+		}
+		n++
+		if _, err := upstream.Parse(ch.Forward); err != nil {
+			return false
+		}
+	}
+	return n > 0
+}
+
 // waitChains 轮询各链的本地 socks 端口，返回仍未就绪的链名。
 func (a *App) waitChains(timeout time.Duration) []string {
 	deadline := time.Now().Add(timeout)
 	var bad []string
 	for _, ch := range a.Cfg.Chains {
-		if strings.TrimSpace(ch.Forward) == "" {
+		// 原生链路没有本地监听，不需要等端口
+		if strings.TrimSpace(ch.Listen) == "" || strings.TrimSpace(ch.Forward) == "" {
 			continue
 		}
 		ok := false

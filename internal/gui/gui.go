@@ -276,7 +276,7 @@ func (f *TMainForm) buildChainTab(ts *vcl.TPanel) {
 	mkLabel(bar, "一条链 = 一个 gost 子进程（-L 本地监听 + -F 上游）；规则按链名引用它", 610, 16)
 
 	f.gridChain = mkGrid(ts, []colSpec{
-		{"链名", 110}, {"本地 socks5 监听", 160}, {"上游转发（凭据已遮蔽）", 350}, {"说明", 260},
+		{"链名", 110}, {"上游（凭据已遮蔽）", 340}, {"本地 socks5（可选）", 170}, {"说明", 260},
 	})
 	f.loadChains()
 }

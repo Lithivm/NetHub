@@ -52,7 +52,21 @@ func main() {
 	noAutostart := flag.Bool("no-autostart", false, "从开机启动中移除，随后退出")
 	noElevate := flag.Bool("no-elevate", false, "不要自动提权（调试用）")
 	clashCheck := flag.Bool("clash-check", false, "只检测系统代理/Clash 会不会把内网送进代理，然后退出（不需管理员）")
+	upTest := flag.Bool("test-upstream", false, "直接实测原生上游链路（不经 gost），然后退出（不需管理员）")
 	flag.Parse()
+
+	// -test-upstream 直接连上游，不需管理员
+	if *upTest {
+		if *cfgPath == "" {
+			*cfgPath = config.DefaultPath()
+		}
+		cfg, err := config.Load(*cfgPath)
+		if err != nil {
+			fatal("%v", err)
+		}
+		webui.TestUpstream(cfg)
+		return
+	}
 
 	// -clash-check 只读系统代理设置，不需管理员，所以放在提权之前
 	if *clashCheck {

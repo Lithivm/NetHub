@@ -29,6 +29,7 @@ import (
 	"netproxy/internal/hostsmgr"
 	"netproxy/internal/logbus"
 	"netproxy/internal/socks"
+	"netproxy/internal/upstream"
 )
 
 // Backend 是绑定给前端的对象。
@@ -575,7 +576,7 @@ func (b *Backend) RemoveHosts() error {
 // 走 gost 的本地监听，不经过 WinDivert，所以它单独验证"链路"这一段。
 func (b *Backend) SelfTest() {
 	chains := append([]config.Chain(nil), b.a.Cfg.Chains...)
-	routes := append([]config.Route(nil), b.a.Cfg.Routes...)
+	_ = b.a.Cfg.Routes // 探针目标改为从 hosts 取真实主机 IP，不再用规则网段
 	if len(chains) == 0 {
 		b.emit("notify", NotifyView{Title: "无法自检", Text: "还没有配置任何链", Kind: "warn"})
 		return
@@ -585,35 +586,51 @@ func (b *Backend) SelfTest() {
 		b.a.Bus.Info("=== 链路自检开始（%d 条链）===", len(chains))
 		bad := 0
 		for _, ch := range chains {
-			c, err := net.DialTimeout("tcp", ch.Listen, 2*time.Second)
-			if err != nil {
-				b.a.Bus.Error("[%s] 本地 socks5 %s 连不上：%v", ch.Name, ch.Listen, err)
-				bad++
-				b.emit("selftest", ProbeView{Target: ch.Listen, OK: false, Err: err.Error()})
-				continue
-			}
-			c.Close()
-			b.a.Bus.Info("[%s] 本地 socks5 %s 正常", ch.Name, ch.Listen)
-
-			target := ""
-			for _, r := range routes {
-				if r.Chain == ch.Name {
-					target = r.Target
-					break
+			// 选定该链真实要走的路径：优先原生上游，其次本地 socks5 监听
+			var dial func(ip net.IP, port uint16) (net.Conn, error)
+			desc := ""
+			if fwd := strings.TrimSpace(ch.Forward); fwd != "" {
+				up, perr := upstream.Parse(fwd)
+				if perr == nil {
+					dial = func(ip net.IP, port uint16) (net.Conn, error) {
+						return up.Dial(ip, port, 6*time.Second)
+					}
+					desc = "原生上游 " + up.String()
+				} else {
+					b.a.Bus.Warn("[%s] 上游 URL 解析失败，改用本地监听: %v", ch.Name, perr)
 				}
 			}
-			if target == "" {
-				b.a.Bus.Warn("[%s] 没有规则指向它，跳过端到端探测", ch.Name)
+			if dial == nil {
+				if strings.TrimSpace(ch.Listen) == "" {
+					b.a.Bus.Error("[%s] 既没有可用的 forward，也没有 listen，无法自检", ch.Name)
+					bad++
+					continue
+				}
+				c, err := net.DialTimeout("tcp", ch.Listen, 2*time.Second)
+				if err != nil {
+					b.a.Bus.Error("[%s] 本地 socks5 %s 连不上：%v", ch.Name, ch.Listen, err)
+					bad++
+					b.emit("selftest", ProbeView{Target: ch.Listen, OK: false, Err: err.Error()})
+					continue
+				}
+				c.Close()
+				b.a.Bus.Info("[%s] 本地 socks5 %s 正常", ch.Name, ch.Listen)
+				dial = func(ip net.IP, port uint16) (net.Conn, error) {
+					return socks.Dial(ch.Listen, ip, port, 2500*time.Millisecond)
+				}
+				desc = "本地 socks5 " + ch.Listen
+			}
+
+			// 探针用真实主机 IP（hosts 里的），不用网段的 .1（那不是真主机）
+			ip := probeIPForChain(b.a.Cfg, ch.Name)
+			if ip == nil {
+				b.a.Bus.Warn("[%s] 找不到可用于探测的真实内网 IP（hosts 条目为空？）", ch.Name)
 				continue
 			}
-			v4 := targetIPv4(target)
-			if v4 == nil {
-				b.a.Bus.Warn("[%s] 规则目标 %s 解析不出 IPv4，跳过", ch.Name, target)
-				continue
-			}
+
 			hit := 0
 			for _, port := range []uint16{443, 80, 5432, 6446, 5000, 9056} {
-				conn, derr := socks.Dial(ch.Listen, v4, port, 2500*time.Millisecond)
+				conn, derr := dial(ip, port)
 				if derr == nil {
 					conn.Close()
 					hit = int(port)
@@ -621,13 +638,12 @@ func (b *Backend) SelfTest() {
 				}
 			}
 			if hit > 0 {
-				b.a.Bus.Info("[%s] ✓ 端到端可达：经 %s 到 %s:%d", ch.Name, ch.Listen, v4, hit)
-				b.emit("selftest", ProbeView{Target: v4.String(), Port: hit, OK: true})
+				b.a.Bus.Info("[%s] ✓ 端到端可达：%s → %s:%d", ch.Name, desc, ip, hit)
+				b.emit("selftest", ProbeView{Target: ip.String(), Port: hit, OK: true})
 			} else {
-				b.a.Bus.Error("[%s] ✗ 本地端口通，但经该链连不上 %s 的任何常见端口（上游挂了？上游限制了目标？）",
-					ch.Name, v4)
+				b.a.Bus.Error("[%s] ✗ 经该链连不上 %s 的任何常见端口（上游挂了？上游限制了目标？）", ch.Name, ip)
 				bad++
-				b.emit("selftest", ProbeView{Target: v4.String(), OK: false, Err: "经该链不可达"})
+				b.emit("selftest", ProbeView{Target: ip.String(), OK: false, Err: "经该链不可达"})
 			}
 		}
 		if bad == 0 {
@@ -646,6 +662,38 @@ func targetIPv4(target string) net.IP {
 	}
 	if p := net.ParseIP(target); p != nil {
 		return p.To4()
+	}
+	return nil
+}
+
+// probeIPForChain 取该链网段内的一个【真实主机 IP】用于探测。
+// 不用网段的 .1 —— 那不是真主机，会得到 host unreachable 而误判为“链路不通”。
+func probeIPForChain(cfg *config.Config, chainName string) net.IP {
+	var nets []*net.IPNet
+	for _, rt := range cfg.Routes {
+		if rt.Chain != chainName {
+			continue
+		}
+		if _, n, err := net.ParseCIDR(rt.Target); err == nil {
+			nets = append(nets, n)
+		} else if ip := net.ParseIP(rt.Target); ip != nil {
+			nets = append(nets, &net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)})
+		}
+	}
+	for _, e := range hostsEntriesFrom(cfg) {
+		f := strings.Fields(e)
+		if len(f) < 2 {
+			continue
+		}
+		ip := net.ParseIP(f[0])
+		if ip == nil || ip.To4() == nil {
+			continue
+		}
+		for _, n := range nets {
+			if n.Contains(ip) {
+				return ip.To4()
+			}
+		}
 	}
 	return nil
 }
