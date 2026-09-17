@@ -1,4 +1,5 @@
 *.exe
+*.exe~
 *.dll
 *.sys
 *.log
@@ -6,9 +7,8 @@
 *.out
 spike-archive/
 build/
+
+# 含上游凭据，绝不入库
 config.yaml
 config.yaml.*
 !config.yaml.example
-*.exe~
-*.log
-README.md
