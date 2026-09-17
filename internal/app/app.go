@@ -3,18 +3,13 @@ package app
 
 import (
 	"fmt"
-	"net"
-	"strings"
 	"sync"
-	"time"
 
 	"netproxy/internal/config"
 	"netproxy/internal/engine"
-	"netproxy/internal/gostproc"
 	"netproxy/internal/hostsmgr"
 	"netproxy/internal/logbus"
 	"netproxy/internal/rules"
-	"netproxy/internal/upstream"
 )
 
 // NotifyKind 通知级别，对应托盘气泡图标。
@@ -32,7 +27,6 @@ type App struct {
 	Cfg    *config.Config
 	Rules  *rules.Set
 	Engine *engine.Engine
-	Gost   *gostproc.Manager
 
 	// Notify 由 GUI 注入：把状态变化变成系统托盘通知。
 	Notify func(title, text string, kind NotifyKind)
@@ -44,7 +38,6 @@ type App struct {
 func New(cfg *config.Config, bus *logbus.Bus) *App {
 	rs := rules.New()
 	a := &App{Bus: bus, Cfg: cfg, Rules: rs}
-	a.Gost = gostproc.New(bus, cfg.Gost, cfg.Chains)
 	a.Engine = engine.New(bus, rs, cfg)
 	a.Notify = func(string, string, NotifyKind) {} // 默认空实现，GUI 起来后替换
 	return a
@@ -105,34 +98,12 @@ func (a *App) Start() error {
 		}
 	}
 
-	// 2) gost 子进程（现在通常不需要：上游能力已内置在 internal/upstream）
-	if a.Cfg.Gost.Enabled {
-		if a.allChainsNative() {
-			a.Bus.Warn("gost 托管开着，但所有链的上游都能原生直连 —— 已跳过启动 gost。" +
-				"可在「设置 → gost 链路托管」里关掉（省两个进程）")
-		} else if err := a.Gost.Start(); err != nil {
-			a.Bus.Error("%v", err)
-			a.notify("gost 启动失败", err.Error(), NotifyError)
-			return err
-		} else if bad := a.waitChains(10 * time.Second); len(bad) > 0 {
-			msg := "以下链的本地 socks 端口未就绪: " + strings.Join(bad, ", ")
-			a.Bus.Error("%s", msg)
-			a.notify("链路未就绪", msg, NotifyError)
-			return fmt.Errorf("%s", msg)
-		} else {
-			a.Bus.Info("所有链的本地 socks 端口已就绪")
-		}
-	} else {
-		a.Bus.Info("上游能力已内置，不使用 gost 子进程")
-	}
+	a.Bus.Info("上游为原生实现（无需 gost 子进程）")
 
-	// 3) 拦截
+	// 2) 拦截
 	if err := a.Engine.Start(); err != nil {
 		a.Bus.Error("%v", err)
 		a.notify("拦截启动失败", err.Error(), NotifyError)
-		if a.Cfg.Gost.Enabled {
-			a.Gost.Stop()
-		}
 		return err
 	}
 
@@ -147,7 +118,7 @@ func (a *App) Start() error {
 	return nil
 }
 
-// Stop 逆序收尾：停拦截 → 停 gost → 清 hosts（如果由我们托管）。
+// Stop 逆序收尾：停拦截 → 清 hosts（如果由我们托管）。
 func (a *App) Stop() {
 	a.mu.Lock()
 	was := a.running
@@ -158,61 +129,16 @@ func (a *App) Stop() {
 	}
 	a.Bus.Info("正在停止…")
 	a.Engine.Stop()
-	if a.Cfg.Gost.Enabled {
-		a.Gost.Stop()
-	}
-	a.Bus.Info("✓ 已停止（所有子进程已回收）")
+	a.Bus.Info("✓ 已停止")
 	a.notify("netproxy 已停止", "拦截与隧道均已关闭", NotifyWarn)
 }
 
 // Restart 重启（改完配置后调用）。
 func (a *App) Restart() error {
 	a.Stop()
-	// 允许再次启动：重置 bus 的一次性状态不存在，但 Engine/Gost 需要重建
+	// 允许再次启动：重置 bus 的一次性状态不存在，但 Engine 需要重建
 	a.Engine = engine.New(a.Bus, a.Rules, a.Cfg)
-	a.Gost = gostproc.New(a.Bus, a.Cfg.Gost, a.Cfg.Chains)
 	return a.Start()
-}
-
-// allChainsNative 是否所有带 forward 的链都能原生直连（= 不需要 gost 子进程）。
-func (a *App) allChainsNative() bool {
-	n := 0
-	for _, ch := range a.Cfg.Chains {
-		if strings.TrimSpace(ch.Forward) == "" {
-			continue // 没有 forward 的链靠 listen（外部 socks），本地托管也帮不上
-		}
-		n++
-		if _, err := upstream.Parse(ch.Forward); err != nil {
-			return false
-		}
-	}
-	return n > 0
-}
-
-// waitChains 轮询各链的本地 socks 端口，返回仍未就绪的链名。
-func (a *App) waitChains(timeout time.Duration) []string {
-	deadline := time.Now().Add(timeout)
-	var bad []string
-	for _, ch := range a.Cfg.Chains {
-		// 原生链路没有本地监听，不需要等端口
-		if strings.TrimSpace(ch.Listen) == "" || strings.TrimSpace(ch.Forward) == "" {
-			continue
-		}
-		ok := false
-		for time.Now().Before(deadline) {
-			c, err := net.DialTimeout("tcp", ch.Listen, 800*time.Millisecond)
-			if err == nil {
-				c.Close()
-				ok = true
-				break
-			}
-			time.Sleep(300 * time.Millisecond)
-		}
-		if !ok {
-			bad = append(bad, fmt.Sprintf("%s(%s)", ch.Name, ch.Listen))
-		}
-	}
-	return bad
 }
 
 // SaveConfig 保存配置并同步内存副本。

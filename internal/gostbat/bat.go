@@ -1,8 +1,9 @@
-// gost 批处理导入：从旧的 gost-*.bat 里抓出 -L / -F，转成我们的 Chain。
+// Package gostbat 读旧的 gost 批处理脚本（.bat），把 -L/-F 解析成我们的链配置。
 //
-// 为什么单独放一个文件：这个解析逻辑 main.go（-import-bats 命令行）和 GUI
-// （链路页的"从 .bat 导入"按钮）都要用，不能只留在 main 里。
-package gostproc
+// 注意：本包**不启动 gost**。上游能力（socks5+tls + 认证 + CONNECT）已在
+// internal/upstream 原生实现，用户机器不需要装 gost。这里存在的唯一理由是
+// 兼容从旧脚本导入 —— 脚本里的 -F 就是我们的上游 URL。
+package gostbat
 
 import (
 	"fmt"

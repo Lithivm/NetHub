@@ -9,13 +9,15 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"netproxy/internal/upstream"
 )
 
-// Chain 一条隧道链：本地 gost 监听的 socks5 地址 + gost 连上游的转发 URL。
+// Chain 一条隧道链：一个上游代理（url）+ 可选的本地 socks5 监听。
 type Chain struct {
 	Name    string `yaml:"name"`
-	Listen  string `yaml:"listen"`  // 例如 127.0.0.1:1080（gost -L，也是我们 relay 的出口）
-	Forward string `yaml:"forward"` // 例如 socks5+tls://host:port?auth=...
+	Listen  string `yaml:"listen,omitempty"` // 可选的本地 socks5（只在用外置 socks5 时才需要）
+	Forward string `yaml:"forward"`          // 上游代理 URL，例如 socks5+tls://host:port?auth=...
 	Note    string `yaml:"note,omitempty"`
 }
 
@@ -23,14 +25,6 @@ type Chain struct {
 type Route struct {
 	Target string `yaml:"target"`
 	Chain  string `yaml:"chain"`
-}
-
-// GostCfg gost 子进程配置。
-type GostCfg struct {
-	Enabled bool   `yaml:"enabled"` // 关掉的话就假定 gost 已经在外面跑着
-	Exe     string `yaml:"exe"`
-	// ExtraArgs 追加到 gost 命令行末尾（进阶用，一般留空）
-	ExtraArgs []string `yaml:"extraArgs,omitempty"`
 }
 
 // HostsCfg 系统 hosts 标记区块的内容。
@@ -49,7 +43,6 @@ type Config struct {
 	Relay  string   `yaml:"relay"` // relay 监听地址，端口写 0 表示自动分配
 	Chains []Chain  `yaml:"chains"`
 	Routes []Route  `yaml:"routes"`
-	Gost   GostCfg  `yaml:"gost"`
 	Hosts  HostsCfg `yaml:"hosts"`
 	UI     UICfg    `yaml:"ui"`
 
@@ -72,7 +65,6 @@ func Default() *Config {
 			{Target: "10.0.1.0/24", Chain: "proxy-a"},
 			{Target: "192.168.100.0/24", Chain: "proxy-b"},
 		},
-		Gost:  GostCfg{Enabled: false}, // 上游能力已内置（internal/upstream），默认不再需要 gost.exe
 		Hosts: HostsCfg{Manage: false},
 		UI:    UICfg{Theme: "light"},
 	}
@@ -144,7 +136,12 @@ func (c *Config) Validate() error {
 		seen[ch.Name] = true
 		if strings.TrimSpace(ch.Forward) == "" && strings.TrimSpace(ch.Listen) == "" {
 			return fmt.Errorf("链 %s: forward（上游 URL）与 listen（本地 socks5）至少要有一个。"+
-				"正常只需 forward：上游能力已内置，不再需要本地 gost", ch.Name)
+				"正常只需 forward：上游能力已内置，不需要本地 gost", ch.Name)
+		}
+		if fwd := strings.TrimSpace(ch.Forward); fwd != "" {
+			if _, err := upstream.Parse(fwd); err != nil {
+				return fmt.Errorf("链 %s 的上游无法原生实现：%v", ch.Name, err)
+			}
 		}
 		if ch.Listen != "" && !strings.Contains(ch.Listen, ":") {
 			return fmt.Errorf("链 %s: listen 应为 host:port，当前 %q", ch.Name, ch.Listen)

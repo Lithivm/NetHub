@@ -25,7 +25,7 @@ import (
 	"netproxy/internal/app"
 	"netproxy/internal/autostart"
 	"netproxy/internal/config"
-	"netproxy/internal/gostproc"
+	"netproxy/internal/gostbat"
 	"netproxy/internal/hostsmgr"
 	"netproxy/internal/logbus"
 	"netproxy/internal/socks"
@@ -152,8 +152,6 @@ type NotifyView struct {
 }
 
 type SettingsView struct {
-	GostEnabled  bool     `json:"gostEnabled"`
-	GostExe      string   `json:"gostExe"`
 	Relay        string   `json:"relay"`
 	HostsManage  bool     `json:"hostsManage"`
 	HostsEntries []string `json:"hostsEntries"`
@@ -196,14 +194,7 @@ func logView(l logbus.Line) LogView {
 func (b *Backend) GetState() StateView {
 	total, active := b.a.Engine.Stats()
 	relay := b.a.Engine.RelayAddr()
-	pids := "-"
-	if ps := b.a.Gost.PIDs(); len(ps) > 0 {
-		ss := make([]string, 0, len(ps))
-		for _, p := range ps {
-			ss = append(ss, fmt.Sprintf("%d", p))
-		}
-		pids = strings.Join(ss, ",")
-	}
+	pids := "-" // 上游为原生实现，不再有子进程
 	_, hostsInFile, _, _ := hostsmgr.Read()
 	return StateView{
 		Running:     b.a.Running(),
@@ -250,7 +241,7 @@ func (b *Backend) GetChains() []ChainView {
 	for _, c := range b.a.Cfg.Chains {
 		out = append(out, ChainView{
 			Name: c.Name, Listen: c.Listen,
-			Forward: gostproc.Redact(c.Forward), Note: c.Note,
+			Forward: gostbat.Redact(c.Forward), Note: c.Note,
 		})
 	}
 	return out
@@ -288,8 +279,6 @@ func (b *Backend) GetSettings() SettingsView {
 		entries = defaultHostsEntries()
 	}
 	return SettingsView{
-		GostEnabled:  b.a.Cfg.Gost.Enabled,
-		GostExe:      b.a.Cfg.Gost.Exe,
 		Relay:        b.a.Cfg.Relay,
 		HostsManage:  b.a.Cfg.Hosts.Manage,
 		HostsEntries: entries,
@@ -413,7 +402,7 @@ func (b *Backend) PickBatFile() (*BatEntryView, error) {
 	if path == "" {
 		return nil, nil // 用户取消
 	}
-	be, ok := gostproc.ParseBatFile(path)
+	be, ok := gostbat.ParseBatFile(path)
 	if !ok {
 		return nil, fmt.Errorf("这个文件里没找到成对的 -L \"…\" / -F \"…\"：\n%s", path)
 	}
@@ -431,7 +420,7 @@ func (b *Backend) ImportBatDir() (*ImportResult, error) {
 	if dir == "" {
 		return nil, nil
 	}
-	got := gostproc.ScanBatDir(dir)
+	got := gostbat.ScanBatDir(dir)
 	if len(got) == 0 {
 		return nil, fmt.Errorf("这个目录里没找到含成对 -L/-F 的 gost 批处理：\n%s", dir)
 	}
@@ -469,8 +458,6 @@ func (b *Backend) ImportBatDir() (*ImportResult, error) {
 
 func (b *Backend) SaveSettings(s SettingsView) error {
 	cfg := b.a.Cfg
-	cfg.Gost.Enabled = s.GostEnabled
-	cfg.Gost.Exe = strings.TrimSpace(s.GostExe)
 	cfg.Relay = strings.TrimSpace(s.Relay)
 	cfg.Hosts.Manage = s.HostsManage
 	if len(s.HostsEntries) > 0 {
@@ -479,8 +466,7 @@ func (b *Backend) SaveSettings(s SettingsView) error {
 	if err := b.a.SaveConfig(); err != nil {
 		return err
 	}
-	b.a.Bus.Info("设置已保存（gost 托管=%v，relay=%s，hosts 托管=%v）",
-		cfg.Gost.Enabled, cfg.Relay, cfg.Hosts.Manage)
+	b.a.Bus.Info("设置已保存（relay=%s，hosts 托管=%v）", cfg.Relay, cfg.Hosts.Manage)
 	return nil
 }
 
@@ -518,18 +504,6 @@ func (b *Backend) SetAutostart(on bool) error {
 		b.a.Bus.Info("已取消开机自启")
 	}
 	return nil
-}
-
-// PickGostExe 选 gost.exe。
-func (b *Backend) PickGostExe() (string, error) {
-	return wruntime.OpenFileDialog(b.ctx, wruntime.OpenDialogOptions{
-		Title: "选择 gost.exe",
-		Filters: []wruntime.FileFilter{
-			{DisplayName: "gost.exe", Pattern: "gost.exe"},
-			{DisplayName: "可执行文件 (*.exe)", Pattern: "*.exe"},
-			{DisplayName: "所有文件 (*.*)", Pattern: "*.*"},
-		},
-	})
 }
 
 // ───────────────────────── hosts ─────────────────────────

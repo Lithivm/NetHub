@@ -476,8 +476,6 @@ async function copyBypass() {
 async function loadSettings() {
   let s;
   try { s = await call('GetSettings'); } catch (e) { return fail(e); }
-  document.getElementById('setGostEnabled').checked = s.gostEnabled;
-  document.getElementById('setGostExe').value = s.gostExe || '';
   document.getElementById('setRelay').value = s.relay || '';
   document.getElementById('setHostsManage').checked = s.hostsManage;
   document.getElementById('setHostsEntries').value = (s.hostsEntries || []).join('\n');
@@ -485,8 +483,6 @@ async function loadSettings() {
 
 async function saveSettings(restart) {
   const payload = {
-    gostEnabled: document.getElementById('setGostEnabled').checked,
-    gostExe: document.getElementById('setGostExe').value,
     relay: document.getElementById('setRelay').value,
     hostsManage: document.getElementById('setHostsManage').checked,
     hostsEntries: document.getElementById('setHostsEntries').value.split('\n').map(s => s.trim()).filter(Boolean),
@@ -544,10 +540,6 @@ function wire() {
   document.getElementById('btnRuleAdd').onclick = () => ruleForm(null);
 
   // 设置页
-  document.getElementById('btnPickGost').onclick = async () => {
-    try { const p = await call('PickGostExe'); if (p) document.getElementById('setGostExe').value = p; }
-    catch (e) { fail(e); }
-  };
   document.getElementById('btnSaveSettings').onclick = () => saveSettings(false);
   document.getElementById('btnSaveRestart').onclick = () => saveSettings(true);
   document.getElementById('btnOpenConfig').onclick = () => call('OpenConfigFile').catch(fail);

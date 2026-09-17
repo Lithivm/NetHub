@@ -1,7 +1,10 @@
 # netproxy —— 内网隧道透明代理
 
-替代 **Proxifier + 两个 gost .bat**：一个进程管链路（gost 子进程）、一个驱动管拦截（WinDivert）、
-一个界面管规则。
+替代 **Proxifier + 两个 gost .bat**：一个进程管链路、一个驱动管拦截、一个界面管规则。
+
+**上游能力是原生实现的（`internal/upstream`），电脑上不需要安装 gost。**
+一条链 = 一个上游 URL（`socks5+tls://host:port?auth=…`）—— 标准的 TLS + SOCKS5 认证 + CONNECT，
+用 Go 标准库完成。旧 gost 的 `.bat` 脚本可以在界面里直接导入，导入完就不再需要那些脚本和 gost.exe。
 
 **核心特点：应用零改动。** 不管是浏览器、Navicat、DBHub(node)、PostgreSQL/MySQL 客户端还是
 业务客户端，都不需要配代理 —— 拦截发生在内核层，只有目标落在内网网段的 TCP 连接会被劫持。
@@ -14,12 +17,13 @@
 
 | 文件 | 必须 | 说明 |
 |---|---|---|
-| `netproxy.exe` | ✅ | 主程序（约 12.5 MB，前端已内嵌） |
+| `netproxy.exe` | ✅ | 主程序（约 12.6 MB，前端已内嵌） |
 | `config.yaml` | ✅ | 配置（**含上游凭据，不要外传/入库**） |
 | `WinDivert.dll` | ✅ | WinDivert 运行库 |
 | `WinDivert64.sys` | ✅ | WinDivert 内核驱动 |
 | `netproxy.ico` | ⚠️ | 托盘图标；缺了就用系统默认图标 |
 | `netproxy.log` | ❌ | 运行日志，自动生成，可随时删 |
+| `gost.exe` / `gost-*.bat` | ❌ | **不再需要**（导入完配置就可以删） |
 | `*.ps1` / `*.log` | ❌ | 测试脚本和历史输出，可删 |
 
 > **整个文件夹可以随便挪位置、改名。** 程序启动时会检查驱动服务里登记的 `.sys` 路径，
@@ -40,10 +44,10 @@
 
 | 页 | 内容 |
 |---|---|
-| **运行日志** | 实时日志（含 gost 自己的连接日志）+ 链路自检 + 打开日志目录 |
+| **运行日志** | 实时日志 + 链路自检 + 打开日志目录 |
 | **隧道链路** | ≈ Proxifier 的 **Proxy Servers**。增删改排序；可从旧 `.bat` 导入 |
 | **路由规则** | ≈ Proxifier 的 **Rules**。目标网段 → 走哪条链，可增删改排序 |
-| **设置** | gost 托管 / hosts 接管 / 开机自启 / 文件位置 |
+| **设置** | 与 Clash 共存检测 / hosts 接管 / 开机自启 / 文件位置 |
 
 右上角可切 **深色 / 浅色**（会记住，写进 `config.yaml` 的 `ui.theme`）。
 
@@ -60,13 +64,13 @@
 ```yaml
 relay: 127.0.0.1:0        # relay 监听地址；端口写 0 = 自动分配（推荐）
 
-chains:                   # 每条链 = 一个 gost 子进程
+chains:                   # 每条链 = 一个上游代理
   - name: proxy-a             # 链名（下面 routes 里引用）
-    listen: 127.0.0.1:1080 # gost -L 监听地址（也是 relay 的出口）
-    forward: socks5+tls://IP:PORT?auth=XXXX   # gost -F 上游（凭据在这里）
+    forward: socks5+tls://IP:PORT?auth=XXXX   # 上游 URL（凭据在这里）
     note: 内网主体链路        # 备注，随便写
+    # listen: 127.0.0.1:1080   # 可选：只在你想用外置 socks5 时才填
+    #                            （原来 gost -L 的值，现在不需要了）
   - name: proxy-b
-    listen: 127.0.0.1:1081
     forward: socks5+tls://IP:PORT?auth=XXXX
     note: 192.168.100.*
 
@@ -77,10 +81,6 @@ routes:                   # 目标网段 → 走哪条链（按顺序匹配，�
     chain: proxy-a
   - target: 192.168.100.0/24
     chain: proxy-b
-
-gost:
-  enabled: true           # false = 假定 gost 已经在外面跑着，我们不起子进程
-  exe: C:\Users\Administrator\Desktop\gost\gost.exe
 
 hosts:
   manage: false           # true = 由我们维护 hosts 里的标记区块（默认关）
@@ -94,8 +94,17 @@ ui:
   theme: light            # light | dark
 ```
 
+**上游 URL 支持的写法**（与 gost 兼容，旧脚本可以直接拿来用）：
+
+| 写法 | 说明 |
+|---|---|
+| `socks5+tls://host:port?auth=<base64(user:pass)>` | 现网两个上游就是这种 |
+| `socks5+tls://user:pass@host:port` | 凭据写在 userinfo |
+| `socks5://host:port` | 明文（不推荐） |
+| 末尾加 `&secure=true` | 校验上游证书。**默认不校验证书**，与 gost 的 socks5+tls 默认行为一致 |
+
 改配置**界面里改就行**（编辑即时保存），或手改 yaml 再重启程序。
-注意 `hosts.manage` / `gost.enabled` / `relay` 这几项要**重启服务**才生效。
+注意 `hosts.manage` / `relay` 这两项要**重启服务**才生效。
 
 ---
 
@@ -104,10 +113,9 @@ ui:
 | 症状 | 先看什么 |
 |---|---|
 | 内网连不上 | 界面「运行日志」。正常应看到 `内核过滤器: (...)` 和 `引擎已接管` |
-| gost 起不来 | `gost.exe` 路径对不对、1080/1081 是否被别的进程占着 |
 | 程序起来了但没拦到 | 是不是没管理员权限（日志会有 `当前不是管理员权限` 警告） |
 | 驱动加载失败 | 日志会有 `打开失败(第 N/6 次)`。自动重试 + `sc start WinDivert` 兜底 |
-| 想单独验证链路 | 界面「链路自检」：它绕过内核拦截，直接从 gost 的 socks5 口往外连 |
+| 想单独验证链路 | 界面「链路自检」：它绕过内核拦截，直接走原生上游发一个真实请求；或 `netproxy.exe -test-upstream` |
 | 有一堆窗口在闪 | 不该发生。若出现，说明某处 `exec` 漏了 `internal/winrun`（见 DESIGN.md） |
 
 命令行自检：
@@ -132,10 +140,10 @@ sc delete WinDivert
 
 **退回 Proxifier**：安装包在 `C:\Users\Administrator\Desktop\gost\新建文件夹\ProxifierSetup.exe`。
 旧脚本改名保留了：`gost-proxy-a.bat.disabled` / `gost-proxy-b.bat.disabled`（改回 `.bat` 即可用）。
-退回前记得先 `netproxy.exe -no-autostart` 并退出，否则两边会抢 1080/1081 端口和驱动层拦截。
+退回前记得先 `netproxy.exe -no-autostart` 并退出，否则两边会抢驱动层拦截。
 
-**退回 govcl 界面**：旧的原生界面代码保留在 `cmd/govcl-gui/`（配合 `internal/gui/`）。
-把它的 `main.go` 放回根目录、换掉 `internal/webui` 的调用即可，引擎部分完全不用动。
+> 退回 Proxifier 后需要自己跑 gost。原来那两个 `.bat` 里的 `-L` 监听地址是 `127.0.0.1:1080/1081`，
+> 而本程序现在**不需要也不使用**这两个端口（上游是原生直连的），所以两边不会抢端口。
 
 ---
 
@@ -256,7 +264,9 @@ bindings 由 Wails 在运行时从 `options.Bind` 自动生成。
 netproxy.exe                     # 正常：带界面
 netproxy.exe -headless           # 无界面，只跑引擎（自动化测试用）
 netproxy.exe -config D:\x.yaml   # 指定配置文件
-netproxy.exe -import-bats "C:\Users\Administrator\Desktop\gost"  # 从旧 bat 导入链路，然后退出
+netproxy.exe -import-bats "C:\Users\Administrator\Desktop\gost"  # 从旧 gost .bat 导入链路（只取 -F），然后退出
+netproxy.exe -test-upstream      # 实测原生上游链路（真发 HTTP 请求），不需管理员
+netproxy.exe -clash-check        # 与 Clash 的共存检测，不需管理员
 netproxy.exe -autostart          # 装开机自启（计划任务），然后退出
 netproxy.exe -no-autostart       # 移除开机自启，然后退出
 netproxy.exe -no-elevate         # 不自动提权（调试）
@@ -281,11 +291,10 @@ netproxy.exe -no-elevate         # 不自动提权（调试）
 
 **驱动路径会自愈**：`ensureDriverPath` 检查服务里登记的 `.sys` 是否在当前目录，不符就重建服务。
 
-**gost 是"每条链一个进程"**：gost 2.x 的命令行**不按位置配对** `-L`/`-F`，
-多个 `-F` 会被拼成一条链（`1080 → proxy-a → proxy-b → 目标`），内网直接超时。所以一条链一个进程。
-
-**子进程回收靠 Job Object**（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`）：
-主程序被强杀时 gost 子进程也跟着死，不会留下孤儿占着端口。
+**上游是原生实现，不跑 gost**：`internal/upstream` 在 Go 里完成 TLS + RFC1929 SOCKS5 认证 + CONNECT。
+原来那条链是 `relay → 本地 gost(SOCKS5) → TLS → 上游`，现在直接 `relay → TLS → 上游`：
+少一个外部依赖、少一跳本地握手、没有子进程要托管。旧的 gost `.bat` 可导入（脚本里的 `-F` 就是上游 URL），
+`internal/gostbat` 只负责解析它，**不启动 gost**。
 
 **所有外部命令必须走 `internal/winrun`**：本程序是 GUI 子系统、没有自己的控制台，
 直接 `exec.Command` 调 `schtasks`/`sc` 会**每次弹一个控制台窗口**。
@@ -301,15 +310,15 @@ main.go                          组装、单实例、自动提权、计划任�
 frontend/                        界面（index.html / style.css / app.js，手写，无构建链）
 internal/webui/backend.go        暴露给前端的 API（window.go.webui.Backend.*）
 internal/webui/tray_windows.go   原生托盘 + 系统通知气泡
-internal/app/app.go              启停编排（hosts → gost → 等端口 → 引擎）
+internal/app/app.go              启停编排（hosts → 引擎）
 internal/engine/engine.go        WinDivert 拦截、地址改写、relay、连接映射
 internal/rules/rules.go          网段规则表（合并 CIDR 成区间）
-internal/socks/socks.go          最小 SOCKS5 客户端（链路自检用）
-internal/gostproc/               gost 子进程托管 + .bat 解析
+internal/socks/socks.go          最小 SOCKS5 客户端（支持 RFC1929 认证与 TLS）
+internal/upstream/                上游连接原生实现（TLS + SOCKS5 认证 + CONNECT）
+internal/gostbat/                 只解析旧 gost .bat（导入用，不启动 gost）
 internal/hostsmgr/               hosts 标记区块管理
 internal/config/                 配置读写校验
 internal/autostart/              计划任务自启
 internal/winrun/                 起外部进程时隐藏控制台窗口
 internal/logbus/                 日志总线（环形缓冲 + 订阅 + 落盘）
-internal/gui/                    旧的 govcl 原生界面（保留未用，见 cmd/govcl-gui）
 ```

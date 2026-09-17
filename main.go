@@ -36,7 +36,7 @@ import (
 	"netproxy/internal/app"
 	"netproxy/internal/autostart"
 	"netproxy/internal/config"
-	"netproxy/internal/gostproc"
+	"netproxy/internal/gostbat"
 	"netproxy/internal/logbus"
 	"netproxy/internal/webui"
 )
@@ -243,7 +243,7 @@ func doImportBats(cfgPath, dir string) error {
 	if err != nil {
 		return err
 	}
-	got := gostproc.ScanBatDir(dir)
+	got := gostbat.ScanBatDir(dir)
 	if len(got) == 0 {
 		return fmt.Errorf("在 %s 里没找到含 -L/-F 的 gost 批处理", dir)
 	}
