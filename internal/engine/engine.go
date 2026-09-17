@@ -28,7 +28,6 @@ import (
 	"netproxy/internal/config"
 	"netproxy/internal/logbus"
 	"netproxy/internal/rules"
-	"netproxy/internal/socks"
 	"netproxy/internal/upstream"
 )
 
@@ -196,29 +195,17 @@ func (e *Engine) acceptLoop() {
 	}
 }
 
-// dialUpstream 建立到目标的上游连接。
-//
-// 首选【原生】：直接按 chain.forward 连上游（socks5+tls，TLS 内做 SOCKS5 认证 + CONNECT）。
-// 这样不需要外部 gost.exe、不需要本地 1080/1081 监听、少一跳本地握手。
-//
-// 回退：forward 为空或解析失败时，退回"连本地 socks5 监听"的旧路径
-// （兼容外置 gost、或其它自己跑的 socks 服务）。
+// dialUpstream 建立到目标的上游连接（上游是原生实现的）。
 func (e *Engine) dialUpstream(ch config.Chain, dst net.IP, dport uint16) (net.Conn, error) {
-	if fwd := strings.TrimSpace(ch.Forward); fwd != "" {
-		up, err := upstream.Parse(fwd)
-		if err == nil {
-			c, err := up.Dial(dst, dport, 10*time.Second)
-			if err == nil {
-				return c, nil
-			}
-			return nil, fmt.Errorf("原生上游失败(%s): %w", up.String(), err)
-		}
-		e.bus.Warn("[%s] 上游 URL 解析失败，回退到本地 socks 监听 %s: %v", ch.Name, ch.Listen, err)
+	up, err := upstream.Parse(ch.Forward)
+	if err != nil {
+		return nil, fmt.Errorf("链 %s 的上游无法实现: %w", ch.Name, err)
 	}
-	if strings.TrimSpace(ch.Listen) == "" {
-		return nil, fmt.Errorf("链 %s 既没有可用的 forward，也没有 listen", ch.Name)
+	c, err := up.Dial(dst, dport, 10*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", up.String(), err)
 	}
-	return socks.Dial(ch.Listen, dst, dport, 10*time.Second)
+	return c, nil
 }
 
 func (e *Engine) handleConn(c net.Conn) {

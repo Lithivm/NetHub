@@ -349,7 +349,7 @@ code, .mono { font-family: var(--font-mono); }
   background: var(--card-strong); color: var(--muted);
   font-size: var(--fs-xs); font-weight: 700; font-family: var(--font-mono);
 }
-.chain-grid { grid-template-columns: 150px 170px minmax(200px, 1fr) minmax(120px, .7fr) 150px; }
+.chain-grid { grid-template-columns: 130px minmax(240px, 1.6fr) minmax(160px, 1fr) 160px; }
 .rule-grid  { grid-template-columns: 46px 220px 150px minmax(160px, 1fr) 150px; }
 
 .empty {

@@ -68,8 +68,6 @@ chains:                   # 每条链 = 一个上游代理
   - name: proxy-a             # 链名（下面 routes 里引用）
     forward: socks5+tls://IP:PORT?auth=XXXX   # 上游 URL（凭据在这里）
     note: 内网主体链路        # 备注，随便写
-    # listen: 127.0.0.1:1080   # 可选：只在你想用外置 socks5 时才填
-    #                            （原来 gost -L 的值，现在不需要了）
   - name: proxy-b
     forward: socks5+tls://IP:PORT?auth=XXXX
     note: 192.168.100.*
@@ -100,8 +98,14 @@ ui:
 |---|---|
 | `socks5+tls://host:port?auth=<base64(user:pass)>` | 现网两个上游就是这种 |
 | `socks5+tls://user:pass@host:port` | 凭据写在 userinfo |
-| `socks5://host:port` | 明文（不推荐） |
+| `socks5://` / `socks://` / `socks5h://` | 明文 SOCKS5（后两个是别名）|
+| `socks4://` / `socks4a://` | 老设备只提供 SOCKS4 时用 |
+| `http://` / `https://` | HTTP CONNECT 代理（可带 `user:pass@`），gost 的默认协议 |
 | 末尾加 `&secure=true` | 校验上游证书。**默认不校验证书**，与 gost 的 socks5+tls 默认行为一致 |
+
+**不打算支持的**（评估过，理由见下）：`quic` / `kcp` / `http2`(h2) / `obfs4` 这些**传输层**
+需要复刻 gost 自研的多路复用与帧封装（不是"套一层"），成本高且随 gost 版本变；
+`forward` / `direct` / `remote` 是"目标写死在配置里"的端口转发，与我们的动态目标语义不符。
 
 改配置**界面里改就行**（编辑即时保存），或手改 yaml 再重启程序。
 注意 `hosts.manage` / `relay` 这两项要**重启服务**才生效。
@@ -314,7 +318,7 @@ internal/app/app.go              启停编排（hosts → 引擎）
 internal/engine/engine.go        WinDivert 拦截、地址改写、relay、连接映射
 internal/rules/rules.go          网段规则表（合并 CIDR 成区间）
 internal/socks/socks.go          最小 SOCKS5 客户端（支持 RFC1929 认证与 TLS）
-internal/upstream/                上游连接原生实现（TLS + SOCKS5 认证 + CONNECT）
+internal/upstream/                上游连接原生实现（socks5 / socks4 / http CONNECT + TLS）
 internal/gostbat/                 只解析旧 gost .bat（导入用，不启动 gost）
 internal/hostsmgr/               hosts 标记区块管理
 internal/config/                 配置读写校验

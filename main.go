@@ -247,12 +247,12 @@ func doImportBats(cfgPath, dir string) error {
 	if len(got) == 0 {
 		return fmt.Errorf("在 %s 里没找到含 -L/-F 的 gost 批处理", dir)
 	}
-	// 按顺序覆盖现有链的 listen/forward（链名与规则保持不动）
+	// 按顺序覆盖现有链的上游（链名与规则保持不动）。
+	// 只取 -F：上游能力已内置，脚本里的 -L 不再需要。
 	for i := range cfg.Chains {
 		if i >= len(got) {
 			break
 		}
-		cfg.Chains[i].Listen = got[i].Listen
 		cfg.Chains[i].Forward = got[i].Forward
 	}
 	if err := cfg.Save(); err != nil {

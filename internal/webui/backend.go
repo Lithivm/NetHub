@@ -12,8 +12,9 @@ package webui
 import (
 	"context"
 	"fmt"
-	"netproxy/internal/winrun"
 	"net"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -28,8 +29,8 @@ import (
 	"netproxy/internal/gostbat"
 	"netproxy/internal/hostsmgr"
 	"netproxy/internal/logbus"
-	"netproxy/internal/socks"
 	"netproxy/internal/upstream"
+	"netproxy/internal/winrun"
 )
 
 // Backend 是绑定给前端的对象。
@@ -126,10 +127,10 @@ type StateView struct {
 }
 
 type ChainView struct {
-	Name    string `json:"name"`
-	Listen  string `json:"listen"`
-	Forward string `json:"forward"` // 已遮蔽凭据
-	Note    string `json:"note"`
+	Name    string   `json:"name"`
+	_       struct{} `json:"-"`
+	Forward string   `json:"forward"` // 已遮蔽凭据
+	Note    string   `json:"note"`
 }
 
 type RouteView struct {
@@ -159,17 +160,17 @@ type SettingsView struct {
 }
 
 type ChainInput struct {
-	Name    string `json:"name"`
-	Listen  string `json:"listen"`
-	Forward string `json:"forward"`
-	Note    string `json:"note"`
+	Name    string   `json:"name"`
+	_       struct{} `json:"-"`
+	Forward string   `json:"forward"`
+	Note    string   `json:"note"`
 }
 
 type BatEntryView struct {
-	File    string `json:"file"`
-	Listen  string `json:"listen"`
-	Forward string `json:"forward"`
-	Name    string `json:"name"`
+	File    string   `json:"file"`
+	_       struct{} `json:"-"`
+	Forward string   `json:"forward"`
+	Name    string   `json:"name"`
 }
 
 type ImportResult struct {
@@ -240,7 +241,7 @@ func (b *Backend) GetChains() []ChainView {
 	out := make([]ChainView, 0, len(b.a.Cfg.Chains))
 	for _, c := range b.a.Cfg.Chains {
 		out = append(out, ChainView{
-			Name: c.Name, Listen: c.Listen,
+			Name:    c.Name,
 			Forward: gostbat.Redact(c.Forward), Note: c.Note,
 		})
 	}
@@ -348,8 +349,8 @@ func (b *Backend) MoveChain(from, to int) error {
 
 func (in ChainInput) toChain() config.Chain {
 	return config.Chain{
-		Name:    strings.TrimSpace(in.Name),
-		Listen:  config.NormalizeListenLoose(strings.TrimSpace(in.Listen)),
+		Name: strings.TrimSpace(in.Name),
+
 		Forward: strings.TrimSpace(in.Forward),
 		Note:    strings.TrimSpace(in.Note),
 	}
@@ -406,7 +407,7 @@ func (b *Backend) PickBatFile() (*BatEntryView, error) {
 	if !ok {
 		return nil, fmt.Errorf("这个文件里没找到成对的 -L \"…\" / -F \"…\"：\n%s", path)
 	}
-	return &BatEntryView{File: be.File, Listen: be.Listen, Forward: be.Forward, Name: be.Name()}, nil
+	return &BatEntryView{File: be.File, Forward: be.Forward, Name: be.Name()}, nil
 }
 
 // ImportBatDir 选一个目录，批量把里面的 gost .bat 加为链（同名则更新上游）。
@@ -430,7 +431,7 @@ func (b *Backend) ImportBatDir() (*ImportResult, error) {
 		if idx := b.a.Cfg.FindChain(name); idx >= 0 {
 			// 同名链已存在 → 只更新 listen/forward（最常见的"换服务器"场景）
 			cur := b.a.Cfg.Chains[idx]
-			cur.Listen, cur.Forward = be.Listen, be.Forward
+			cur.Forward = be.Forward
 			if err := b.a.Cfg.UpdateChain(name, cur); err != nil {
 				res.Skipped = append(res.Skipped, fmt.Sprintf("%s：更新失败（%v）", name, err))
 			} else {
@@ -439,13 +440,13 @@ func (b *Backend) ImportBatDir() (*ImportResult, error) {
 			continue
 		}
 		err := b.a.Cfg.AddChain(config.Chain{
-			Name: name, Listen: be.Listen, Forward: be.Forward,
+			Name: name, Forward: be.Forward,
 			Note: "从 " + be.File + " 导入",
 		})
 		if err != nil {
 			res.Skipped = append(res.Skipped, fmt.Sprintf("%s：跳过（%v）", name, err))
 		} else {
-			res.Added = append(res.Added, fmt.Sprintf("%s：已新增（%s）", name, be.Listen))
+			res.Added = append(res.Added, fmt.Sprintf("%s：已更新上游（来自 %s）", name, be.File))
 		}
 	}
 	if err := b.save("从 .bat 导入"); err != nil {
@@ -571,28 +572,10 @@ func (b *Backend) SelfTest() {
 					}
 					desc = "原生上游 " + up.String()
 				} else {
-					b.a.Bus.Warn("[%s] 上游 URL 解析失败，改用本地监听: %v", ch.Name, perr)
-				}
-			}
-			if dial == nil {
-				if strings.TrimSpace(ch.Listen) == "" {
-					b.a.Bus.Error("[%s] 既没有可用的 forward，也没有 listen，无法自检", ch.Name)
+					b.a.Bus.Error("[%s] 上游无法解析，跳过：%v", ch.Name, perr)
 					bad++
 					continue
 				}
-				c, err := net.DialTimeout("tcp", ch.Listen, 2*time.Second)
-				if err != nil {
-					b.a.Bus.Error("[%s] 本地 socks5 %s 连不上：%v", ch.Name, ch.Listen, err)
-					bad++
-					b.emit("selftest", ProbeView{Target: ch.Listen, OK: false, Err: err.Error()})
-					continue
-				}
-				c.Close()
-				b.a.Bus.Info("[%s] 本地 socks5 %s 正常", ch.Name, ch.Listen)
-				dial = func(ip net.IP, port uint16) (net.Conn, error) {
-					return socks.Dial(ch.Listen, ip, port, 2500*time.Millisecond)
-				}
-				desc = "本地 socks5 " + ch.Listen
 			}
 
 			// 探针用真实主机 IP（hosts 里的），不用网段的 .1（那不是真主机）
@@ -717,4 +700,103 @@ func ShowMainWindow(b *Backend) {
 	}
 	wruntime.WindowShow(b.ctx)
 	wruntime.WindowUnminimise(b.ctx)
+}
+
+// ───────────────────────── 导出 / 导入设置 ─────────────────────────
+
+// ExportConfig 把当前配置（链路上游 + 路由规则 + 其它设置）另存为一个 yaml，
+// 同事拿到后放在 exe 同目录改名 config.yaml 即可直接用。
+//
+// ⚠️ 导出内容**包含上游凭据**（forward 里的 auth=），所以：
+//   - 界面上的按钮要有明确提示
+//   - 日志里不打印导出内容，只打印路径
+func (b *Backend) ExportConfig() (string, error) {
+	name := "netproxy-config.yaml"
+	if p := b.a.Cfg.Path(); p != "" {
+		dir := dirOf(p)
+		name = filepath.Join(dir, "netproxy-config.yaml")
+	}
+	path, err := wruntime.SaveFileDialog(b.ctx, wruntime.SaveDialogOptions{
+		Title:           "导出设置（含上游凭据，请通过安全渠道分发）",
+		DefaultFilename: name,
+		Filters: []wruntime.FileFilter{
+			{DisplayName: "配置文件 (*.yaml)", Pattern: "*.yaml"},
+			{DisplayName: "所有文件 (*.*)", Pattern: "*.*"},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	if path == "" {
+		return "", nil // 用户取消
+	}
+	if !strings.HasSuffix(strings.ToLower(path), ".yaml") && !strings.HasSuffix(strings.ToLower(path), ".yml") {
+		path += ".yaml"
+	}
+	if err := b.a.Cfg.SaveAs(path); err != nil {
+		return "", err
+	}
+	b.a.Bus.Info("设置已导出到 %s（含上游凭据，请通过安全渠道分发）", path)
+	return path, nil
+}
+
+// ExportSummary 导出一份**不含凭据**的纯文本说明：上游（遮蔽后）+ 规则 + 用法。
+// 适合贴在群里让人先看懂配置，需要真配置时再单独发 ExportConfig 的产物。
+func (b *Backend) ExportSummary() (string, error) {
+	name := "netproxy-配置说明.txt"
+	path, err := wruntime.SaveFileDialog(b.ctx, wruntime.SaveDialogOptions{
+		Title:           "导出配置说明（不含凭据）",
+		DefaultFilename: name,
+		Filters: []wruntime.FileFilter{
+			{DisplayName: "文本文件 (*.txt)", Pattern: "*.txt"},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	if path == "" {
+		return "", nil
+	}
+	if !strings.HasSuffix(strings.ToLower(path), ".txt") {
+		path += ".txt"
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "netproxy 配置说明（不含凭据）\n")
+	fmt.Fprintf(&sb, "生成时间：%s\n\n", time.Now().Format("2006-01-02 15:04:05"))
+
+	sb.WriteString("【链路 / 上游】\n")
+	for _, c := range b.a.Cfg.Chains {
+		fmt.Fprintf(&sb, "  %s\n    上游：%s\n", c.Name, gostbat.Redact(c.Forward))
+		if c.Note != "" {
+			fmt.Fprintf(&sb, "    说明：%s\n", c.Note)
+		}
+	}
+
+	sb.WriteString("\n【路由规则】（自上而下匹配，命中即止）\n")
+	for i, r := range b.a.Cfg.Routes {
+		fmt.Fprintf(&sb, "  %d. %s  →  %s\n", i+1, r.Target, r.Chain)
+	}
+
+	sb.WriteString("\n【其它设置】\n")
+	fmt.Fprintf(&sb, "  relay：%s\n", b.a.Cfg.Relay)
+	fmt.Fprintf(&sb, "  hosts 托管：%v（%d 条映射）\n", b.a.Cfg.Hosts.Manage, len(b.a.Cfg.Hosts.Entries))
+	fmt.Fprintf(&sb, "  界面主题：%s\n", b.a.Cfg.UI.Theme)
+
+	sb.WriteString("\n【同事怎么用】\n")
+	sb.WriteString("  1. 把 netproxy.exe、WinDivert.dll、WinDivert64.sys、netproxy.ico 和 config.yaml\n")
+	sb.WriteString("     放在同一个文件夹里\n")
+	sb.WriteString("  2. 双击 netproxy.exe（会弹一次 UAC，因为要加载内核驱动）\n")
+	sb.WriteString("  3. 界面会显示「内网 N/N 全部走直连 …… 走向正确」就说明好了\n")
+	sb.WriteString("  4. 如需开机自启：界面「设置 → 开机自启」勾上（计划任务 + 最高权限，不弹 UAC）\n")
+	sb.WriteString("\n【注意】\n")
+	sb.WriteString("  · 本文件不含上游凭据；真正的 config.yaml 含凭据，请通过安全渠道分发\n")
+	sb.WriteString("  · 内网域名需要同事本机 hosts 里有映射（或让程序托管：设置 → hosts 接管）\n")
+	sb.WriteString("  · Clash 必须让内网走直连：设置 → 与 Clash 共存 会检测并给出要填的绕过地址\n")
+
+	if err := os.WriteFile(path, []byte(sb.String()), 0o644); err != nil {
+		return "", err
+	}
+	b.a.Bus.Info("配置说明已导出到 %s", path)
+	return path, nil
 }

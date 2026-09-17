@@ -221,3 +221,84 @@ func DialTLS(addr string, c Creds, tlsConf *tls.Config, dstIP net.IP, dstPort ui
 	}
 	return dialWith(addr, c, tlsConf, atypIPv4, v4, dstPort, timeout)
 }
+
+// ───────────────────────── SOCKS4 / 4a ─────────────────────────
+//
+// 为什么还支持这么老的东西：它极简（没有方法协商、明文口令），
+// 有些内网/老设备只提供 SOCKS4，作为兼容层留着成本很低。
+
+// DialSOCKS4 走 SOCKS4（需要 IP）或 SOCKS4a（把域名交给代理解析）。
+// host 给域名时走 4a 的 0.0.0.x 约定。
+func DialSOCKS4(proxy, user, host string, dstPort uint16, timeout time.Duration) (net.Conn, error) {
+	return DialSOCKS4TLS(proxy, user, host, dstPort, nil, timeout)
+}
+
+func socks4Handshake(c net.Conn, user, host string, dstPort uint16) error {
+	req := []byte{0x04, 0x01}
+	req = binary.BigEndian.AppendUint16(req, dstPort)
+	if ip := net.ParseIP(host); ip != nil && ip.To4() != nil {
+		req = append(req, ip.To4()...)
+	} else {
+		// SOCKS4a：IP 段填 0.0.0.1，之后跟域名
+		req = append(req, 0x00, 0x00, 0x00, 0x01)
+	}
+	req = append(req, []byte(user)...)
+	req = append(req, 0x00)
+	if ip := net.ParseIP(host); ip == nil || ip.To4() == nil {
+		req = append(req, []byte(host)...)
+		req = append(req, 0x00)
+	}
+	if _, err := c.Write(req); err != nil {
+		return fmt.Errorf("socks4 请求写入失败: %w", err)
+	}
+	var rep [8]byte
+	if _, err := io.ReadFull(c, rep[:]); err != nil {
+		return fmt.Errorf("socks4 应答读取失败: %w", err)
+	}
+	if rep[1] != 0x5a {
+		return fmt.Errorf("socks4 CONNECT 被拒: %s", socks4Text(rep[1]))
+	}
+	return nil
+}
+
+func socks4Text(code byte) string {
+	switch code {
+	case 0x5b:
+		return "request rejected or failed"
+	case 0x5c:
+		return "identd not reachable"
+	case 0x5d:
+		return "identd user-id mismatch"
+	default:
+		return fmt.Sprintf("unknown 0x%02x", code)
+	}
+}
+
+// DialSOCKS4TLS 与 DialSOCKS4 相同，但可先在连接上做 TLS。
+// （SOCKS4 协议本身没有 TLS，这里是"TLS 传输层 + SOCKS4 协议"的组合，gost 也允许这么写。）
+func DialSOCKS4TLS(proxy, user, host string, dstPort uint16, tlsConf *tls.Config,
+	timeout time.Duration) (net.Conn, error) {
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	raw, err := net.DialTimeout("tcp", proxy, timeout)
+	if err != nil {
+		return nil, fmt.Errorf("连代理失败: %w", err)
+	}
+	_ = raw.SetDeadline(time.Now().Add(timeout))
+	var c net.Conn = raw
+	if tlsConf != nil {
+		tc := tls.Client(raw, tlsConf)
+		if err := tc.Handshake(); err != nil {
+			raw.Close()
+			return nil, fmt.Errorf("TLS 握手失败: %w", err)
+		}
+		c = tc
+	}
+	if err := socks4Handshake(c, user, host, dstPort); err != nil {
+		c.Close()
+		return nil, err
+	}
+	_ = c.SetDeadline(time.Time{})
+	return c, nil
+}

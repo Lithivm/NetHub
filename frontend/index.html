@@ -153,6 +153,24 @@
       </div>
 
       <div class="card">
+        <div class="card-head"><h2>分发与备份</h2>
+          <span class="hint">导出后同事放到 netproxy.exe 同目录即可用</span>
+        </div>
+        <div class="card-body form">
+          <div class="input-row">
+            <button class="btn btn-sm btn-primary" id="btnExportCfg">导出配置（含凭据）</button>
+            <button class="btn btn-sm" id="btnExportDoc">导出配置说明（无凭据）</button>
+          </div>
+          <div class="hint">
+            <b>导出配置</b>：完整的 config.yaml（含链路、上游、规则、设置）。
+            <span class="clash-no">里面有上游凭据（auth= 是 用户:口令 的 base64），请通过安全渠道分发。</span><br>
+            <b>导出配置说明</b>：纯文本，上游地址已遮蔽、无凭据，适合先发给同事看，
+            末尾附了他们拿到真配置后该怎么用。
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
         <div class="card-head"><h2>文件位置</h2></div>
         <div class="card-body form">
           <div class="pathline"><span class="hint">配置文件</span><code id="pathConfig">-</code></div>

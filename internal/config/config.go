@@ -13,11 +13,12 @@ import (
 	"netproxy/internal/upstream"
 )
 
-// Chain 一条隧道链：一个上游代理（url）+ 可选的本地 socks5 监听。
+// Chain 一条隧道链 = 一个上游代理。
+//
+// 没有本地监听字段：上游是原生实现的，不需要本地 gost，也不需要 socks5 中转。
 type Chain struct {
 	Name    string `yaml:"name"`
-	Listen  string `yaml:"listen,omitempty"` // 可选的本地 socks5（只在用外置 socks5 时才需要）
-	Forward string `yaml:"forward"`          // 上游代理 URL，例如 socks5+tls://host:port?auth=...
+	Forward string `yaml:"forward"` // 上游代理 URL，例如 socks5+tls://host:port?auth=...
 	Note    string `yaml:"note,omitempty"`
 }
 
@@ -57,8 +58,8 @@ func Default() *Config {
 	return &Config{
 		Relay: "127.0.0.1:0",
 		Chains: []Chain{
-			{Name: "proxy-a", Listen: "127.0.0.1:1080", Forward: "", Note: "内网主体链路（10.0.0.* / 10.0.1.*）"},
-			{Name: "proxy-b", Listen: "127.0.0.1:1081", Forward: "", Note: "proxy-b 链路（192.168.100.*）"},
+			{Name: "proxy-a", Forward: "", Note: "内网主体链路（10.0.0.* / 10.0.1.*）"},
+			{Name: "proxy-b", Forward: "", Note: "proxy-b 链路（192.168.100.*）"},
 		},
 		Routes: []Route{
 			{Target: "10.0.0.0/24", Chain: "proxy-a"},
@@ -125,7 +126,6 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("至少要配置一条链")
 	}
 	seen := map[string]bool{}
-	seenListen := map[string]string{}
 	for i, ch := range c.Chains {
 		if strings.TrimSpace(ch.Name) == "" {
 			return fmt.Errorf("第 %d 条链: name 不能为空", i+1)
@@ -134,24 +134,12 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("链名重复: %s", ch.Name)
 		}
 		seen[ch.Name] = true
-		if strings.TrimSpace(ch.Forward) == "" && strings.TrimSpace(ch.Listen) == "" {
-			return fmt.Errorf("链 %s: forward（上游 URL）与 listen（本地 socks5）至少要有一个。"+
-				"正常只需 forward：上游能力已内置，不需要本地 gost", ch.Name)
+		fwd := strings.TrimSpace(ch.Forward)
+		if fwd == "" {
+			return fmt.Errorf("链 %s: 必须填 forward（上游代理 URL）", ch.Name)
 		}
-		if fwd := strings.TrimSpace(ch.Forward); fwd != "" {
-			if _, err := upstream.Parse(fwd); err != nil {
-				return fmt.Errorf("链 %s 的上游无法原生实现：%v", ch.Name, err)
-			}
-		}
-		if ch.Listen != "" && !strings.Contains(ch.Listen, ":") {
-			return fmt.Errorf("链 %s: listen 应为 host:port，当前 %q", ch.Name, ch.Listen)
-		}
-		// 两条链监听同一个端口会直接绑定失败
-		if ch.Listen != "" {
-			if other, dup := seenListen[ch.Listen]; dup {
-				return fmt.Errorf("链 %s 和链 %s 的监听端口相同（%s）", ch.Name, other, ch.Listen)
-			}
-			seenListen[ch.Listen] = ch.Name
+		if _, err := upstream.Parse(fwd); err != nil {
+			return fmt.Errorf("链 %s 的上游无法实现: %v", ch.Name, err)
 		}
 	}
 	for i, r := range c.Routes {
@@ -212,7 +200,6 @@ func (c *Config) AddChain(ch Chain) error {
 	if c.FindChain(ch.Name) >= 0 {
 		return fmt.Errorf("链名 %q 已存在", ch.Name)
 	}
-	ch.Listen = NormalizeListenLoose(ch.Listen)
 	c.Chains = append(c.Chains, ch)
 	if err := c.Validate(); err != nil {
 		c.Chains = c.Chains[:len(c.Chains)-1] // 回滚，不留非法状态
@@ -230,7 +217,6 @@ func (c *Config) UpdateChain(oldName string, ch Chain) error {
 	if ch.Name != oldName && c.FindChain(ch.Name) >= 0 {
 		return fmt.Errorf("链名 %q 已存在", ch.Name)
 	}
-	ch.Listen = NormalizeListenLoose(ch.Listen)
 	old := c.Chains[i]
 	c.Chains[i] = ch
 	if ch.Name != oldName {
@@ -389,4 +375,22 @@ func DefaultPath() string {
 		return "config.yaml"
 	}
 	return filepath.Join(filepath.Dir(exe), "config.yaml")
+}
+
+// SaveAs 把当前配置写到另一个路径（导出用）。
+//
+// 不改变 c.path —— 导出不应该影响程序正在用的配置。
+func (c *Config) SaveAs(path string) error {
+	b, err := yaml.Marshal(c)
+	if err != nil {
+		return err
+	}
+	header := "# netproxy 配置 —— 由程序导出\n" +
+		"# 同事拿到后放到 netproxy.exe 同目录、改名 config.yaml 即可使用。\n" +
+		"# ⚠ forward 里含上游凭据（auth= 是 用户:口令 的 base64），请通过安全渠道分发。\n"
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append([]byte(header), b...), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }

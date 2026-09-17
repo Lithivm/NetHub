@@ -183,7 +183,7 @@ async function loadChains() {
   t.replaceChildren();
 
   const head = el('div', 'trow thead chain-grid');
-  ['链名', '上游（凭据已遮蔽）', '本地 socks5（可选）', '说明', ''].forEach(h =>
+  ['链名', '上游（凭据已遮蔽）', '说明', ''].forEach(h =>
     head.appendChild(el('div', 'cell', h)));
   t.appendChild(head);
 
@@ -197,7 +197,6 @@ async function loadChains() {
     const row = el('div', 'trow chain-grid');
     row.appendChild(el('div', 'cell strong', c.name));
     row.appendChild(el('div', 'cell mono', c.forward));
-    row.appendChild(el('div', 'cell mono dim', c.listen || '—'));
     row.appendChild(el('div', 'cell dim', c.note || ''));
 
     const acts = el('div', 'cell actions');
@@ -219,11 +218,10 @@ function btn(text, cls, fn) {
 /* 链路编辑表单 —— 也用于"从 bat 导入后回填" */
 function chainForm(index, preset) {
   const isNew = index == null;
-  const src = preset || (isNew ? { name: '', listen: '', forward: '', note: '' } : chains[index]);
+  const src = preset || (isNew ? { name: '', forward: '', note: '' } : chains[index]);
 
   const name = input('text', src.name, '例如 proxy-a（规则里用这个名字引用它）');
-  const listen = input('text', src.listen, 'host:port，例如 127.0.0.1:1082');
-  const forward = input('text', src.forward, 'gost -F 的值');
+  const forward = input('text', src.forward, '例如 socks5+tls://host:port?auth=…');
   forward.classList.add('mono');
   const note = input('text', src.note, '随便写（显示在链路的说明列）');
 
@@ -231,23 +229,22 @@ function chainForm(index, preset) {
     try {
       const r = await call('PickBatFile');
       if (!r) return;                      // 用户取消
-      listen.value = r.listen;
-      forward.value = r.forward;
+      forward.value = r.forward;           // 只取 -F：上游能力已内置，-L 不再需要
       if (!name.value) name.value = r.name;
-      toast('已读取 ' + r.file, r.listen, 'success');
+      toast('已读取 ' + r.file, r.forward, 'success');
     } catch (e) { modal.error(fail(e)); }
   });
 
   const warn = el('p', 'hint', '凭据会明文保存在 config.yaml，别外传。');
   const nodes = [
-    field('链名', name), field('上游转发', forward, 'gost -F 的值；可直接选旧 .bat 自动填入'),
-    field('本地 socks5（可选）', listen, '只在另外托管 gost、或用外置 socks5 时才需要'),
+    field('链名', name),
+    field('上游转发', forward, '支持 socks5 / socks5+tls / socks4 / http / https；旧 gost 脚本可直接导入'),
     field('', importBtn), field('备注', note), field('', warn),
   ];
 
   modal.open(isNew ? '添加链路' : '编辑链路', nodes, async () => {
     try {
-      const payload = { name: name.value, listen: listen.value, forward: forward.value, note: note.value };
+      const payload = { name: name.value, forward: forward.value, note: note.value };
       if (isNew) await call('AddChain', payload);
       else await call('UpdateChain', src.name, payload);
       modal.close();
@@ -348,7 +345,7 @@ function ruleForm(index) {
   target.classList.add('mono');
   const sel = el('select', 'input');
   chains.forEach(c => {
-    const o = el('option', null, c.name + '   —   ' + c.listen);
+    const o = el('option', null, c.name + '   —   ' + (c.forward || ''));
     o.value = c.name;
     sel.appendChild(o);
   });
@@ -544,6 +541,18 @@ function wire() {
   document.getElementById('btnSaveRestart').onclick = () => saveSettings(true);
   document.getElementById('btnOpenConfig').onclick = () => call('OpenConfigFile').catch(fail);
   document.getElementById('btnOpenDir').onclick = () => call('OpenProgramDir').catch(fail);
+  document.getElementById('btnExportCfg').onclick = async () => {
+    try {
+      const p = await call('ExportConfig');
+      if (p) toast('已导出配置', p + '　（含上游凭据，请通过安全渠道分发）', 'success');
+    } catch (e) { fail(e); }
+  };
+  document.getElementById('btnExportDoc').onclick = async () => {
+    try {
+      const p = await call('ExportSummary');
+      if (p) toast('已导出配置说明', p + '　（不含凭据，可安全发送）', 'success');
+    } catch (e) { fail(e); }
+  };
 
   document.getElementById('btnHostsApply').onclick = async () => {
     const entries = document.getElementById('setHostsEntries').value.split('\n').map(s => s.trim()).filter(Boolean);
