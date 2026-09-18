@@ -77,14 +77,22 @@ $dist = Join-Path $here 'dist'   # 只有一种包：永远不含配置与日志
 
 # ── 1) 编译 ─────────────────────────────────────────────────
 if (-not $SkipBuild) {
-    Info '编译 nethub.exe（-tags production，缺它 Wails 会弹构建错误框）…'
+    Info '编译（-tags production，缺它 Wails 会弹构建错误框）…'
     $env:GOPROXY = 'https://goproxy.cn,direct'
     $env:GOSUMDB = 'off'
+    # 先编译成临时名再换上去：nethub.exe 正在运行时 Windows 不允许覆盖，
+    # 直接 -o nethub.exe 只会丢一个“拒绝访问”，看不出是“程序还开着”。
     Push-Location $here
     try {
-        & go build -tags production -ldflags '-H=windowsgui -s -w' -o nethub.exe .
+        & go build -tags production -ldflags '-H=windowsgui -s -w' -o nethub.build.exe .
         if ($LASTEXITCODE -ne 0) { Die 'go build 失败' }
     } finally { Pop-Location }
+    try {
+        Move-Item -Force (Join-Path $here 'nethub.build.exe') (Join-Path $here 'nethub.exe')
+    } catch {
+        Remove-Item (Join-Path $here 'nethub.build.exe') -Force -ErrorAction SilentlyContinue
+        Die 'nethub.exe 正在运行（被占用），请先从托盘退出 NetHub 再打包'
+    }
     Info '  编译完成'
 }
 
