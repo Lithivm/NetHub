@@ -5,6 +5,7 @@ package logbus
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -39,6 +40,12 @@ func New(max int) *Bus {
 
 // SetFile 额外把日志写到文件（失败不致命，只报告一次）。
 func (b *Bus) SetFile(path string) error {
+	// 目录不存在就建（日志默认落在 <程序目录>\logs\）
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return err

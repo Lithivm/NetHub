@@ -16,7 +16,7 @@
 | `assets/logo.png` | ─ | **logo 源图**（仅构建时用；`tools_mkicon.go` 从它生成 ico） |
 | `nethub.syso` | ─ | **exe 图标资源**（构建时必需，否则 exe 没图标；已入库） |
 | `config.yaml.example` | ─ | 配置模板（占位符、无凭据）；复制成 `config.yaml` 再改 |
-| `nethub.log` | ❌ | 运行日志，自动生成，可随时删 |
+| `nethub.log` | ❌ | 运行日志，自动生成（默认在 `logs\` 子目录里），可随时删 |
 | `nethub-256.png` | ❌ | 图标预览图，由 `tools_mkicon.go` 顺带生成 |
 | `gost.exe` / `gost-*.bat` | ❌ | **不再需要**（导入完配置就可以删） |
 | `dist/` | ❌ | 打包产物（分发用），不进 git |
@@ -40,6 +40,9 @@ cd <仓库目录>
 go mod tidy
 go build -tags production -ldflags "-H=windowsgui -s -w" -o nethub.exe .
 ```
+
+本机开发时习惯编到运行时目录 `run\`（`-o run\nethub.exe`），把 exe / 驱动 / 配置 / 日志 与源码目录分开；
+程序把日志写在 `<配置文件所在目录>\logs\`，所以布局怎么变都不会把日志撒在源码里。
 
 **`-tags production` 是必需的** —— 不带它 Wails 会在启动时弹
 `Wails applications will not build without the correct build tags`。
@@ -82,6 +85,11 @@ rsrc -ico nethub.ico -arch amd64 -o nethub.syso
 
 
 ## 打包
+
+> ⚠️ **踩坑记录：PowerShell 脚本的编码。** Windows PowerShell 5.1 会把「没有 BOM 的 UTF-8 `.ps1`」
+> 按 ANSI（中文机器上是 GBK）解码，后果不是报错而是**静默跳过代码** —— 一个中文注释的末尾字节
+> 可能把行尾吃掉，下一行就变成注释的一部分。含中文的 `.ps1` 必须带 UTF-8 BOM；
+> 或者干脆写成纯 ASCII。打包脚本（`make-dist.ps1`）与包里的 `install-task.ps1` 都适用这条。
 
 ```powershell
 nethub.exe -autostart          # 注册开机自启（计划任务，静默提权、不弹 UAC）

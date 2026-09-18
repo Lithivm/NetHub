@@ -117,7 +117,8 @@ func main() {
 	}
 
 	bus := logbus.New(3000)
-	logDir := filepath.Dir(p)
+	// 日志单独放 logs\ —— 运行期产物不跟 exe/config 混在一个目录里
+	logDir := filepath.Join(filepath.Dir(p), "logs")
 	_ = bus.SetFile(filepath.Join(logDir, "nethub.log"))
 	bus.Info("NetHub 启动，配置 %s", p)
 	if !isElevated() {

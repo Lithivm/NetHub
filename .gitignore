@@ -32,3 +32,6 @@ local/
 
 # 文档里的界面截图（README 引用，要入库）
 !docs/screenshot.png
+
+# 运行时目录（exe / 驱动 / config.yaml / logs ，一律不入库）
+run/
