@@ -127,6 +127,22 @@ func (e *Engine) probeOneTarget(ref targetRef) {
 	}
 }
 
+// TargetRef 一个“最近用过”的业务目标（导出给链路自检用）。
+type TargetRef struct {
+	Target string // ip:port
+	Chain  string
+}
+
+// RecentTargets 最近用过的业务目标（按最后活动时间倒序，最多 limit 个）。
+func (e *Engine) RecentTargets(limit int) []TargetRef {
+	refs := e.recentTargets(limit)
+	out := make([]TargetRef, 0, len(refs))
+	for _, r := range refs {
+		out = append(out, TargetRef{Target: r.target, Chain: r.chain})
+	}
+	return out
+}
+
 // markTarget 写巡检结果；返回是否发生状态翻转、以及现在是不是"不好"。
 func (e *Engine) markTarget(target, chain string, ok bool, latency time.Duration, errText string) (flipped, bad bool) {
 	e.mu.Lock()

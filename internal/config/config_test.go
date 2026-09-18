@@ -449,11 +449,13 @@ func TestShadowSortPrecheck(t *testing.T) {
 	if got := c.ShadowedTargets(2); len(got) != 1 || got[0] != "10.0.0.0/24" {
 		t.Errorf("第 3 条应被标成影子: %v", got)
 	}
-	if got := c.ShadowedTargets(1); len(got) != 0 {
-		t.Errorf("窄规则不该被标成影子: %v", got)
+	// 窄规则排在宽规则后面 = 永远轮不到（旧测试以为没问题，其实是死的）
+	if got := c.ShadowedTargets(1); len(got) != 1 {
+		t.Errorf("窄规则排在宽规则后面应被标成影子: %v", got)
 	}
-	if got := c.ShadowedTargets(4); len(got) != 0 {
-		t.Errorf("同目标不同端口不是影子: %v", got)
+	// 端口版2 虽然和端口版1 端口不同，但被最上面那条无边界的 /24 包住了 → 仍是死的
+	if got := c.ShadowedTargets(4); len(got) != 1 {
+		t.Errorf("被更宽的规则包住（不管端口）也是影子: %v", got)
 	}
 
 	// 体检报告要把影子与“单上游”都点出来
@@ -518,5 +520,43 @@ func TestConfigBackupRestore(t *testing.T) {
 	}
 	if got := restored.Backups(); len(got) < 2 {
 		t.Errorf("回滚前应把当前配置也备一份: %v", got)
+	}
+}
+
+// 影子目标要认“被前面的宽网段整个包住”这种情况（最常见的排序错误），
+// 但同网段不同端口不算（端口维度上是两条不同的规则）。
+func TestShadowedByWiderRule(t *testing.T) {
+	c := &Config{Relay: "127.0.0.1:0", Chains: []Chain{{Name: "a", Forward: "socks5://127.0.0.1:1080"}}}
+	// 先宽后窄：窄的永远轮不到
+	c.Routes = []Route{
+		{Name: "宽", Targets: []string{"10.0.0.0/24"}, Chain: "a"},
+		{Name: "窄", Targets: []string{"10.0.0.5/32"}, Chain: "a"},
+		{Name: "窄但不同端口", Targets: []string{"10.0.0.7/32"}, Ports: []string{"80"}, Chain: "a"},
+	}
+	if got := c.ShadowedTargets(1); len(got) != 1 || got[0] != "10.0.0.5/32" {
+		t.Errorf("被宽规则包住的 /32 应被标成影子: %v", got)
+	}
+	if got := c.ShadowedTargets(2); len(got) != 1 {
+		t.Errorf("窄但端口不同，也算被“目标上”包住（端口没被盖住，但目标命中即停）: %v", got)
+	}
+	// 反过来（窄在前）就不该被标
+	c.Routes = []Route{
+		{Name: "窄", Targets: []string{"10.0.0.5/32"}, Chain: "a"},
+		{Name: "宽", Targets: []string{"10.0.0.0/24"}, Chain: "a"},
+	}
+	if got := c.ShadowedTargets(1); len(got) != 0 {
+		t.Errorf("窄在前时宽的不算影子: %v", got)
+	}
+	// 带端口的宽规则 + 同端口窄规则 → 影子；端口不覆盖 → 不算
+	c.Routes = []Route{
+		{Name: "宽443", Targets: []string{"10.0.0.0/24"}, Ports: []string{"443"}, Chain: "a"},
+		{Name: "窄443", Targets: []string{"10.0.0.5/32"}, Ports: []string{"443"}, Chain: "a"},
+		{Name: "窄80", Targets: []string{"10.0.0.9/32"}, Ports: []string{"80"}, Chain: "a"},
+	}
+	if got := c.ShadowedTargets(1); len(got) != 1 {
+		t.Errorf("同端口才被盖住: %v", got)
+	}
+	if got := c.ShadowedTargets(2); len(got) != 0 {
+		t.Errorf("不同端口不该被标成影子: %v", got)
 	}
 }

@@ -255,9 +255,16 @@ code, .mono { font-family: var(--font-mono); }
   border: 1px solid var(--hairline);
   border-radius: calc(var(--r-chip) + 3px);
 }
-/* 设置单独拎出去靠右：同样的“卡片”形状，但与主 tab 组分开 */
-.tabbar-spacer { flex: 1; }
-.tabs-util { flex: 0 0 auto; }
+/* 顶部栏里的「设置」：长得像旁边的按钮，但保留 .tab 的选中态逻辑 */
+.tab-top {
+  padding: 5px var(--s3);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-btn);
+  background: var(--canvas);
+  color: var(--ink);
+  font-weight: 600;
+}
+.tab-top:hover { background: var(--canvas-soft); color: var(--ink); }
 .tab {
   font-family: inherit; font-size: var(--fs-sm); font-weight: 600;
   padding: 6px var(--s4);

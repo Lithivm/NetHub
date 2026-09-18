@@ -885,6 +885,8 @@ func (b *Backend) SelfTest() {
 
 	go func() {
 		b.a.Bus.Info("=== 链路自检开始（%d 条链）===", len(chains))
+		// 最近真的被访问过的目标：自检优先探它们（端口是真的）
+		recent := b.a.Engine.RecentTargets(64)
 		bad := 0
 		for _, ch := range chains {
 			// 一条链可能有多条上游：按顺序试，能连上的就用（跟引擎实际的选路一致）
@@ -917,27 +919,52 @@ func (b *Backend) SelfTest() {
 				desc = fmt.Sprintf("%d 条上游依次试（%s …）", len(ups), ups[0].String())
 			}
 
-			// 探针用真实主机 IP（hosts 里的），不用网段的 .1（那不是真主机）
-			ip := probeIPForChain(b.a.Cfg, ch.Name)
-			if ip == nil {
-				b.a.Bus.Warn("[%s] 找不到可用于探测的真实内网 IP（hosts 条目为空？）", ch.Name)
-				continue
+			// ① 先用“最近真的访问过的 目标:端口”：端口是真的，
+			// 不会因为“常见端口没猜对”而误报“链路不通”
+			hit, hitIP := 0, ""
+			for _, ref := range recent {
+				if ref.Chain != ch.Name {
+					continue
+				}
+				host, portStr, err := net.SplitHostPort(ref.Target)
+				if err != nil {
+					continue
+				}
+				rip := net.ParseIP(host)
+				var rport uint16
+				if _, err := fmt.Sscanf(portStr, "%d", &rport); err != nil || rip == nil {
+					continue
+				}
+				if conn, derr := dial(rip, rport); derr == nil {
+					conn.Close()
+					hit, hitIP = int(rport), rip.String()
+					b.a.Bus.Info("[%s] 用最近访问过的真实目标探测：%s", ch.Name, ref.Target)
+					break
+				}
 			}
 
-			hit := 0
-			for _, port := range []uint16{443, 80, 5432, 6446, 5000, 9056} {
-				conn, derr := dial(ip, port)
-				if derr == nil {
-					conn.Close()
-					hit = int(port)
-					break
+			// ② 没有真实目标（新装的机器）才退回：hosts 里的主机 + 常见端口
+			ip := net.ParseIP(hitIP)
+			if hit == 0 {
+				ip = probeIPForChain(b.a.Cfg, ch.Name)
+				if ip == nil {
+					b.a.Bus.Warn("[%s] 找不到可探测的真实主机（hosts 为空且还没有内网连接），跳过", ch.Name)
+					continue
+				}
+				for _, port := range []uint16{443, 80, 5432, 6446, 5000, 9056} {
+					conn, derr := dial(ip, port)
+					if derr == nil {
+						conn.Close()
+						hit = int(port)
+						break
+					}
 				}
 			}
 			if hit > 0 {
 				b.a.Bus.Info("[%s] ✓ 端到端可达：%s → %s:%d", ch.Name, desc, ip, hit)
 				b.emit("selftest", ProbeView{Target: ip.String(), Port: hit, OK: true})
 			} else {
-				b.a.Bus.Error("[%s] ✗ 经该链连不上 %s 的任何常见端口（上游挂了？上游限制了目标？）", ch.Name, ip)
+				b.a.Bus.Error("[%s] ✗ 经该链连不上 %s 的任何端口（上游挂了？上游限制了目标？）", ch.Name, ip)
 				bad++
 				b.emit("selftest", ProbeView{Target: ip.String(), OK: false, Err: "经该链不可达"})
 			}

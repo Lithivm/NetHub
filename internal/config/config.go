@@ -793,7 +793,11 @@ func (r *Route) normalize() (changed bool, dup []string, err error) {
 }
 
 // ShadowedTargets 这条规则里哪些目标已经被**前面的**规则完全覆盖
-// （目标相同 + 端口被上面那条全覆盖）—— 那些永远轮不到，界面要标出来。
+// （目标被包含 且 端口被包含）—— 那些永远轮不到，界面要标出来。
+//
+// 覆盖算两种情况：目标写法完全相同，或者前面那条是**更宽的网段**把这条整个包住。
+// 后者才是最常踩的排序错误：先写 10.0.0.0/24 走链、再写 10.0.0.5/32 直连 ——
+// 自上而下命中即止，那条 /32 永远轮不到。
 func (c *Config) ShadowedTargets(i int) []string {
 	if i < 0 || i >= len(c.Routes) {
 		return nil
@@ -801,17 +805,51 @@ func (c *Config) ShadowedTargets(i int) []string {
 	rt := c.Routes[i]
 	var out []string
 	for _, t := range rt.Targets {
-		for j := 0; j < i; j++ {
+		tn := targetNet(t)
+		if tn == nil {
+			continue
+		}
+		covered := false
+		for j := 0; j < i && !covered; j++ {
 			r := c.Routes[j]
+			if !PortsCover(r.Ports, rt.Ports) {
+				continue // 端口没被盖住，那这条还有活干
+			}
 			for _, o := range r.Targets {
-				if strings.EqualFold(o, t) && PortsCover(r.Ports, rt.Ports) {
-					out = append(out, t)
+				if strings.EqualFold(o, t) {
+					covered = true
+					break
+				}
+				if on := targetNet(o); on != nil && netContains(on, tn) {
+					covered = true
 					break
 				}
 			}
 		}
+		if covered {
+			out = append(out, t)
+		}
 	}
 	return out
+}
+
+// targetNet 归一化后的 CIDR → *net.IPNet（解析失败返回 nil）。
+func targetNet(s string) *net.IPNet {
+	_, n, err := net.ParseCIDR(strings.TrimSpace(s))
+	if err != nil {
+		return nil
+	}
+	return n
+}
+
+// netContains outer 是否把 inner 整个包住（含自己）。
+func netContains(outer, inner *net.IPNet) bool {
+	if outer == nil || inner == nil {
+		return false
+	}
+	oo, _ := outer.Mask.Size()
+	io, _ := inner.Mask.Size()
+	return oo <= io && outer.Contains(inner.IP)
 }
 
 // SortRoutesBySpecificity 按“最具体优先”重排：前缀长（/32 → /24）的靠前，
