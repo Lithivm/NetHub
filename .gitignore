@@ -29,3 +29,6 @@ dist/
 
 # 内部运维脚本（写死了内网 IP / 客户域名，不进公开仓库；只留在本机用）
 local/
+
+# 文档里的界面截图（README 引用，要入库）
+!docs/screenshot.png
