@@ -260,6 +260,12 @@ code, .mono { font-family: var(--font-mono); }
 .tab-top { padding: 7px var(--s3); border-radius: var(--r-btn); font-weight: 600; }
 .tab-top.is-active { background: var(--primary-soft); color: var(--primary); border-color: var(--primary); }
 .tab-top.is-active:hover { background: var(--primary-soft); color: var(--primary); }
+.tabs .tab {
+  /* 等宽：以最宽的那个（“隧道链路”+ 角标）为准，避免字符被裁 */
+  min-width: 112px;
+  justify-content: center;
+  white-space: nowrap;
+}
 .tab {
   font-family: inherit; font-size: var(--fs-sm); font-weight: 600;
   padding: 6px var(--s4);

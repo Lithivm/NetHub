@@ -133,9 +133,13 @@ func (e *Engine) probeChain(ch config.Chain) {
 		}
 		if flipped, upRaw := e.markUp(ch.Name, i, perr == nil, lat, msg); flipped {
 			if perr == nil {
+				// 恢复只写日志（链路会不时抖一下，弹窗太吵）
 				e.bus.Info("链路 %s 上游 %s 可用（%d ms）", ch.Name, maskUpstream(upRaw), lat.Milliseconds())
 			} else {
 				e.bus.Warn("链路 %s 上游 %s 不可用：%s", ch.Name, maskUpstream(upRaw), msg)
+				if e.Notify != nil {
+					e.Notify("链路 "+ch.Name+" 上游不可用", maskUpstream(upRaw)+"："+msg, true)
+				}
 			}
 		}
 	}

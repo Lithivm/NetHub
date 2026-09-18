@@ -116,14 +116,16 @@ func (e *Engine) probeOneTarget(ref targetRef) {
 		conn.Close()
 	}
 	flipped, bad := e.markTarget(ref.target, ref.chain, derr == nil, lat, msg)
-	if flipped {
-		if bad {
-			e.alert(fmt.Sprintf("内网目标不通：%s", ref.target),
-				"经链 "+ref.chain+" 连不上："+msg, true)
-		} else {
-			e.alert(fmt.Sprintf("内网目标恢复：%s", ref.target),
-				"经链 "+ref.chain+" 已通（"+lat.Round(time.Millisecond).String()+"）", false)
+	if flipped && bad {
+		// 只报坏事：通了就写日志（巡检本身会不时地好一下坏一下，弹窗太吵）
+		e.bus.Warn("内网目标不通：%s —— 经链 %s 连不上：%s", ref.target, ref.chain, msg)
+		if e.Notify != nil {
+			e.Notify("内网目标不通："+ref.target, "经链 "+ref.chain+" 连不上："+msg, true)
 		}
+		return
+	}
+	if flipped {
+		e.bus.Info("内网目标恢复：%s —— 经链 %s 已通（%s）", ref.target, ref.chain, lat.Round(time.Millisecond))
 	}
 }
 
@@ -207,17 +209,7 @@ func (e *Engine) TargetHealth() []TargetHealthView {
 	return out
 }
 
-// alert 状态变化的提示：接到 App 的通知回调（应用内 toast）。
-func (e *Engine) alert(title, text string, bad bool) {
-	if bad {
-		e.bus.Warn("%s —— %s", title, text)
-	} else {
-		e.bus.Info("%s —— %s", title, text)
-	}
-	if e.Notify != nil {
-		e.Notify(title, text, bad)
-	}
-}
+// alert 已经不需要了：巡检只报坏事，且直接用 bus+Notify 写清楚（保留此注释以防误加回来）
 
 // splitTarget 把 "10.0.0.5:5432" 拆成 host/port。
 func splitTarget(s string) (host, port string, err error) {
