@@ -366,8 +366,13 @@ code, .mono { font-family: var(--font-mono); }
   background: var(--card-strong); color: var(--muted);
   font-size: var(--fs-xs); font-weight: 700; font-family: var(--font-mono);
 }
-.chain-grid { grid-template-columns: 130px minmax(240px, 1.6fr) minmax(160px, 1fr) 160px; }
+.chain-grid { grid-template-columns: 120px minmax(200px, 1.4fr) 92px minmax(110px, 1fr) 150px; }
 .rule-grid  { grid-template-columns: 46px 170px minmax(200px, 1.5fr) 130px minmax(120px, 1fr) 150px; }
+.conn-grid  { grid-template-columns: 40px minmax(170px, 1.2fr) 62px 100px 76px 90px 90px 96px; }
+/* 上游健康的小圆点（只探测到代理这一段） */
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; vertical-align: middle; background: var(--muted-soft); }
+.dot.ok  { background: #2f9e5e; }
+.dot.bad { background: #d64545; }
 
 .empty {
   padding: var(--s6);
@@ -410,6 +415,8 @@ code, .mono { font-family: var(--font-mono); }
 }
 .input-row { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
 .input-row .input { flex: 1; }
+/* 多行文本框旁边挂按钮时顶部对齐，不让按钮跟着文本居中 */
+.input-row.top { align-items: flex-start; }
 
 .check { display: flex; align-items: flex-start; gap: var(--s2); cursor: pointer; }
 .check input { margin-top: 2px; width: 15px; height: 15px; accent-color: var(--primary); cursor: pointer; }

@@ -19,8 +19,10 @@ import (
 	"nethub/internal/winrun"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/imgk/divert-go"
@@ -40,13 +42,137 @@ const (
 	offFlags   = 13 // FIN=0x01 SYN=0x02 RST=0x04 PSH=0x08 ACK=0x10
 )
 
+// connState 一条被接管的连接（隧道/直连/阻断共用一张表，按源端口索引）。
+//
+// 计数与时间戳用原子操作：字节累加发生在 relay 的两条拷贝协程里，包计数发生在
+// packetLoop 里，两条路径并发，不能共用 e.mu（否则每个包都要抢锁）。
+//
+// 连接结束后条目**不删**：留着让界面能看到最后状态与字节数，由 janitor 按
+// 更短的时限回收（已结束 2 分钟 / 进行中 10 分钟）。
 type connState struct {
 	dst     net.IP
 	dport   uint16
 	app     net.IP
 	appPort uint16
 	chain   string
-	last    time.Time
+	action  rules.Action
+	start   time.Time
+
+	last    atomic.Int64  // unix nano：最后一次看到包/数据的时间
+	up      atomic.Uint64 // 应用 → 目标 的字节（直连只能统计出方向）
+	down    atomic.Uint64 // 目标 → 应用 的字节
+	packets atomic.Uint64 // 包数（直连/阻断时用得上）
+	ended   atomic.Bool
+	errText atomic.Value // string：失败原因（如隧道建立失败）
+}
+
+func (st *connState) touch() { st.last.Store(time.Now().UnixNano()) }
+
+func (st *connState) fail(msg string) { st.errText.Store(msg) }
+
+func (st *connState) err() string {
+	if v, ok := st.errText.Load().(string); ok {
+		return v
+	}
+	return ""
+}
+
+// TheEnd 结束时间（未结束时返回零值）。
+func (st *connState) endTime() time.Time {
+	if st.ended.Load() {
+		return time.Unix(0, st.last.Load())
+	}
+	return time.Time{}
+}
+
+// finish 连接收尾：标结束、扣活跃数（幂等）。条目留给界面看，不立刻删。
+func (e *Engine) finish(st *connState) {
+	st.touch()
+	if !st.ended.CompareAndSwap(false, true) {
+		return // 已经结束过了，别重复扣活跃数
+	}
+	e.mu.Lock()
+	if e.statActive > 0 {
+		e.statActive--
+	}
+	e.mu.Unlock()
+}
+
+// ConnView 一条连接的快照（给界面用）。
+type ConnView struct {
+	Target  string `json:"target"`
+	Action  string `json:"action"`
+	Chain   string `json:"chain"`
+	Started string `json:"started"`
+	Dur     string `json:"dur"`
+	Up      uint64 `json:"up"`
+	Down    uint64 `json:"down"`
+	Packets uint64 `json:"packets"`
+	State   string `json:"state"`
+	Error   string `json:"error"`
+}
+
+// Conns 返回连接表快照：进行中在前，其余按最后活动时间倒序；limit<=0 表示不限。
+func (e *Engine) Conns(limit int) []ConnView {
+	e.mu.RLock()
+	snap := make([]*connState, 0, len(e.conns))
+	for _, st := range e.conns {
+		snap = append(snap, st)
+	}
+	e.mu.RUnlock()
+
+	sort.Slice(snap, func(i, j int) bool {
+		ei, ej := snap[i].ended.Load(), snap[j].ended.Load()
+		if ei != ej {
+			return !ei // 进行中在前
+		}
+		return snap[i].last.Load() > snap[j].last.Load()
+	})
+
+	now := time.Now()
+	out := make([]ConnView, 0, len(snap))
+	for _, st := range snap {
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+		state := "进行中"
+		switch {
+		case st.action == rules.ActionBlock:
+			state = "已阻断"
+		case st.err() != "":
+			state = "失败"
+		case st.ended.Load():
+			state = "已结束"
+		}
+		end := now
+		if t := st.endTime(); !t.IsZero() {
+			end = t
+		}
+		out = append(out, ConnView{
+			Target:  fmt.Sprintf("%s:%d", st.dst, st.dport),
+			Action:  st.action.String(),
+			Chain:   st.chain,
+			Started: st.start.Format("15:04:05"),
+			Dur:     humanDur(end.Sub(st.start)),
+			Up:      st.up.Load(),
+			Down:    st.down.Load(),
+			Packets: st.packets.Load(),
+			State:   state,
+			Error:   st.err(),
+		})
+	}
+	return out
+}
+
+// ChainCounts 每条链累计接管了多少条连接。
+func (e *Engine) ChainCounts() map[string]uint64 {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	out := make(map[string]uint64, len(e.statPerRule))
+	for k, v := range e.statPerRule {
+		out[k] = v
+	}
+	return out
 }
 
 type Engine struct {
@@ -54,12 +180,15 @@ type Engine struct {
 	rules *rules.Set
 	cfg   *config.Config
 
-	mu     sync.Mutex
-	handle *divert.Handle
-	ln     net.Listener
-	relay  string
-	conns  map[uint16]*connState
-	run    bool
+	mu      sync.RWMutex
+	handle  *divert.Handle
+	ln      net.Listener
+	relay   string
+	conns   map[uint16]*connState
+	notices map[uint16]noticeSeen  // 直连/阻断日志去重：源端口 → 上次报过的动作+目标
+	health  map[string][]*upHealth // 每条链的上游健康（与 Upstreams() 下标对齐）
+	round   int                    // 轮询策略的游标
+	run     bool
 
 	// 统计
 	statTotal   uint64
@@ -118,11 +247,11 @@ func (e *Engine) Start() error {
 	relay := ln.Addr().String()
 	port := uint16(ln.Addr().(*net.TCPAddr).Port)
 
-	// 2) 用规则区间拼内核过滤器
-	rs := e.rules.Ranges()
+	// 2) 用规则区间拼内核过滤器（直连规则的目标不进过滤器，见 rules.FilterRanges）
+	rs := e.rules.FilterRanges()
 	if len(rs) == 0 {
 		ln.Close()
-		return fmt.Errorf("没有生效的路由规则，无事可做")
+		return fmt.Errorf("没有需要拦截的规则（只填了直连规则时无事可做）")
 	}
 	filter := buildFilter(rs, port)
 	e.bus.Info("内核过滤器: %s", filter)
@@ -140,13 +269,25 @@ func (e *Engine) Start() error {
 
 	e.bus.Info("✓ 拦截已启动：relay=%s，规则 %d 条", relay, len(e.rules.List()))
 	for _, r := range e.rules.List() {
-		e.bus.Info("    %s  →  链 %s", r.Label(), r.Chain)
+		switch r.Action {
+		case rules.ActionDirect:
+			e.bus.Info("    %s  →  直连（不走代理）", r.Label())
+		case rules.ActionBlock:
+			e.bus.Info("    %s  →  阻断（丢弃）", r.Label())
+		default:
+			e.bus.Info("    %s  →  链 %s", r.Label(), r.Chain)
+		}
+	}
+	for _, ch := range e.cfg.Chains {
+		e.bus.Info("    链 %s：%d 个上游，策略 %s，探测 %s",
+			ch.Name, len(ch.Upstreams()), ch.StrategyName(), ch.ProbeInterval())
 	}
 
-	e.wg.Add(3)
+	e.wg.Add(4)
 	go e.acceptLoop()
 	go e.packetLoop()
 	go e.janitor()
+	go e.healthLoop()
 	return nil
 }
 
@@ -195,17 +336,33 @@ func (e *Engine) acceptLoop() {
 	}
 }
 
-// dialUpstream 建立到目标的上游连接（上游是原生实现的）。
+// dialUpstream 建立到目标的上游连接。
+//
+// 一条链可能有多个上游（故障转移/轮询/随机）：按策略拿候选顺序，依次试，
+// 第一个成功的就用；每次成/败都记进健康表（被动探测，不靠主动探也能学到东西）。
 func (e *Engine) dialUpstream(ch config.Chain, dst net.IP, dport uint16) (net.Conn, error) {
-	up, err := upstream.Parse(ch.Forward)
-	if err != nil {
-		return nil, fmt.Errorf("链 %s 的上游无法实现: %w", ch.Name, err)
+	raws := ch.Upstreams()
+	if len(raws) == 0 {
+		return nil, fmt.Errorf("链 %s 没有配置上游", ch.Name)
 	}
-	c, err := up.Dial(dst, dport, 10*time.Second)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", up.String(), err)
+	var errs []string
+	for _, idx := range e.candidates(ch) {
+		raw := raws[idx]
+		up, err := upstream.Parse(raw)
+		if err != nil {
+			e.markUp(ch.Name, idx, false, 0, err.Error())
+			errs = append(errs, fmt.Sprintf("上游 %d: %v", idx+1, err))
+			continue
+		}
+		c, err := up.Dial(dst, dport, 10*time.Second)
+		if err == nil {
+			e.markUp(ch.Name, idx, true, 0, "")
+			return c, nil
+		}
+		e.markUp(ch.Name, idx, false, 0, err.Error())
+		errs = append(errs, fmt.Sprintf("%s: %v", up.String(), err))
 	}
-	return c, nil
+	return nil, fmt.Errorf("%s", strings.Join(errs, "；"))
 }
 
 func (e *Engine) handleConn(c net.Conn) {
@@ -232,6 +389,8 @@ func (e *Engine) handleConn(c net.Conn) {
 	up, err := e.dialUpstream(ch, st.dst, st.dport)
 	if err != nil {
 		e.bus.Error("[%s] 隧道建立失败 %s:%d — %v", st.chain, st.dst, st.dport, err)
+		st.fail(err.Error())
+		e.finish(st)
 		return
 	}
 	defer up.Close()
@@ -239,28 +398,26 @@ func (e *Engine) handleConn(c net.Conn) {
 	e.bus.Info("[%s] 已接管 %s:%d  (来源端口 %d)", st.chain, st.dst, st.dport, sport)
 
 	done := make(chan struct{}, 2)
-	go func() { copyAndClose(up, c); done <- struct{}{} }()
-	go func() { copyAndClose(c, up); done <- struct{}{} }()
+	go func() { copyAndClose(up, c, &st.up); done <- struct{}{} }()
+	go func() { copyAndClose(c, up, &st.down); done <- struct{}{} }()
 	<-done
 
-	e.mu.Lock()
-	delete(e.conns, sport)
-	if e.statActive > 0 {
-		e.statActive--
-	}
-	e.mu.Unlock()
-	e.bus.Info("[%s] 连接结束 %s:%d", st.chain, st.dst, st.dport)
+	e.finish(st)
+	e.bus.Info("[%s] 连接结束 %s:%d  ↑ %s  ↓ %s", st.chain, st.dst, st.dport,
+		humanBytes(st.up.Load()), humanBytes(st.down.Load()))
 }
 
 // copyAndClose 单向拷贝并在结束后关闭写端（半关闭，双向都能正常收尾）。
-func copyAndClose(dst, src net.Conn) {
+func copyAndClose(dst, src net.Conn, counter *atomic.Uint64) {
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := src.Read(buf)
 		if n > 0 {
 			if _, werr := dst.Write(buf[:n]); werr != nil {
+				counter.Add(uint64(n))
 				break
 			}
+			counter.Add(uint64(n))
 		}
 		if err != nil {
 			break
@@ -312,27 +469,58 @@ func (e *Engine) packetLoop() {
 		flags := pkt[t+offFlags]
 
 		// 方向判定不依赖 addr.Flags 的位布局：目标落在规则内 = 应用发出的包。
-		if chain, hit := e.rules.Match(dst); hit {
-			e.rewriteOutbound(h, pkt, addr, t, src, dst, sport, dport, flags, chain, relayIP, relayPort)
+		if chain, act, hit := e.rules.Match(dst, dport); hit {
+			switch act {
+			case rules.ActionDirect, rules.ActionBlock:
+				e.passThrough(h, pkt, addr, t, src, dst, sport, dport, flags, act)
+			default:
+				e.rewriteOutbound(h, pkt, addr, t, src, dst, sport, dport, flags, chain, relayIP, relayPort)
+			}
 			continue
 		}
 		e.rewriteInbound(h, pkt, addr, t, dport)
 	}
 }
 
+// noticeSeen 直连/阻断日志去重用的一条记录。
+type noticeSeen struct {
+	key  string // 动作 + 目标
+	last time.Time
+}
+
+// noteAction 同一动作在同一条连接上（同一源端口 + 同一目标）只报一行。
+// 源端口被系统复用给另一个目标时，目标变了就再报一行。
+func (e *Engine) noteAction(kind string, sport uint16, dst net.IP, dport uint16, note string) {
+	key := kind + " " + fmt.Sprintf("%s:%d", dst, dport)
+	e.mu.Lock()
+	if e.notices == nil {
+		e.notices = map[uint16]noticeSeen{}
+	}
+	prev, seen := e.notices[sport]
+	e.notices[sport] = noticeSeen{key: key, last: time.Now()}
+	e.mu.Unlock()
+	if !seen || prev.key != key {
+		e.bus.Info("[%s] %s:%d  %s", kind, dst, dport, note)
+	}
+}
+
+// isSyn 只看 SYN（不带 ACK）—— 新连接的第一个包。
+func isSyn(flags byte) bool { return flags&0x02 != 0 && flags&0x10 == 0 }
+
 // rewriteOutbound 把应用发往内网目标的包改成"发给本机 relay"。
 func (e *Engine) rewriteOutbound(h *divert.Handle, pkt []byte, addr *divert.Address, t int,
 	src, dst net.IP, sport, dport uint16, flags byte, chain string, relayIP net.IP, relayPort uint16) {
 
-	isSyn := flags&0x02 != 0 && flags&0x10 == 0
-	if isSyn {
+	if isSyn(flags) {
 		e.mu.Lock()
 		_, existed := e.conns[sport]
-		e.conns[sport] = &connState{
+		st := &connState{
 			dst: dst, dport: dport,
 			app: append(net.IP(nil), src...), appPort: sport,
-			chain: chain, last: time.Now(),
+			chain: chain, action: rules.ActionChain, start: time.Now(),
 		}
+		st.touch()
+		e.conns[sport] = st
 		if !existed {
 			e.statTotal++
 			e.statActive++
@@ -342,12 +530,8 @@ func (e *Engine) rewriteOutbound(h *divert.Handle, pkt []byte, addr *divert.Addr
 		if !existed {
 			e.bus.Info("[%s] 拦截 %s:%d  → relay", chain, dst, dport)
 		}
-	} else {
-		e.mu.Lock()
-		if st := e.conns[sport]; st != nil {
-			st.last = time.Now()
-		}
-		e.mu.Unlock()
+	} else if st := e.flow(sport); st != nil {
+		st.touch()
 	}
 
 	// 目标 → relay；源也改成 relay 的 IP（关键！否则环回口丢包）
@@ -355,10 +539,10 @@ func (e *Engine) rewriteOutbound(h *divert.Handle, pkt []byte, addr *divert.Addr
 	putBE16(pkt, t+offDstPort, relayPort)
 	copy(pkt[offSrcIP:offSrcIP+4], relayIP)
 
-	if flags&0x04 != 0 { // RST：连接结束，清映射
-		e.mu.Lock()
-		delete(e.conns, sport)
-		e.mu.Unlock()
+	if flags&0x04 != 0 { // RST：应用主动断了，标结束（条目留着给界面看）
+		if st := e.flow(sport); st != nil {
+			e.finish(st)
+		}
 	}
 
 	divert.CalcChecksums(pkt, addr, divert.ChecksumDefault)
@@ -369,13 +553,12 @@ func (e *Engine) rewriteOutbound(h *divert.Handle, pkt []byte, addr *divert.Addr
 
 // rewriteInbound 把 relay 回来的包改回"来自真正的内网目标"。
 func (e *Engine) rewriteInbound(h *divert.Handle, pkt []byte, addr *divert.Address, t int, dport uint16) {
-	e.mu.Lock()
-	st := e.conns[dport] // dport = 应用的源端口
-	e.mu.Unlock()
+	st := e.flow(dport) // dport = 应用的源端口
 	if st == nil {
 		_, _ = h.Send(pkt, addr)
 		return
 	}
+	st.touch()
 	copy(pkt[offSrcIP:offSrcIP+4], st.dst.To4())
 	putBE16(pkt, t+offSrcPort, st.dport)
 	copy(pkt[offDstIP:offDstIP+4], st.app.To4())
@@ -386,7 +569,55 @@ func (e *Engine) rewriteInbound(h *divert.Handle, pkt []byte, addr *divert.Addre
 	}
 }
 
-// janitor 定期清理"应用已经消失但没发 RST"的悬挂映射，避免内存无限增长。
+// flow 按源端口取连接状态（读锁：每个包都要走，不能和写路径抢）。
+func (e *Engine) flow(sport uint16) *connState {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.conns[sport]
+}
+
+// passThrough 处理直连与阻断：计数 + 必要时记一行日志（去重）。
+// 直连的包原样放回内核转发；阻断的包丢掉，并在 SYN 上回一个 RST。
+func (e *Engine) passThrough(h *divert.Handle, pkt []byte, addr *divert.Address, t int,
+	src, dst net.IP, sport, dport uint16, flags byte, act rules.Action) {
+
+	if isSyn(flags) {
+		e.mu.Lock()
+		if _, ok := e.conns[sport]; !ok {
+			st := &connState{dst: dst, dport: dport, app: append(net.IP(nil), src...),
+				appPort: sport, action: act, start: time.Now()}
+			st.touch()
+			e.conns[sport] = st
+		}
+		e.mu.Unlock()
+		if act == rules.ActionDirect {
+			e.noteAction("直连", sport, dst, dport, "不走代理")
+		} else {
+			e.noteAction("阻断", sport, dst, dport, "已丢弃")
+		}
+	}
+
+	if st := e.flow(sport); st != nil {
+		st.touch()
+		st.packets.Add(1)
+		if act == rules.ActionDirect {
+			st.up.Add(uint64(len(pkt))) // 回来的方向不经内核过滤器，只能统计出方向
+		}
+		if flags&0x05 != 0 { // FIN 或 RST：连接收了
+			e.finish(st)
+		}
+	}
+
+	if act == rules.ActionBlock {
+		if isSyn(flags) {
+			e.sendReset(h, pkt, addr, t, src, dst, sport, dport)
+		}
+		return // 阻断：包丢掉
+	}
+	_, _ = h.Send(pkt, addr)
+}
+
+// janitor 定期清理已经没人用的连接条目（已结束的留得短一些）。
 func (e *Engine) janitor() {
 	defer e.wg.Done()
 	tk := time.NewTicker(60 * time.Second)
@@ -396,14 +627,25 @@ func (e *Engine) janitor() {
 		case <-e.done:
 			return
 		case <-tk.C:
-			cut := time.Now().Add(-10 * time.Minute)
+			activeCut := time.Now().Add(-10 * time.Minute).UnixNano()
+			endedCut := time.Now().Add(-2 * time.Minute).UnixNano()
 			e.mu.Lock()
 			for k, st := range e.conns {
-				if st.last.Before(cut) {
-					delete(e.conns, k)
-					if e.statActive > 0 {
+				cut := activeCut
+				if st.ended.Load() {
+					cut = endedCut
+				}
+				if st.last.Load() < cut {
+					// 收尾时发现是“没人动的进行中”，把活跃数一起扣回来
+					if st.ended.CompareAndSwap(false, true) && e.statActive > 0 {
 						e.statActive--
 					}
+					delete(e.conns, k)
+				}
+			}
+			for k, d := range e.notices {
+				if d.last.Before(time.Unix(0, activeCut)) {
+					delete(e.notices, k)
 				}
 			}
 			e.mu.Unlock()
@@ -413,14 +655,35 @@ func (e *Engine) janitor() {
 
 // ───────────────────────── 过滤器与工具 ─────────────────────────
 
+// buildFilter 拼 WinDivert 过滤器。
+//
+// 只有“需要隧道”的区间才进来（直连规则的目标不进），带端口的规则会把端口条件
+// 一并写进过滤条件 —— 这样未列入的端口在驱动层就被放行，一次用户态都不用来。
 func buildFilter(rs []rules.Range, relayPort uint16) string {
 	parts := make([]string, 0, len(rs))
 	for _, r := range rs {
-		parts = append(parts, fmt.Sprintf("(ip.DstAddr >= %s and ip.DstAddr <= %s)",
-			rules.U2IP(r.First), rules.U2IP(r.Last)))
+		clause := fmt.Sprintf("ip.DstAddr >= %s and ip.DstAddr <= %s",
+			rules.U2IP(r.First), rules.U2IP(r.Last))
+		if len(r.Ports) > 0 {
+			clause += " and (" + portFilter(r.Ports) + ")"
+		}
+		parts = append(parts, "("+clause+")")
 	}
 	return fmt.Sprintf("(outbound and tcp and (%s)) or (outbound and tcp and tcp.SrcPort == %d)",
 		strings.Join(parts, " or "), relayPort)
+}
+
+// portFilter 把端口区间拼成 WinDivert 的端口条件（形如 tcp.DstPort == 443）。
+func portFilter(ps []rules.PortRange) string {
+	out := make([]string, 0, len(ps))
+	for _, p := range ps {
+		if p.First == p.Last {
+			out = append(out, fmt.Sprintf("tcp.DstPort == %d", p.First))
+			continue
+		}
+		out = append(out, fmt.Sprintf("(tcp.DstPort >= %d and tcp.DstPort <= %d)", p.First, p.Last))
+	}
+	return strings.Join(out, " or ")
 }
 
 // openDivert 打开 WinDivert；首次安装驱动会失败一次（服务被创建但启动失败，

@@ -12,16 +12,34 @@ chains:                     # 每条链 = 一个上游代理（程序内置实�
     forward: socks5+tls://YOUR-HOST:10080?auth=YOUR_BASE64_OF_user:pass
     note: 示例链路 A（备注会显示在规则页的「说明」列）
   - name: proxy-b
-    forward: socks5+tls://YOUR-HOST:33001?auth=YOUR_BASE64_OF_user:pass
-    note: 示例链路 B
+    forwards:                     # 多个上游：前面的坏了自动换下一个
+      - socks5+tls://YOUR-HOST-A:33001?auth=YOUR_BASE64_OF_user:pass
+      - socks5+tls://YOUR-HOST-B:33002?auth=YOUR_BASE64_OF_user:pass
+    strategy: failover            # failover(默认) | round(轮询) | random(随机)
+    probe: 30s                    # 健康探测间隔（只测到代理这一段）；off = 关
+# 选写：上游多了可故障转移/负载均衡；不填 strategy/probe 就是单上游 + 30s 探测。
 # 支持的写法：
 #   socks5+tls://host:port?auth=<base64(user:pass)>   ← 最常见的 gost 风格
 #   socks5://user:pass@host:port
 #   socks4://host:port      http://host:port      https://host:port
 
-# 路由规则：一条规则 = 名字 + 一组目标 + 走哪条链（形状对齐 Proxifier 的 Rules）
-# 自上而下匹配、命中即止；一条规则内任一目标命中即算命中。
+# 路由规则：一条规则 = 名字 + 一组目标 + （可选）一组端口 + 走哪个链
+# （形状对齐 Proxifier 的 Rules）自上而下匹配、命中即止；一条规则内任一目标命中即算命中。
+#
+# 动作有两种：走某条链，或「直连」—— chain 写保留名 direct（界面上选「直连（不走代理）」）。
+# 直连 = 不改写、不进隧道；**本机所在的局域网段都应该直连**，否则同事机器 /
+# 打印机 / 共享盘会被送进隧道而不可达（异地代理到不了你的局域网）。
 routes:
+  - name: 本机网段直连         # 先写直连，再写隧道：顺序就是优先级
+    targets:
+      - 192.168.1.0/24        # 界面上填目标时点「填本机网段」可以自动填进来
+    chain: direct
+  - name: 排除更新端口          # 端口条件：这个网段走隧道，但 7680（Win 更新 P2P）直连
+    targets:
+      - 10.0.0.0/24
+    ports:                   # 留空 = 任意端口；可写 443、8000-9000
+      - 7680
+    chain: direct
   - name: 内网 A 段
     targets:
       - 10.0.0.0/24         # CIDR 或单个 IP（单 IP 会自动存成 /32）

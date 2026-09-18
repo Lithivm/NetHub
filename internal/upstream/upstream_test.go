@@ -3,6 +3,7 @@ package upstream
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseSchemes(t *testing.T) {
@@ -57,5 +58,16 @@ func TestStringHidesCreds(t *testing.T) {
 	s := up.String()
 	if s == "" || strings.Contains(s, "user") || strings.Contains(s, "pass") || strings.Contains(s, "dXNlc") {
 		t.Errorf("String() 泄漏了凭据: %q", s)
+	}
+}
+
+// Probe 只测到代理这一段：死端口要快速失败（不碰任何业务目标）。
+func TestProbeDeadUpstream(t *testing.T) {
+	u, err := Parse("socks5://127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := u.Probe(2 * time.Second); err == nil {
+		t.Error("127.0.0.1:1 应该探测失败")
 	}
 }

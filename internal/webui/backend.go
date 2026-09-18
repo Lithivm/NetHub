@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +27,7 @@ import (
 	"nethub/internal/app"
 	"nethub/internal/autostart"
 	"nethub/internal/config"
+	"nethub/internal/engine"
 	"nethub/internal/gostbat"
 	"nethub/internal/hostsmgr"
 	"nethub/internal/logbus"
@@ -135,17 +137,23 @@ type StateView struct {
 }
 
 type ChainView struct {
-	Name    string   `json:"name"`
-	_       struct{} `json:"-"`
-	Forward string   `json:"forward"` // 已遮蔽凭据
-	Note    string   `json:"note"`
+	Name     string   `json:"name"`
+	_        struct{} `json:"-"`
+	Forward  string   `json:"forward"`  // 第一个上游（已遮蔽），兼容旧界面
+	Forwards []string `json:"forwards"` // 全部上游（已遮蔽）
+	Strategy string   `json:"strategy"`
+	Probe    string   `json:"probe"`
+	Note     string   `json:"note"`
 }
 
 type RouteView struct {
 	Index   int      `json:"index"`
 	Name    string   `json:"name"`
 	Targets []string `json:"targets"`
+	Ports   []string `json:"ports"`
 	Chain   string   `json:"chain"`
+	Direct  bool     `json:"direct"`
+	Block   bool     `json:"block"`
 	Note    string   `json:"note"`
 }
 
@@ -170,10 +178,13 @@ type SettingsView struct {
 }
 
 type ChainInput struct {
-	Name    string   `json:"name"`
-	_       struct{} `json:"-"`
-	Forward string   `json:"forward"`
-	Note    string   `json:"note"`
+	Name     string   `json:"name"`
+	_        struct{} `json:"-"`
+	Forward  string   `json:"forward"`  // 单上游（老界面）
+	Forwards []string `json:"forwards"` // 多上游（新界面：一行一个）
+	Strategy string   `json:"strategy"`
+	Probe    string   `json:"probe"`
+	Note     string   `json:"note"`
 }
 
 type BatEntryView struct {
@@ -248,12 +259,37 @@ func (b *Backend) autostartDetailCached() string {
 func (b *Backend) GetChains() []ChainView {
 	out := make([]ChainView, 0, len(b.a.Cfg.Chains))
 	for _, c := range b.a.Cfg.Chains {
+		red := make([]string, 0, len(c.Upstreams()))
+		for _, f := range c.Upstreams() {
+			red = append(red, gostbat.Redact(f))
+		}
+		first := ""
+		if len(red) > 0 {
+			first = red[0]
+		}
 		out = append(out, ChainView{
-			Name:    c.Name,
-			Forward: gostbat.Redact(c.Forward), Note: c.Note,
+			Name: c.Name, Forward: first, Forwards: red,
+			Strategy: c.StrategyName(), Probe: c.ProbeInterval().String(), Note: c.Note,
 		})
 	}
 	return out
+}
+
+// GetChainHealth 每条链的上游健康（主动探测 + 真实连接失败都会记进来）。
+func (b *Backend) GetChainHealth() []engine.ChainHealthView {
+	if b.a.Engine == nil {
+		return nil
+	}
+	return b.a.Engine.ChainHealth()
+}
+
+// ProbeChains 立即把所有上游探一遍（界面上的“立即探测”）。
+func (b *Backend) ProbeChains() error {
+	if b.a.Engine == nil {
+		return fmt.Errorf("引擎未初始化")
+	}
+	go b.a.Engine.ProbeAll()
+	return nil
 }
 
 func (b *Backend) GetRoutes() []RouteView {
@@ -263,9 +299,80 @@ func (b *Backend) GetRoutes() []RouteView {
 	}
 	out := make([]RouteView, 0, len(b.a.Cfg.Routes))
 	for i, r := range b.a.Cfg.Routes {
-		out = append(out, RouteView{Index: i, Name: r.Name, Targets: r.Targets, Chain: r.Chain, Note: note[r.Chain]})
+		note := note[r.Chain]
+		switch {
+		case r.IsDirect():
+			note = "不走代理，直接连（本机网段 / 局域网邻居常用）"
+		case r.IsBlock():
+			note = "直接丢弃：应用会看到连接被拒"
+		}
+		out = append(out, RouteView{
+			Index: i, Name: r.Name, Targets: r.Targets, Ports: r.Ports,
+			Chain: r.Chain, Direct: r.IsDirect(), Block: r.IsBlock(), Note: note,
+		})
 	}
 	return out
+}
+
+// LocalSubnets 本机直接相连的 IPv4 网段（规则里“本地直连”用）。
+//
+// 只取 up 且非回环接口上的地址：典型就是 192.168.1.0/24 这种内网段。
+// 界面上一键填入，省得每次手敲 —— 忘了配本地直连，局域网里的同事机器 /
+// 打印机 / 共享盘会被送进隧道而不可达（异地代理到不了你的局域网）。
+func (b *Backend) LocalSubnets() []string {
+	out := []string{}
+	seen := map[string]bool{}
+	ifs, err := net.Interfaces()
+	if err != nil {
+		return out
+	}
+	for _, ifc := range ifs {
+		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := ifc.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipnet, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			v4 := ipnet.IP.To4()
+			if v4 == nil {
+				continue
+			}
+			s := (&net.IPNet{IP: v4.Mask(ipnet.Mask), Mask: ipnet.Mask}).String()
+			if !seen[s] {
+				seen[s] = true
+				out = append(out, s)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ───────────────────── 连接列表（观测） ─────────────────────
+
+// ConnList 连接页的一次性快照：列表 + 汇总，避免前端分几次拉。
+type ConnList struct {
+	List     []engine.ConnView `json:"list"`
+	Total    uint64            `json:"total"`
+	Active   int               `json:"active"`
+	PerChain map[string]uint64 `json:"perChain"`
+}
+
+// GetConns 返回连接表快照（界面上每 1.5 秒拉一次，只统计当前页可见时）。
+func (b *Backend) GetConns() ConnList {
+	total, active := b.a.Engine.Stats()
+	return ConnList{
+		List:     b.a.Engine.Conns(150),
+		Total:    total,
+		Active:   active,
+		PerChain: b.a.Engine.ChainCounts(),
+	}
 }
 
 func (b *Backend) GetLogs() []LogView {
@@ -352,19 +459,30 @@ func (b *Backend) MoveChain(from, to int) error {
 }
 
 func (in ChainInput) toChain() config.Chain {
+	fwd := strings.TrimSpace(in.Forward)
+	forwards := make([]string, 0, len(in.Forwards))
+	for _, f := range in.Forwards {
+		if t := strings.TrimSpace(f); t != "" {
+			forwards = append(forwards, t)
+		}
+	}
+	if len(forwards) == 0 && fwd != "" {
+		forwards = []string{fwd}
+	}
 	return config.Chain{
-		Name: strings.TrimSpace(in.Name),
-
-		Forward: strings.TrimSpace(in.Forward),
-		Note:    strings.TrimSpace(in.Note),
+		Name:     strings.TrimSpace(in.Name),
+		Forwards: forwards,
+		Strategy: strings.TrimSpace(in.Strategy),
+		Probe:    strings.TrimSpace(in.Probe),
+		Note:     strings.TrimSpace(in.Note),
 	}
 }
 
 // ───────────────────────── 规则（≈ Proxifier 的 Rules）─────────────────────────
 
-// ruleFrom 把界面传来的"一条规则"整理成 config.Route：目标文本可以一次填多个
-// （换行/逗号/顿号/空格分隔），这里负责拆分 + 归一化成 CIDR。
-func ruleFrom(name, targets, chain string) (config.Route, error) {
+// ruleFrom 把界面传来的"一条规则"整理成 config.Route：目标与端口文本都可以一次填多个
+// （换行/逗号/顿号/空格分隔），这里负责拆分 + 归一化。端口留空 = 任意端口。
+func ruleFrom(name, targets, chain, ports string) (config.Route, error) {
 	ts, _, err := config.NormalizeTargets(targets)
 	if err != nil {
 		return config.Route{}, err
@@ -372,32 +490,44 @@ func ruleFrom(name, targets, chain string) (config.Route, error) {
 	if len(ts) == 0 {
 		return config.Route{}, fmt.Errorf("至少要填一个目标")
 	}
-	return config.Route{Name: name, Targets: ts, Chain: chain}, nil
+	ps, _, err := config.NormalizePorts(ports)
+	if err != nil {
+		return config.Route{}, err
+	}
+	return config.Route{Name: name, Targets: ts, Ports: ps, Chain: chain}, nil
 }
 
-// AddRoute 添加一条规则。名字可留空；目标可以一次填多个 ——
-// 多个目标属于**同一条规则**（对齐 Proxifier：一个动作挂一组目标）。
-func (b *Backend) AddRoute(name, targets, chain string) error {
-	rt, err := ruleFrom(name, targets, chain)
+// ruleSaved 保存成功后给日志/界面的回执文案。
+func ruleSaved(verb string, rt config.Route) string {
+	if len(rt.Ports) > 0 {
+		return fmt.Sprintf("%s规则%s（%d 个目标，端口 %s）", verb, rt.Describe(), len(rt.Targets), config.PortText(rt.Ports))
+	}
+	return fmt.Sprintf("%s规则%s（%d 个目标）", verb, rt.Describe(), len(rt.Targets))
+}
+
+// AddRoute 添加一条规则。名字可留空；目标与端口都可以一次填多个 ——
+// 多个目标属于**同一条规则**（对齐 Proxifier：一个动作挂一组目标 + 一组端口）。
+func (b *Backend) AddRoute(name, targets, chain, ports string) error {
+	rt, err := ruleFrom(name, targets, chain, ports)
 	if err != nil {
 		return err
 	}
 	if err := b.a.Cfg.AddRoute(rt); err != nil {
 		return err
 	}
-	return b.save(fmt.Sprintf("添加规则%s（%d 个目标）", rt.Describe(), len(rt.Targets)))
+	return b.save(ruleSaved("添加", rt))
 }
 
-// UpdateRoute 替换第 index 条规则（同样支持多目标）。
-func (b *Backend) UpdateRoute(index int, name, targets, chain string) error {
-	rt, err := ruleFrom(name, targets, chain)
+// UpdateRoute 替换第 index 条规则（同样支持多目标 + 端口条件）。
+func (b *Backend) UpdateRoute(index int, name, targets, chain, ports string) error {
+	rt, err := ruleFrom(name, targets, chain, ports)
 	if err != nil {
 		return err
 	}
 	if err := b.a.Cfg.UpdateRoute(index, rt); err != nil {
 		return err
 	}
-	return b.save(fmt.Sprintf("更新规则%s（%d 个目标）", rt.Describe(), len(rt.Targets)))
+	return b.save(ruleSaved("更新", rt))
 }
 
 func (b *Backend) DeleteRoute(index int) error {

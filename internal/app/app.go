@@ -153,10 +153,19 @@ func (a *App) SaveConfig() error {
 }
 
 // toRules 把配置层的规则转成规则引擎的类型（两层各保持独立，避免互相依赖）。
+//
+// ⚠️ 加字段时记得同步这里：映射漏一个字段会被静默丢弃（端口维度就这么坑过一次）。
 func toRules(rs []config.Route) []rules.Route {
 	out := make([]rules.Route, 0, len(rs))
 	for _, r := range rs {
-		out = append(out, rules.Route{Name: r.Name, Targets: r.Targets, Chain: r.Chain})
+		act := rules.ActionChain
+		switch {
+		case r.IsDirect():
+			act = rules.ActionDirect
+		case r.IsBlock():
+			act = rules.ActionBlock
+		}
+		out = append(out, rules.Route{Name: r.Name, Targets: r.Targets, Ports: r.Ports, Chain: r.Chain, Action: act})
 	}
 	return out
 }

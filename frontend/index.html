@@ -45,6 +45,7 @@
     <button class="tab is-active" data-page="log">运行日志</button>
     <button class="tab" data-page="chain">隧道链路<span class="tab-badge" id="badgeChain">0</span></button>
     <button class="tab" data-page="rule">路由规则<span class="tab-badge" id="badgeRule">0</span></button>
+    <button class="tab" data-page="conn">连接<span class="tab-badge" id="badgeConn">0</span></button>
     <button class="tab" data-page="settings">设置</button>
   </nav>
 </div>
@@ -71,9 +72,10 @@
     <div class="card card-fill">
       <div class="card-head">
         <h2>隧道链路</h2>
-        <span class="hint">一条链 = 一个上游（<code>socks5+tls://…?auth=…</code>）。可直接导入旧 gost 的 .bat 脚本</span>
+        <span class="hint">一条链 = 一个或多个上游（<code>socks5+tls://…?auth=…</code>），可故障转移/负载均衡；可直接导入旧 gost 的 .bat</span>
         <div class="spacer"></div>
         <button class="btn btn-sm btn-primary" id="btnChainAdd">添加链路</button>
+        <button class="btn btn-sm" id="btnChainProbe">立即探测</button>
         <button class="btn btn-sm" id="btnChainImport">从 gost .bat 导入</button>
       </div>
       <div class="table" id="chainTable"></div>
@@ -94,6 +96,20 @@
   </section>
 
   <!-- ═══════ 设置 ═══════ -->
+  <!-- ═══════ 连接 ═══════ -->
+  <section class="page" id="page-conn">
+    <div class="card card-fill">
+      <div class="card-head">
+        <h2>当前连接</h2>
+        <span class="hint">进行中的排在最前；已结束的保留 2 分钟</span>
+        <div class="spacer"></div>
+        <span class="hint" id="connSummary">—</span>
+        <button class="btn btn-sm" id="btnConnRefresh">刷新</button>
+      </div>
+      <div class="table" id="connTable"></div>
+    </div>
+  </section>
+
   <section class="page" id="page-settings">
     <div class="settings-scroll">
 
