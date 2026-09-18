@@ -35,7 +35,7 @@ if (-not $isAdmin) {
 }
 
 # ── 清理旧任务（含历史名字，方便从旧版本升级）────────────────
-foreach ($old in @($taskName, 'netproxy', 'netproxy')) {
+foreach ($old in @($taskName)) {
     $o = & schtasks /delete /tn $old /f 2>&1 | Out-String
     if ($o -match '成功|SUCCESS') { Write-Log "  已删除旧任务: $old" }
 }

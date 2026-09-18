@@ -1,7 +1,7 @@
 // Package rules 负责"目标是哪条链"的判定。
 //
 // 判定维度：目标 IP / CIDR。这是刻意的设计决定——
-// 业务系统 的内网域名（app.example.com 等）在系统 hosts 里已被映射成内网 IP，
+// 内网域名通常已在系统 hosts 里被映射成内网 IP（app.your-domain.com → 10.0.0.10），
 // 所以按 IP 段匹配就覆盖了全部已知目标，不需要解析 TLS SNI 或 DNS。
 package rules
 
@@ -13,12 +13,33 @@ import (
 	"sync"
 )
 
-// Route 一条路由规则：命中 Target（IP 或 CIDR）的流量走 Chain。
+// Route 一条路由规则：命中 Targets（任一 IP 或 CIDR）的流量走 Chain。
+// 形状与 config.Route 一致：一个动作挂一组目标（对齐 Proxifier 的规则）。
 type Route struct {
-	Target string `yaml:"target" json:"target"`
-	Chain  string `yaml:"chain" json:"chain"`
+	Name    string   `yaml:"name,omitempty" json:"name,omitempty"`
+	Targets []string `yaml:"targets" json:"targets"`
+	Chain   string   `yaml:"chain" json:"chain"`
 
-	ipnet *net.IPNet // 解析缓存
+	nets []*net.IPNet // 解析缓存，与 Targets 一一对应
+}
+
+// Label 日志/报错里的简短指代。
+func (r Route) Label() string {
+	ts := strings.Join(r.Targets, ", ")
+	if n := strings.TrimSpace(r.Name); n != "" {
+		return n + "：" + ts
+	}
+	return ts
+}
+
+// Matches 任一目标命中即算该规则命中。
+func (r Route) Matches(ip net.IP) bool {
+	for _, n := range r.nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // Set 是一组有序规则（先匹配先生效，和 Proxifier 语义一致）。
@@ -33,19 +54,27 @@ func New() *Set { return &Set{} }
 func (s *Set) Load(routes []Route) error {
 	out := make([]Route, 0, len(routes))
 	for i, r := range routes {
-		r.Target = strings.TrimSpace(r.Target)
+		r.Name = strings.TrimSpace(r.Name)
 		r.Chain = strings.TrimSpace(r.Chain)
-		if r.Target == "" {
-			return fmt.Errorf("第 %d 条规则: target 为空", i+1)
+		if len(r.Targets) == 0 {
+			return fmt.Errorf("第 %d 条规则%s: 至少要有一个目标", i+1, r.Label())
 		}
 		if r.Chain == "" {
-			return fmt.Errorf("第 %d 条规则(%s): chain 为空", i+1, r.Target)
+			return fmt.Errorf("第 %d 条规则%s: chain 为空", i+1, r.Label())
 		}
-		ipnet, err := parseTarget(r.Target)
-		if err != nil {
-			return fmt.Errorf("第 %d 条规则(%s): %w", i+1, r.Target, err)
+		nets := make([]*net.IPNet, 0, len(r.Targets))
+		for j, t := range r.Targets {
+			t = strings.TrimSpace(t)
+			if t == "" {
+				return fmt.Errorf("第 %d 条规则%s: 第 %d 个目标为空", i+1, r.Label(), j+1)
+			}
+			ipnet, err := parseTarget(t)
+			if err != nil {
+				return fmt.Errorf("第 %d 条规则%s: 目标 %s: %w", i+1, r.Label(), t, err)
+			}
+			nets = append(nets, ipnet)
 		}
-		r.ipnet = ipnet
+		r.nets = nets
 		out = append(out, r)
 	}
 	s.mu.Lock()
@@ -62,9 +91,9 @@ func (s *Set) Match(ip net.IP) (string, bool) {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for _, r := range s.routes {
-		if r.ipnet.Contains(v4) {
-			return r.Chain, true
+	for i := range s.routes {
+		if s.routes[i].Matches(v4) {
+			return s.routes[i].Chain, true
 		}
 	}
 	return "", false
@@ -92,10 +121,12 @@ func (s *Set) Ranges() []Range {
 
 	var rs []Range
 	for _, r := range s.routes {
-		first := ip2u(r.ipnet.IP.To4())
-		mask := ip2u(net.IP(r.ipnet.Mask).To4())
-		last := first | ^mask
-		rs = append(rs, Range{first, last})
+		for _, n := range r.nets {
+			first := ip2u(n.IP.To4())
+			mask := ip2u(net.IP(n.Mask).To4())
+			last := first | ^mask
+			rs = append(rs, Range{first, last})
+		}
 	}
 	sort.Slice(rs, func(i, j int) bool { return rs[i].First < rs[j].First })
 

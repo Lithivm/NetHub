@@ -358,7 +358,9 @@ func (b *Backend) clashTargets() []string {
 		}
 	}
 	for _, rt := range b.a.Cfg.Routes {
-		add(firstUsableHost(rt.Target))
+		for _, t := range rt.Targets {
+			add(firstUsableHost(t))
+		}
 	}
 	return out
 }

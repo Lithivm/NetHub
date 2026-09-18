@@ -78,11 +78,12 @@ func realHostsByChain(cfg *config.Config) map[string][]net.IP {
 	}
 	var nets []cidr
 	for _, rt := range cfg.Routes {
-		if _, n, err := net.ParseCIDR(rt.Target); err == nil {
-			nets = append(nets, cidr{rt.Chain, n})
-		} else if ip := net.ParseIP(rt.Target); ip != nil {
-			bits := 32
-			nets = append(nets, cidr{rt.Chain, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)}})
+		for _, t := range rt.Targets {
+			if _, n, err := net.ParseCIDR(t); err == nil {
+				nets = append(nets, cidr{rt.Chain, n})
+			} else if ip := net.ParseIP(t); ip != nil {
+				nets = append(nets, cidr{rt.Chain, &net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)}})
+			}
 		}
 	}
 

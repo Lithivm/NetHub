@@ -54,6 +54,8 @@ const modal = {
     body.replaceChildren(...bodyNodes);
     document.getElementById('modalErr').textContent = '';
     document.getElementById('modalOk').textContent = okText || '确定';
+    // 回执类模态框会把「取消」藏起来，这里恢复默认显示，否则它会一直缺着
+    document.getElementById('modalCancel').style.display = '';
     document.getElementById('modalBackdrop').classList.add('is-open');
     this.onOk = onOk;
     setTimeout(() => {
@@ -272,6 +274,26 @@ function input(type, value, placeholder) {
   return i;
 }
 
+function textarea(value, placeholder, rows) {
+  const t = el('textarea', 'input textarea');
+  t.value = value || '';
+  t.rows = rows || 5;
+  t.spellcheck = false;
+  if (placeholder) t.placeholder = placeholder;
+  return t;
+}
+
+/* 批量操作的统一回执：新增/跳过分列，跳过的原因必须写出来 ——
+   否则用户以为全加上了，规则却不生效。 */
+function showBatchResult(title, verb, added, skipped) {
+  modal.open(title,
+    [el('p', null, verb + ' ' + added.length + ' 条，跳过 ' + skipped.length + ' 条'),
+     ...added.map(s => el('div', 'hint', '✓ ' + s)),
+     ...skipped.map(s => el('div', 'hint', '· ' + s))],
+    () => modal.close(), '知道了');
+  document.getElementById('modalCancel').style.display = 'none';
+}
+
 function field(label, node, hint) {
   const f = el('div', 'field');
   if (label) f.appendChild(el('label', null, label));
@@ -298,12 +320,7 @@ async function importBats() {
     if (!r) return;
     await loadChains();
     const added = r.added || [], skipped = r.skipped || [];
-    modal.open('导入结果',
-      [el('p', null, '新增/更新 ' + added.length + ' 条，跳过 ' + skipped.length + ' 条'),
-       ...added.map(s => el('div', 'hint', '✓ ' + s)),
-       ...skipped.map(s => el('div', 'hint', '· ' + s))],
-      () => modal.close(), '知道了');
-    document.getElementById('modalCancel').style.display = 'none';
+    showBatchResult('导入结果', '新增/更新', added, skipped);
   } catch (e) { fail(e); }
 }
 
@@ -317,7 +334,7 @@ async function loadRoutes() {
   t.replaceChildren();
 
   const head = el('div', 'trow thead rule-grid');
-  ['#', '目标 IP / CIDR', '走哪条链', '说明（该链备注）', ''].forEach(h =>
+  ['#', '规则名', '目标 IP / CIDR', '走哪条链', '说明（该链备注）', ''].forEach(h =>
     head.appendChild(el('div', 'cell', h)));
   t.appendChild(head);
 
@@ -331,7 +348,8 @@ async function loadRoutes() {
     const idxCell = el('div', 'cell');
     idxCell.appendChild(el('span', 'idx', String(r.index + 1)));
     row.appendChild(idxCell);
-    row.appendChild(el('div', 'cell mono strong', r.target));
+    row.appendChild(el('div', 'cell' + (r.name ? ' strong' : ' dim'), r.name || '（未命名）'));
+    row.appendChild(targetsCell(r.targets || []));
     row.appendChild(el('div', 'cell', r.chain));
     row.appendChild(el('div', 'cell dim', r.note || ''));
 
@@ -345,13 +363,26 @@ async function loadRoutes() {
   });
 }
 
+/* 目标列：一条规则可以挂十几个目标，列表里只给摘要，全量放 title，悬停能看全。 */
+function targetsCell(list) {
+  const cap = 3;
+  const c = el('div', 'cell mono');
+  c.textContent = list.slice(0, cap).join(' ') +
+    (list.length > cap ? '  +' + (list.length - cap) + ' 个' : '');
+  if (list.length > 1) c.title = list.join('\n');
+  return c;
+}
+
 function ruleForm(index) {
   const isNew = index == null;
-  const src = isNew ? { target: '', chain: chains[0] ? chains[0].name : '' } : routes.find(r => r.index === index);
+  const src = isNew
+    ? { name: '', targets: [], chain: chains[0] ? chains[0].name : '' }
+    : routes.find(r => r.index === index);
   if (!chains.length) { toast('无法添加规则', '请先到「隧道链路」页添加一条链', 'warn'); return; }
 
-  const target = input('text', src.target, '单个 IP（10.0.1.10）或网段（10.0.1.0/24）');
-  target.classList.add('mono');
+  const name = input('text', src.name, '例如 内网 A 段（可留空）');
+  const targets = textarea((src.targets || []).join('\n'),
+    '每行一个，也可用逗号/顿号/空格分隔：\n10.0.1.0/24\n10.0.0.0/24, 192.168.100.0/24', 5);
   const sel = el('select', 'input');
   chains.forEach(c => {
     const o = el('option', null, c.name + '   —   ' + (c.forward || ''));
@@ -361,19 +392,28 @@ function ruleForm(index) {
   sel.value = src.chain || chains[0].name;
 
   const nodes = [
-    field('目标', target, '单个 IP 会自动存成 /32；规则自上而下匹配，命中即停'),
-    field('走哪条链', sel),
+    field('规则名', name, '给这条规则起个名字（可留空）'),
+    field('目标', targets,
+      '单个 IP 会自动存成 /32；填多个目标就是同一条规则 —— 命中其中任意一个都走下面这条链'),
+    field('走哪条链', sel, '规则自上而下匹配，命中即停'),
   ];
 
   modal.open(isNew ? '添加规则' : '编辑规则', nodes, async () => {
     try {
-      if (isNew) await call('AddRoute', target.value, sel.value);
-      else await call('UpdateRoute', index, target.value, sel.value);
+      if (isNew) await call('AddRoute', name.value, targets.value, sel.value);
+      else await call('UpdateRoute', index, name.value, targets.value, sel.value);
       modal.close();
       await loadRoutes();
-      toast(isNew ? '已添加规则' : '已更新规则', target.value, 'success');
+      toast(isNew ? '已添加规则' : '已更新规则',
+        (name.value.trim() || '未命名') + '：' + splitTargets(targets.value).length + ' 个目标 → ' + sel.value,
+        'success');
     } catch (e) { modal.error(fail(e)); }
   });
+}
+
+/* 只为在提示语里数一下目标个数（真正的拆分与归一化在后端做）。 */
+function splitTargets(raw) {
+  return String(raw || '').split(/[\s,，;；、]+/).filter(Boolean);
 }
 
 async function moveRoute(i, d) {
@@ -384,8 +424,11 @@ async function moveRoute(i, d) {
 
 async function delRoute(i) {
   const r = routes.find(x => x.index === i);
-  if (!await confirmBox('删除规则', '确定删除规则 ' + r.target + ' → ' + r.chain + ' 吗？', true)) return;
-  try { await call('DeleteRoute', i); await loadRoutes(); toast('已删除规则', r.target, 'success'); }
+  const ts = r.targets || [];
+  const desc = r.name ? '「' + r.name + '」' : (ts.length > 1 ? ts.length + ' 个目标' : ts[0]);
+  if (!await confirmBox('删除规则',
+      '确定删除规则 ' + desc + '（' + ts.length + ' 个目标 → ' + r.chain + '）吗？', true)) return;
+  try { await call('DeleteRoute', i); await loadRoutes(); toast('已删除规则', desc, 'success'); }
   catch (e) { fail(e); }
 }
 

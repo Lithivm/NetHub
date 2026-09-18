@@ -14,21 +14,16 @@ import (
 const (
 	beginMark = "# >>> NetHub 自动维护开始（勿手改本段内的内容）"
 	endMark   = "# <<< NetHub 自动维护结束"
-
-	// 改名前的旧标记。本程序原来叫 netproxy，如果某台机器上已经有旧区块，
-	// 要能识别并当自己的处理（否则会留下一段孤儿内容，而且再写入会重复）。
-	beginMarkOld = "# >>> netproxy 自动维护开始（勿手改本段内的内容）"
-	endMarkOld   = "# <<< netproxy 自动维护结束"
 )
 
-// isBegin 判定是否是"我们的区块开始"（新旧标记都算）。
+// isBegin 判定是否是"我们的区块开始"。
 func isBegin(line string) bool {
-	return strings.HasPrefix(line, beginMark) || strings.HasPrefix(line, beginMarkOld)
+	return strings.HasPrefix(line, beginMark)
 }
 
-// isEnd 判定是否是"我们的区块结束"（新旧标记都算）。
+// isEnd 判定是否是"我们的区块结束"。
 func isEnd(line string) bool {
-	return strings.HasPrefix(line, endMark) || strings.HasPrefix(line, endMarkOld)
+	return strings.HasPrefix(line, endMark)
 }
 
 // Path 返回系统 hosts 路径。

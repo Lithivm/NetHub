@@ -140,7 +140,7 @@ func (e *Engine) Start() error {
 
 	e.bus.Info("✓ 拦截已启动：relay=%s，规则 %d 条", relay, len(e.rules.List()))
 	for _, r := range e.rules.List() {
-		e.bus.Info("    %s  →  链 %s", r.Target, r.Chain)
+		e.bus.Info("    %s  →  链 %s", r.Label(), r.Chain)
 	}
 
 	e.wg.Add(3)

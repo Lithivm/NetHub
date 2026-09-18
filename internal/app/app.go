@@ -156,7 +156,7 @@ func (a *App) SaveConfig() error {
 func toRules(rs []config.Route) []rules.Route {
 	out := make([]rules.Route, 0, len(rs))
 	for _, r := range rs {
-		out = append(out, rules.Route{Target: r.Target, Chain: r.Chain})
+		out = append(out, rules.Route{Name: r.Name, Targets: r.Targets, Chain: r.Chain})
 	}
 	return out
 }

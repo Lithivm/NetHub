@@ -367,7 +367,7 @@ code, .mono { font-family: var(--font-mono); }
   font-size: var(--fs-xs); font-weight: 700; font-family: var(--font-mono);
 }
 .chain-grid { grid-template-columns: 130px minmax(240px, 1.6fr) minmax(160px, 1fr) 160px; }
-.rule-grid  { grid-template-columns: 46px 220px 150px minmax(160px, 1fr) 150px; }
+.rule-grid  { grid-template-columns: 46px 170px minmax(200px, 1.5fr) 130px minmax(120px, 1fr) 150px; }
 
 .empty {
   padding: var(--s6);

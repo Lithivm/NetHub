@@ -26,3 +26,7 @@ NetHub-task.xml
 
 # make-dist.ps1 的产物（二进制，含凭据，不入库）
 dist/
+dist-public/
+
+# 内部运维脚本（写死了内网 IP / 客户域名，不进公开仓库；只留在本机用）
+local/

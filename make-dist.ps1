@@ -4,11 +4,16 @@
 #   powershell -ExecutionPolicy Bypass -File make-dist.ps1 -SkipBuild   # 不重新编译
 #
 # dist/ 里放的是“拿到就能跑”的最小集合。注意：
-#   * 会带上 config.yaml（**含上游凭据**）—— 这是有意为之，同事要靠它直接跑通。
+#   * **绝不带上 config.yaml**（含上游凭据）：谁都不靠包里那份配置，
+#     同事拿到包后把 config.yaml.example 复制成 config.yaml 再填自己的上游。
+#     -Clean 再多去掉 README 与内部运维脚本，产出 dist-public\（给外部/公开用）。
 #     凭据不在日志/聊天里出现，但这个包本身是敏感的，别往公开地方传。
 #   * dist/ 不进 git（见 .gitignore）：里面是二进制产物，入库没意义且会把仓库撑大。
 param(
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    # 给外部/公开用的包：在“不带 config.yaml”的基础上，再去掉 README 与内部运维脚本，
+    # 产出 dist-public\。两种包都不含任何配置与日志。
+    [switch]$Clean
 )
 
 $ErrorActionPreference = 'Stop'
@@ -71,7 +76,8 @@ function Fix-ZipEntryNames($zipPath) {
 }
 
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$dist = Join-Path $here 'dist'
+# 两个产物分目录，避免“含凭据的包”被当成“脱敏包”发出去
+$dist = Join-Path $here $(if ($Clean) { 'dist-public' } else { 'dist' })
 
 # ── 1) 编译 ─────────────────────────────────────────────────
 if (-not $SkipBuild) {
@@ -86,23 +92,43 @@ if (-not $SkipBuild) {
     Info '  编译完成'
 }
 
-# ── 2) 重建 dist/ ───────────────────────────────────────────
+# ── 2) 重建输出目录 ────────────────────────────────────────
 if (Test-Path $dist) { Remove-Item $dist -Recurse -Force }
 New-Item -ItemType Directory -Path $dist | Out-Null
 
-$files = @(
-    @{n = 'nethub.exe';      must = $true;  desc = '主程序'},
-    @{n = 'nethub.ico';      must = $true;  desc = '图标'},
-    @{n = 'WinDivert.dll';   must = $true;  desc = 'WinDivert 运行库'},
-    @{n = 'WinDivert64.sys'; must = $true;  desc = 'WinDivert 内核驱动'}, 
-    @{n = 'config.yaml';     must = $true;  desc = '配置（含上游凭据）'},
-    @{n = 'README.md';       must = $false; desc = '完整文档'},
-    @{n = 'install-task.ps1'; must = $false; desc = '注册开机自启'}
-)
+if ($Clean) {
+    # 公开包：只放“能跑 + 怎么用”。
+    # 刻意不放：config.yaml（含上游凭据）、nethub*.log（含内网地址与访问记录）、
+    #           内部运维脚本（e2e / porttest / final-accept / clash-check 等，
+    #           里面写死了客户内网 IP 与域名）、客户化的 README。
+    $files = @(
+        @{n = 'nethub.exe';            must = $true;  desc = '主程序'},
+        @{n = 'nethub.ico';            must = $true;  desc = '图标'},
+        @{n = 'WinDivert.dll';         must = $true;  desc = 'WinDivert 运行库（LGPLv3）'},
+        @{n = 'WinDivert64.sys';       must = $true;  desc = 'WinDivert 内核驱动（LGPLv3）'},
+        @{n = 'WinDivert-LICENSE.txt'; src = 'third_party\WinDivert-LICENSE.txt'; must = $true; desc = 'WinDivert 许可证（随包分发）'},
+        @{n = 'LICENSE';               must = $true;  desc = '本程序许可证'},
+        @{n = 'config.yaml.example';   must = $true;  desc = '配置模板（占位符，无凭据）'},
+        @{n = 'install-task.ps1';      must = $false; desc = '注册开机自启'}
+    )
+} else {
+    $files = @(
+        @{n = 'nethub.exe';      must = $true;  desc = '主程序'},
+        @{n = 'nethub.ico';      must = $true;  desc = '图标'},
+        @{n = 'WinDivert.dll';   must = $true;  desc = 'WinDivert 运行库'},
+        @{n = 'WinDivert64.sys'; must = $true;  desc = 'WinDivert 内核驱动'}, 
+        @{n = 'WinDivert-LICENSE.txt'; src = 'third_party\WinDivert-LICENSE.txt'; must = $false; desc = 'WinDivert 许可证'},
+        @{n = 'LICENSE';         must = $false; desc = '本程序许可证'},
+        @{n = 'config.yaml.example'; must = $true; desc = '配置模板（同学要自己复制成 config.yaml）'},
+        @{n = 'README.md';       must = $false; desc = '完整文档'},
+        @{n = 'install-task.ps1'; must = $false; desc = '注册开机自启'}
+    )
+}
 
 $missing = @()
 foreach ($f in $files) {
-    $src = Join-Path $here $f.n
+    $rel = $f['src']; if (-not $rel) { $rel = $f.n }   # 少数文件源路径与包内名字不同
+    $src = Join-Path $here $rel
     if (Test-Path $src) {
         Copy-Item $src (Join-Path $dist $f.n) -Force
         Info ("  已放入 {0,-18} {1}" -f $f.n, $f.desc)
@@ -112,14 +138,24 @@ foreach ($f in $files) {
 }
 if ($missing.Count -gt 0) { Die ("缺少必需文件: " + ($missing -join ', ')) }
 
-# ── 3) 使用说明（同事第一眼要看的） ─────────────────────────
+# ── 3) 使用说明（第一眼要看的） ────────────────────────────
 $readme = @"
 NetHub —— 内网隧道代理（分发版）
 ================================================
 
-首次使用请按顺序做，两步都不能省：
+这是个 Windows 内网透明代理：把指定网段的 TCP 流量在**内核层**接管，
+经你自己的上游代理转发出去。程序自带代理客户端，不需要 gost.exe。
 
-【第 1 步】让安全软件放行（**最容易漏，漏了就完全用不了**）
+【第 1 步】配置你自己的上游（**必做，否则起不来**）
+  1) 把 config.yaml.example 复制成 config.yaml
+  2) 打开 config.yaml，把 chains 里的
+         forward: socks5+tls://YOUR-HOST:10080?auth=YOUR_BASE64_OF_user:pass
+     换成你自己的上游地址（auth= 后面是「用户:口令」的 base64）
+  3) 把 routes 里的示例网段换成你真正要走隧道的内网段
+
+  ⚠ config.yaml 里含上游凭据，别提交进 git、别贴到聊天/工单里。
+
+【第 2 步】让安全软件放行（**最容易漏，漏了就完全用不了**）
   火绒会拦截本程序要加载的驱动，表现是打不开、日志里反复报
   "Insufficient system resources ... (1450)"。
 
@@ -131,7 +167,7 @@ NetHub —— 内网隧道代理（分发版）
   ★ 为什么第 2 步不能省：火绒的白名单是启动时读进内存的。
     加完不重启火绒，白名单不生效，重试依然报 1450。
 
-【第 2 步】启动
+【第 3 步】启动
   双击 nethub.exe。它会自己请求管理员权限（内网透明拦截需要）。
   启动后窗口可以点 X 收进托盘，服务继续跑；真退出走托盘右键 → 退出。
 
@@ -142,18 +178,18 @@ NetHub —— 内网隧道代理（分发版）
 
 验证是否正常
   看「运行日志」页：应该出现
-      内核过滤器: (...)
-      引擎已接管: 已接管 3 条规则, relay 127.0.0.1:xxxxx
-  **不该**出现反复的 "WinDivert 打开失败(第 N/6 次)" —— 出现就是第 1 步没做全。
+      内核过滤器: (outbound and tcp and ...)
+      ✓ 服务已就绪：已接管 N 条规则，relay 127.0.0.1:xxxxx
+  **不该**出现反复的 "WinDivert 打开失败(第 N/6 次)" —— 出现就是第 2 步没做全。
 
 出问题先看
-  * 驱动加载失败(1450) → 回到第 1 步，尤其确认火绒重启过
+  * 驱动加载失败(1450) → 回到第 2 步，尤其确认火绒重启过
   * 内网连不上但日志有"已接管" → 界面里点「链路自检」
-  * 完整的排障与原理，见 README.md
+  * 新加了网段却没生效 → 改网段后要在界面上点「重启」（过滤器在启动时按网段展开）
 
-配置
-  上游地址和凭据在 config.yaml。改完在界面「设置」页保存，或重启程序生效。
-  设置页还有「导出配置」按钮，可以一次性把配置+说明导给别人。
+第三方组件
+  WinDivert（LGPLv3 / GPLv2 双许可）—— 见 WinDivert-LICENSE.txt。
+  本程序以动态链接方式使用 WinDivert.dll。
 "@
 $readmePath = Join-Path $dist '使用说明.txt'
 [IO.File]::WriteAllText($readmePath, $readme, (New-Object Text.UTF8Encoding $true))

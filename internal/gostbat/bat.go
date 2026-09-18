@@ -64,7 +64,7 @@ func ParseBatFile(path string) (BatEntry, bool) {
 	return BatEntry{File: filepath.Base(path), Listen: config.NormalizeListenLoose(l), Forward: f}, true
 }
 
-// Name 从 bat 文件名推链名：gost-proxy-a.bat → proxy-a。
+// Name 从 bat 文件名推链名：gost-lan-a.bat → lan-a。
 func (e BatEntry) Name() string {
 	n := e.File
 	if i := strings.LastIndex(n, "."); i > 0 {

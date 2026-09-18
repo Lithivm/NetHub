@@ -146,10 +146,11 @@ type ChainView struct {
 }
 
 type RouteView struct {
-	Index  int    `json:"index"`
-	Target string `json:"target"`
-	Chain  string `json:"chain"`
-	Note   string `json:"note"`
+	Index   int      `json:"index"`
+	Name    string   `json:"name"`
+	Targets []string `json:"targets"`
+	Chain   string   `json:"chain"`
+	Note    string   `json:"note"`
 }
 
 type LogView struct {
@@ -266,7 +267,7 @@ func (b *Backend) GetRoutes() []RouteView {
 	}
 	out := make([]RouteView, 0, len(b.a.Cfg.Routes))
 	for i, r := range b.a.Cfg.Routes {
-		out = append(out, RouteView{Index: i, Target: r.Target, Chain: r.Chain, Note: note[r.Chain]})
+		out = append(out, RouteView{Index: i, Name: r.Name, Targets: r.Targets, Chain: r.Chain, Note: note[r.Chain]})
 	}
 	return out
 }
@@ -297,12 +298,11 @@ func (b *Backend) GetSettings() SettingsView {
 	}
 }
 
+// defaultHostsEntries 首次打开「hosts 接管」时的空模板：只示范格式，不预置任何真实映射。
+// 刻意用注释行 —— 即使用户不看提示直接点「立即写入 hosts」，写进去的也只是一行注释。
 func defaultHostsEntries() []string {
 	return []string{
-		"10.0.0.10 app.example.com",
-		"10.0.0.10 opm.example.com",
-		"192.168.100.10 site-b.example.com",
-		"192.168.100.10 site-c.example.com",
+		"# 每行一条：内网IP 域名（例如 10.0.0.10 app.your-domain.com）",
 	}
 }
 
@@ -368,18 +368,42 @@ func (in ChainInput) toChain() config.Chain {
 
 // ───────────────────────── 规则（≈ Proxifier 的 Rules）─────────────────────────
 
-func (b *Backend) AddRoute(target, chain string) error {
-	if err := b.a.Cfg.AddRoute(config.Route{Target: target, Chain: chain}); err != nil {
-		return err
+// ruleFrom 把界面传来的"一条规则"整理成 config.Route：目标文本可以一次填多个
+// （换行/逗号/顿号/空格分隔），这里负责拆分 + 归一化成 CIDR。
+func ruleFrom(name, targets, chain string) (config.Route, error) {
+	ts, _, err := config.NormalizeTargets(targets)
+	if err != nil {
+		return config.Route{}, err
 	}
-	return b.save("添加规则")
+	if len(ts) == 0 {
+		return config.Route{}, fmt.Errorf("至少要填一个目标")
+	}
+	return config.Route{Name: name, Targets: ts, Chain: chain}, nil
 }
 
-func (b *Backend) UpdateRoute(index int, target, chain string) error {
-	if err := b.a.Cfg.UpdateRoute(index, config.Route{Target: target, Chain: chain}); err != nil {
+// AddRoute 添加一条规则。名字可留空；目标可以一次填多个 ——
+// 多个目标属于**同一条规则**（对齐 Proxifier：一个动作挂一组目标）。
+func (b *Backend) AddRoute(name, targets, chain string) error {
+	rt, err := ruleFrom(name, targets, chain)
+	if err != nil {
 		return err
 	}
-	return b.save("更新规则")
+	if err := b.a.Cfg.AddRoute(rt); err != nil {
+		return err
+	}
+	return b.save(fmt.Sprintf("添加规则%s（%d 个目标）", rt.Describe(), len(rt.Targets)))
+}
+
+// UpdateRoute 替换第 index 条规则（同样支持多目标）。
+func (b *Backend) UpdateRoute(index int, name, targets, chain string) error {
+	rt, err := ruleFrom(name, targets, chain)
+	if err != nil {
+		return err
+	}
+	if err := b.a.Cfg.UpdateRoute(index, rt); err != nil {
+		return err
+	}
+	return b.save(fmt.Sprintf("更新规则%s（%d 个目标）", rt.Describe(), len(rt.Targets)))
 }
 
 func (b *Backend) DeleteRoute(index int) error {
@@ -642,10 +666,12 @@ func probeIPForChain(cfg *config.Config, chainName string) net.IP {
 		if rt.Chain != chainName {
 			continue
 		}
-		if _, n, err := net.ParseCIDR(rt.Target); err == nil {
-			nets = append(nets, n)
-		} else if ip := net.ParseIP(rt.Target); ip != nil {
-			nets = append(nets, &net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)})
+		for _, t := range rt.Targets {
+			if _, n, err := net.ParseCIDR(t); err == nil {
+				nets = append(nets, n)
+			} else if ip := net.ParseIP(t); ip != nil {
+				nets = append(nets, &net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)})
+			}
 		}
 	}
 	for _, e := range hostsEntriesFrom(cfg) {
@@ -784,9 +810,9 @@ func (b *Backend) ExportSummary() (string, error) {
 		}
 	}
 
-	sb.WriteString("\n【路由规则】（自上而下匹配，命中即止）\n")
+	sb.WriteString("\n【路由规则】（自上而下匹配，命中即止；一条规则可含多个目标）\n")
 	for i, r := range b.a.Cfg.Routes {
-		fmt.Fprintf(&sb, "  %d. %s  →  %s\n", i+1, r.Target, r.Chain)
+		fmt.Fprintf(&sb, "  %d. %s  →  %s\n", i+1, r.Label(), r.Chain)
 	}
 
 	sb.WriteString("\n【其它设置】\n")

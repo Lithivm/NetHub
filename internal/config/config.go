@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 
@@ -22,10 +23,43 @@ type Chain struct {
 	Note    string `yaml:"note,omitempty"`
 }
 
-// Route 目标 → 链 的规则，见 internal/rules。
+// Route 一条路由规则 —— 形状对齐 Proxifier 的 Proxification Rule：
+// **一个动作挂一组目标**。判定维度只有目标 IP/CIDR（见 internal/rules），
+// 所以这里没有 Proxifier 的 Applications / Ports，动作就是"走哪条链"。
+//
+// 规则自上而下匹配、命中即止；一条规则内**任一**目标命中即算该规则命中。
 type Route struct {
-	Target string `yaml:"target"`
-	Chain  string `yaml:"chain"`
+	Name    string   `yaml:"name,omitempty"` // 规则名，可留空
+	Targets []string `yaml:"targets"`        // 目标 IP/CIDR，可多个
+	Chain   string   `yaml:"chain"`          // 动作：走哪条链
+
+	// Target 是 v1 的旧写法（一条规则一个目标），只为读老 config.yaml 保留：
+	// 载入时由 Normalize 并进 Targets，保存时不再写出。
+	Target string `yaml:"target,omitempty"`
+}
+
+// Label 一行式描述（日志、导出说明用）：带名字就带上，目标用逗号隔开。
+func (r Route) Label() string {
+	ts := strings.Join(r.Targets, ", ")
+	if n := strings.TrimSpace(r.Name); n != "" {
+		return n + "：" + ts
+	}
+	return ts
+}
+
+// Describe 给报错指代用："「规则名」"或"（前两个目标 …）"。
+func (r Route) Describe() string {
+	if n := strings.TrimSpace(r.Name); n != "" {
+		return "「" + n + "」"
+	}
+	if len(r.Targets) == 0 {
+		return "（无目标）"
+	}
+	ts := r.Targets
+	if len(ts) > 2 {
+		ts = append(append([]string{}, ts[:2]...), "…")
+	}
+	return "（" + strings.Join(ts, " ") + "）"
 }
 
 // HostsCfg 系统 hosts 标记区块的内容。
@@ -53,21 +87,21 @@ type Config struct {
 // Path 返回配置文件路径。
 func (c *Config) Path() string { return c.path }
 
-// Default 返回一份内置默认配置（首次运行、且没有旧 bat 可导入时用）。
+// Default 返回一份内置默认配置（首次运行且没有现成 config.yaml 时写出来给用户改）。
+//
+// 刻意地"什么都不预设"：链名是示例、forward 留空、不预置任何网段。
+// 默认配置绝不指向任何真实环境 —— 否则新机器一启动就会去接管别人的网段，
+// 而 forward 为空会让 Validate 直接拒绝启动，用户必须先填自己的上游。
 func Default() *Config {
 	return &Config{
 		Relay: "127.0.0.1:0",
 		Chains: []Chain{
-			{Name: "proxy-a", Forward: "", Note: "内网主体链路（10.0.0.* / 10.0.1.*）"},
-			{Name: "proxy-b", Forward: "", Note: "proxy-b 链路（192.168.100.*）"},
+			{Name: "proxy-a", Note: "示例链路 A —— 把 forward 换成你自己的上游"},
+			{Name: "proxy-b", Note: "示例链路 B"},
 		},
-		Routes: []Route{
-			{Target: "10.0.0.0/24", Chain: "proxy-a"},
-			{Target: "10.0.1.0/24", Chain: "proxy-a"},
-			{Target: "192.168.100.0/24", Chain: "proxy-b"},
-		},
-		Hosts: HostsCfg{Manage: false},
-		UI:    UICfg{Theme: "light"},
+		Routes: nil,
+		Hosts:  HostsCfg{Manage: false},
+		UI:     UICfg{Theme: "light"},
 	}
 }
 
@@ -96,10 +130,28 @@ func Load(path string) (*Config, error) {
 	if c.UI.Theme != "dark" {
 		c.UI.Theme = "light"
 	}
+	if _, err := c.Normalize(); err != nil { // 旧写法/手写配置也安全进来
+		return nil, err
+	}
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
 	return &c, nil
+}
+
+// Normalize 就地整理全部规则，让 v1/手写配置也符合 Proxifier 形状：
+// v1 的 `target:` 并进 `targets:`、目标归一化成 CIDR、组内去重、清掉两侧空白。
+// 返回是否改动过（调用方据此决定要不要写回文件）。
+func (c *Config) Normalize() (bool, error) {
+	changed := false
+	for i := range c.Routes {
+		ch, _, err := c.Routes[i].normalize()
+		if err != nil {
+			return changed, fmt.Errorf("第 %d 条规则: %v", i+1, err)
+		}
+		changed = changed || ch
+	}
+	return changed, nil
 }
 
 // Save 原子写回配置文件。
@@ -144,10 +196,15 @@ func (c *Config) Validate() error {
 	}
 	for i, r := range c.Routes {
 		if !seen[r.Chain] {
-			return fmt.Errorf("第 %d 条规则(%s): 引用了不存在的链 %q", i+1, r.Target, r.Chain)
+			return fmt.Errorf("第 %d 条规则%s: 引用了不存在的链 %q", i+1, r.Describe(), r.Chain)
 		}
-		if _, err := NormalizeTarget(r.Target); err != nil {
-			return fmt.Errorf("第 %d 条规则: 目标 %q 不是合法 IP 或 CIDR（%v）", i+1, r.Target, err)
+		if len(r.Targets) == 0 {
+			return fmt.Errorf("第 %d 条规则%s: 至少要有一个目标", i+1, r.Describe())
+		}
+		for _, t := range r.Targets {
+			if _, err := NormalizeTarget(t); err != nil {
+				return fmt.Errorf("第 %d 条规则%s: 目标 %q 不是合法 IP 或 CIDR（%v）", i+1, r.Describe(), t, err)
+			}
 		}
 	}
 	if !strings.Contains(c.Relay, ":") {
@@ -180,6 +237,47 @@ func NormalizeTarget(s string) (string, error) {
 		return "", fmt.Errorf("只支持 IPv4")
 	}
 	return fmt.Sprintf("%s/%d", n.IP.String(), ones), nil
+}
+
+// targetSep 判断多目标输入里的分隔符：换行、Tab、空格等所有空白，
+// 外加中英文逗号、分号、顿号。用户从工单/表格里粘一串 IP 是最常见的用法。
+func targetSep(r rune) bool {
+	if unicode.IsSpace(r) {
+		return true
+	}
+	switch r {
+	case ',', '，', ';', '；', '、':
+		return true
+	}
+	return false
+}
+
+// NormalizeTargets 把一次手输/粘贴的多目标文本解析成目标列表，
+// 供"一条规则填多个目标"用。分隔符：所有空白 + 中英文逗号/分号/顿号。
+//
+//	out  归一化后的 CIDR，保持输入顺序，组内去重
+//	dup  被去掉的重复项（归一化形式，供界面如实告知）
+//	err  第一个非法目标 —— 整条规则都不落地，不留半生效状态
+func NormalizeTargets(raw string) (out, dup []string, err error) {
+	seen := map[string]bool{}
+	for _, f := range strings.FieldsFunc(raw, targetSep) {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			continue
+		}
+		n, nerr := NormalizeTarget(f)
+		if nerr != nil {
+			return nil, nil, fmt.Errorf("目标 %q 不是合法 IP 或 CIDR（%v）", f, nerr)
+		}
+		key := strings.ToLower(n)
+		if seen[key] {
+			dup = append(dup, n)
+			continue
+		}
+		seen[key] = true
+		out = append(out, n)
+	}
+	return out, dup, nil
 }
 
 // FindChain 按下标找链，找不到返回 -1。
@@ -276,21 +374,82 @@ func (c *Config) MoveChain(from, to int) error {
 	return nil
 }
 
-// AddRoute 追加一条规则（target 会被归一化成 CIDR）。
-func (c *Config) AddRoute(rt Route) error {
-	t, err := NormalizeTarget(rt.Target)
-	if err != nil {
-		return fmt.Errorf("目标 %q: %v", rt.Target, err)
+// normalize 就地规范一条规则：清掉名字/链两侧空白、旧 target 并进 targets、
+// 目标归一化成 CIDR 并组内去重。返回是否改动过、被丢掉的重复项。
+func (r *Route) normalize() (changed bool, dup []string, err error) {
+	if n := strings.TrimSpace(r.Name); n != r.Name {
+		r.Name, changed = n, true
 	}
-	for _, r := range c.Routes {
-		if strings.EqualFold(r.Target, t) {
-			return fmt.Errorf("目标 %s 已经有一条规则了（规则按顺序匹配，重复必有一条永远不生效）", t)
+	if ch := strings.TrimSpace(r.Chain); ch != r.Chain {
+		r.Chain, changed = ch, true
+	}
+	if r.Target != "" { // v1 旧写法：并进 targets（两者都在就以 targets 为准）
+		if len(r.Targets) == 0 {
+			r.Targets = []string{r.Target}
+		}
+		r.Target, changed = "", true
+	}
+	out := make([]string, 0, len(r.Targets))
+	seen := map[string]bool{}
+	for _, t := range r.Targets {
+		n, nerr := NormalizeTarget(t)
+		if nerr != nil {
+			return changed, dup, fmt.Errorf("目标 %q 不是合法 IP 或 CIDR（%v）", t, nerr)
+		}
+		key := strings.ToLower(n)
+		if seen[key] {
+			dup, changed = append(dup, n), true
+			continue
+		}
+		seen[key] = true
+		if n != t {
+			changed = true
+		}
+		out = append(out, n)
+	}
+	if len(out) == 0 {
+		return changed, dup, fmt.Errorf("至少要有一个目标")
+	}
+	if len(out) != len(r.Targets) {
+		changed = true
+	}
+	r.Targets = out
+	return changed, dup, nil
+}
+
+// checkTargetsFree 检查 rt 的目标有没有落在别的规则里。
+// skip 是正在编辑那条规则的下标（-1 表示新增）。
+//
+// 只拦**完全相同**的目标：规则自上而下命中即止，重复的那个永远轮不到，
+// 留着只会让人以为它生效了。网段包含关系（10.0.0.0/8 之后再写 10.1.1.0/24）
+// 是 Proxifier 的正常用法 —— 先宽后窄或先窄后宽都由用户说了算，不拦。
+func (c *Config) checkTargetsFree(rt Route, skip int) error {
+	for j, r := range c.Routes {
+		if j == skip {
+			continue
+		}
+		for _, t := range rt.Targets {
+			for _, o := range r.Targets {
+				if strings.EqualFold(o, t) {
+					return fmt.Errorf("目标 %s 已在第 %d 条规则%s 里了（规则自上而下匹配，这一条永远轮不到）", t, j+1, r.Describe())
+				}
+			}
 		}
 	}
-	rt.Target = t
+	return nil
+}
+
+// AddRoute 追加一条规则：名字/目标/链都会归一化，组内重复目标去掉。
+func (c *Config) AddRoute(rt Route) error {
+	if _, _, err := rt.normalize(); err != nil {
+		return err
+	}
+	if err := c.checkTargetsFree(rt, -1); err != nil {
+		return err
+	}
 	c.Routes = append(c.Routes, rt)
 	if err := c.Validate(); err != nil {
-		c.Routes = c.Routes[:len(c.Routes)-1]
+		c.Routes = c.Routes[:len(c.Routes)-1] // 回滚，不留非法状态
 		return err
 	}
 	return nil
@@ -301,20 +460,16 @@ func (c *Config) UpdateRoute(i int, rt Route) error {
 	if i < 0 || i >= len(c.Routes) {
 		return fmt.Errorf("规则下标越界")
 	}
-	t, err := NormalizeTarget(rt.Target)
-	if err != nil {
-		return fmt.Errorf("目标 %q: %v", rt.Target, err)
+	if _, _, err := rt.normalize(); err != nil {
+		return err
 	}
-	for j, r := range c.Routes {
-		if j != i && strings.EqualFold(r.Target, t) {
-			return fmt.Errorf("目标 %s 已被第 %d 条规则占用", t, j+1)
-		}
+	if err := c.checkTargetsFree(rt, i); err != nil {
+		return err
 	}
-	rt.Target = t
 	old := c.Routes[i]
 	c.Routes[i] = rt
 	if err := c.Validate(); err != nil {
-		c.Routes[i] = old
+		c.Routes[i] = old // 回滚
 		return err
 	}
 	return nil
