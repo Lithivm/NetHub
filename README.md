@@ -52,11 +52,12 @@
 | `nethub.ico` | ⚠️ | 托盘图标；缺了就用系统默认图标 |
 | `assets/logo.png` | ─ | **logo 源图**（仅构建时用；`tools_mkicon.go` 从它生成 ico） |
 | `nethub.syso` | ─ | **exe 图标资源**（构建时必需，否则 exe 没图标；已入库） |
+| `config.yaml.example` | ─ | 配置模板（占位符、无凭据）；复制成 `config.yaml` 再改 |
 | `nethub.log` | ❌ | 运行日志，自动生成，可随时删 |
 | `nethub-256.png` | ❌ | 图标预览图，由 `tools_mkicon.go` 顺带生成 |
 | `gost.exe` / `gost-*.bat` | ❌ | **不再需要**（导入完配置就可以删） |
-| `dist/` | ❌ | `make-dist.ps1` 的产物（分发用），不进 git |
-| `*.ps1` / `*.log` | ❌ | 测试脚本和历史输出，可删（`install-task.ps1` / `make-dist.ps1` / `make-shortcut.ps1` 要留） |
+| `dist/` | ❌ | 打包产物（分发用），不进 git |
+| `*.ps1` / `*.log` | ❌ | 本机的运维/打包脚本与历史输出：`.ps1` 一律不入库（都放在 `local/`，已 gitignore） |
 
 > **整个文件夹可以随便挪位置、改名。** 程序启动时会检查驱动服务里登记的 `.sys` 路径，
 > 发现是旧路径会自动重建服务。
@@ -163,11 +164,13 @@ ui:
 
 命令行自检：
 ```powershell
-powershell -ExecutionPolicy Bypass -File porttest.ps1            # 内网 6 个目标
-powershell -ExecutionPolicy Bypass -File porttest-internet.ps1   # 公网对照（必须全通）
-powershell -ExecutionPolicy Bypass -File clash-check.ps1         # 与 Clash 的共存判定（只读）
-powershell -ExecutionPolicy Bypass -File final-accept.ps1        # 端到端全量验收（需管理员）
+nethub.exe -test-upstream      # 直接实测每条链的上游（不经内核拦截，不需管理员）
+nethub.exe -clash-check        # 与 Clash 的共存判定（只读系统代理设置，不需管理员）
 ```
+
+内网目标的连通性用界面上的「链路自检」。这两项检查靠“真实内网主机”当探针，
+主机清单取自设置页的「映射条目」（`config.yaml` 的 `hosts.entries`）——
+留空时它们只能退化到“找不到可用于探测的真实内网 IP”。
 
 ---
 
@@ -257,7 +260,7 @@ NetHub 不改变系统代理设置，也不动路由表，所以**在“谁写�
 > ⚠️ **域名通配符的匹配语义尚未实测确认。**
 > 用 .NET 的 `System.Net.WebProxy` 模拟时，`*.example.com` 这种写法直接抛异常
 > （`限定符 {x,y} 前没有任何内容`），说明 .NET 与 WinINET 是两套不同实现，
-> **不能拿它给 WinINET 的行为下结论**。要确认必须切到系统代理模式后跑 `clash-check.ps1`。
+> **不能拿它给 WinINET 的行为下结论**。要确认必须切到系统代理模式后跑 `nethub.exe -clash-check`。
 
 ### 更稳的思路
 
@@ -268,11 +271,11 @@ NetHub 不改变系统代理设置，也不动路由表，所以**在“谁写�
 ### 一键判定
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File clash-check.ps1
+nethub.exe -clash-check
 ```
 
-它会（只读，不改任何设置）报出系统代理模式、浏览器对几个域名的判定、
-"Clash 解析域名"与"直连"的对比结果，以及内网 6 个目标的可达性。
+它会（只读，不改任何设置）报出系统代理模式、以及每个内网目标会不会被交给代理，
+并在界面的「与 Clash 共存」卡片里给出结论。
 **第 3 节 (a) 失败而 (b) 成功 = 问题在 Clash 的 DNS，不在路由。**
 
 ### 其他两条约束
@@ -337,18 +340,20 @@ rsrc -ico nethub.ico -arch amd64 -o nethub.syso
 ## 7.1 打包与快捷方式
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File make-dist.ps1        # 打包 dist/（含编译）
-powershell -ExecutionPolicy Bypass -File make-shortcut.ps1    # 在桌面建快捷方式
-powershell -ExecutionPolicy Bypass -File install-task.ps1     # 注册开机自启（计划任务）
+nethub.exe -autostart          # 注册开机自启（计划任务，静默提权、不弹 UAC）
+nethub.exe -no-autostart       # 取消开机自启
 ```
 
-`dist/` 是“拿到就能跑”的集合（exe + ico + WinDivert + config + README + 使用说明），
-**含上游凭据，别往公开地方传**；它不进 git（`.gitignore` 已排除，里面是二进制产物）。
+仓库里**只放 NetHub 本体**：打包、快捷方式、各类验收脚本都是本机用的，
+放在 `local/`（已 gitignore，不入库）。
+
+`dist/` 是“拿到就能跑”的集合（exe + ico + WinDivert + 许可证 + 配置模板 + 使用说明 + README），
+**不含任何配置与日志**；它不进 git（里面是二进制产物）。
 
 同目录会额外生成 **`dist/NetHub.zip`**（约 5 MB）—— 归档里带一层 `NetHub/` 目录，
 对方解压不会把文件撒一地，可直接发出去。
 
-> 打 zip 时手动修正了 .NET 的两个不合规（见 `make-dist.ps1` 的 `Fix-ZipEntryNames`）：
+> 打 zip 时手动修正了 .NET 的两个不合规（本机打包脚本里的 `Fix-ZipEntryNames`）：
 > 1. **没设 UTF-8 文件名标志**（通用位 11 = 0x0800）。`ZipFile.CreateFromDirectory`
 >    即使传了 `UTF8Encoding`，名字字节按 UTF-8 写但不设标志位 —— 读的一方按旧代码页
 >    （中文机器上是 GBK）解释，`使用说明.txt` 会显示成乱码。
