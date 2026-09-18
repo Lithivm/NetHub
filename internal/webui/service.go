@@ -11,13 +11,20 @@ import (
 type ServiceInfo struct {
 	State     string `json:"state"` // running / stopped / not installed / unknown
 	Installed bool   `json:"installed"`
+	Known     bool   `json:"known"` // 只有以管理员跑才查得准；否则不能瞎报“已安装/未安装”
 	Elevated  bool   `json:"elevated"`
 }
 
 // GetService 查 Windows 服务状态（只读）。
 func (b *Backend) GetService() ServiceInfo {
 	st := winsvc.State()
-	return ServiceInfo{State: st, Installed: st != "not installed", Elevated: isElevated()}
+	known := st != "unknown"
+	switch st {
+	case "running", "stopped", "starting", "stopping":
+		return ServiceInfo{State: st, Installed: true, Known: known, Elevated: isElevated()}
+	default:
+		return ServiceInfo{State: st, Installed: false, Known: known, Elevated: isElevated()}
+	}
 }
 
 // InstallService 安装为 Windows 服务（无人登录也能跑；需要管理员）。

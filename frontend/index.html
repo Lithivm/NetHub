@@ -46,6 +46,7 @@
     <button class="tab" data-page="chain">隧道链路<span class="tab-badge" id="badgeChain">0</span></button>
     <button class="tab" data-page="rule">路由规则<span class="tab-badge" id="badgeRule">0</span></button>
     <button class="tab" data-page="conn">连接<span class="tab-badge" id="badgeConn">0</span></button>
+    <button class="tab" data-page="diag">诊断</button>
     <button class="tab" data-page="settings">设置</button>
   </nav>
 </div>
@@ -59,7 +60,6 @@
         <h2>运行日志</h2>
         <span class="hint">同时写到程序目录的 nethub.log</span>
         <div class="spacer"></div>
-        <button class="btn btn-sm" id="btnSelfTest">链路自检</button>
         <button class="btn btn-sm" id="btnOpenLog">打开日志目录</button>
         <button class="btn btn-sm btn-ghost" id="btnClearLog">清空</button>
       </div>
@@ -116,21 +116,47 @@
         </div>
         <div class="table" id="connTable"></div>
       </div>
+    </div>
+  </section>
+
+  <!-- ═══════ 诊断 ═══════ -->
+  <section class="page" id="page-diag">
+    <div class="settings-scroll">
+
+      <div class="card">
+        <div class="card-head">
+          <h2>配置体检</h2>
+          <span class="hint">只读报告：能不能干活、哪个目标被覆盖了、哪条链只有单个上游（挂了就断）</span>
+          <div class="spacer"></div>
+          <button class="btn btn-sm" id="btnDiag">导出诊断包</button>
+          <button class="btn btn-sm btn-primary" id="btnPrecheck">重新体检</button>
+        </div>
+        <div class="card-body form">
+          <pre class="explain-out" id="precheckOut">正在体检…</pre>
+        </div>
+      </div>
 
       <div class="card">
         <div class="card-head">
           <h2>业务目标巡检</h2>
-          <span class="hint">只探「最近真的访问过」的内网目标：经隧道连一次、不发数据（每 5 分钟一次）</span>
+          <span class="hint">只探「最近真的访问过」的内网目标：经隧道连一次、不发数据；每 5 分钟自动一次</span>
           <div class="spacer"></div>
           <button class="btn btn-sm" id="btnProbeTargets">立即巡检</button>
         </div>
         <div class="table" id="targetTable"></div>
       </div>
-    </div>
-  </section>
 
-  <section class="page" id="page-settings">
-    <div class="settings-scroll">
+      <div class="card">
+        <div class="card-head">
+          <h2>链路自检</h2>
+          <span class="hint">逐条链去探真实的 hosts 主机（443/80/5432/6446/5000/9056 依次试），回答「这条链现在能不能通」</span>
+          <div class="spacer"></div>
+          <button class="btn btn-sm btn-primary" id="btnSelfTest">开始自检</button>
+        </div>
+        <div class="card-body form">
+          <pre class="explain-out" id="selfTestOut">点「开始自检」；结果会同时写进运行日志。</pre>
+        </div>
+      </div>
 
       <div class="card">
         <div class="card-head">
@@ -155,6 +181,12 @@
           </div>
         </div>
       </div>
+
+    </div>
+  </section>
+
+  <section class="page" id="page-settings">
+    <div class="settings-scroll">
 
       <div class="card">
         <div class="card-head"><h2>系统 hosts 接管</h2></div>
@@ -188,24 +220,25 @@
 
       <div class="card">
         <div class="card-head">
-          <h2>Windows 服务模式</h2>
-          <span class="hint">装成服务后<b>无人登录也会跑</b>、只有管理员能停（对齐 Proxifier 的 Service Mode）</span>
+          <h2>headless 模式</h2>
+          <span class="hint">把引擎装成 Windows 服务：<b>无人登录也会跑</b>（对齐 Proxifier 的 Service Mode）</span>
           <div class="spacer"></div>
           <span class="hint" id="svcInfo">—</span>
         </div>
         <div class="card-body form">
+          <div class="hint">
+            装成服务后：<b>开机即启</b>（不等登录）、以 LocalSystem 跑、<b>没有界面</b>（纯引擎）；
+            配置与日志跟界面版完全共用（都在程序目录）。安装/卸载需要管理员权限 —— 本程序本来就是以管理员跑的，点就行。<br>
+            <span class="clash-no">⚠ 服务与界面版不能同时跑</span>：两者都要抢 WinDivert 驱动。
+            先在一个里点「停止服务」，再启另一个。开机自启建议<b>二选一</b>：计划任务或本服务。
+          </div>
           <div class="input-row">
-            <button class="btn btn-sm btn-primary" id="btnSvcInstall">安装为 Windows 服务</button>
-            <button class="btn btn-sm" id="btnSvcStart">启动服务</button>
-            <button class="btn btn-sm" id="btnSvcStop">停止服务</button>
+            <button class="btn btn-sm btn-primary" id="btnSvcInstall">安装服务</button>
+            <button class="btn btn-sm" id="btnSvcStart">启动</button>
+            <button class="btn btn-sm" id="btnSvcStop">停止</button>
             <button class="btn btn-sm btn-danger" id="btnSvcUninstall">卸载服务</button>
           </div>
-          <div class="hint">
-            服务模式<b>没有界面</b>，配置与日志跟界面版完全共用（都在程序目录）；
-            安装/卸载需要管理员权限（本程序本来就是以管理员跑的，点就行）。<br>
-            <span class="clash-no">⚠ 服务与界面版不能同时跑</span>：两者都要抢 WinDivert 驱动。
-            先在一个里点「停止服务」，再启另一个。开机自启建议**二选一**：计划任务（登录后静默启动）或 Windows 服务（无人登录也跑）。
-          </div>
+          <div class="svc-state" id="svcStateRow"></div>
         </div>
       </div>
 
@@ -228,11 +261,8 @@
       </div>
 
       <div class="card">
-        <div class="card-head"><h2>配置体检与回滚</h2>
-          <span class="hint">每次保存配置都会自动备份（最多留 20 份）；体检只读不修</span>
-          <div class="spacer"></div>
-          <button class="btn btn-sm" id="btnPrecheck">配置体检</button>
-          <button class="btn btn-sm" id="btnDiag">导出诊断包</button>
+        <div class="card-head"><h2>配置备份与回滚</h2>
+          <span class="hint">每次保存配置都会自动备份（最多留 20 份）；体检与诊断包在「诊断」页</span>
         </div>
         <div class="card-body form">
           <div id="backupList" class="hint">—</div>

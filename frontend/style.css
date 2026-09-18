@@ -373,6 +373,10 @@ code, .mono { font-family: var(--font-mono); }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; vertical-align: middle; background: var(--muted-soft); }
 .dot.ok  { background: #2f9e5e; }
 .dot.bad { background: #d64545; }
+/* headless 模式的安装状态行：红 ✗ / 绿 ✓ */
+.svc-state { display: flex; align-items: center; font-size: var(--fs-sm); font-weight: 600; }
+.svc-ok  { color: #2f9e5e; }
+.svc-bad { color: #d64545; }
 /* 业务目标巡检表 */
 .target-grid { grid-template-columns: minmax(150px, 1.2fr) 110px 80px 90px 110px; }
 /* 只读解释输出（“这个目标怎么走” / 配置体检） */

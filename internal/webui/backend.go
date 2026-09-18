@@ -840,21 +840,34 @@ func (b *Backend) SelfTest() {
 		b.a.Bus.Info("=== 链路自检开始（%d 条链）===", len(chains))
 		bad := 0
 		for _, ch := range chains {
-			// 选定该链真实要走的路径：优先原生上游，其次本地 socks5 监听
-			var dial func(ip net.IP, port uint16) (net.Conn, error)
-			desc := ""
-			if fwd := strings.TrimSpace(ch.Forward); fwd != "" {
-				up, perr := upstream.Parse(fwd)
-				if perr == nil {
-					dial = func(ip net.IP, port uint16) (net.Conn, error) {
-						return up.Dial(ip, port, 6*time.Second)
-					}
-					desc = "原生上游 " + up.String()
-				} else {
+			// 一条链可能有多条上游：按顺序试，能连上的就用（跟引擎实际的选路一致）
+			var ups []*upstream.Upstream
+			for _, raw := range ch.Upstreams() {
+				u, perr := upstream.Parse(raw)
+				if perr != nil {
 					b.a.Bus.Error("[%s] 上游无法解析，跳过：%v", ch.Name, perr)
-					bad++
 					continue
 				}
+				ups = append(ups, u)
+			}
+			if len(ups) == 0 {
+				bad++
+				continue
+			}
+			dial := func(ip net.IP, port uint16) (net.Conn, error) {
+				var lastErr error
+				for _, u := range ups {
+					conn, derr := u.Dial(ip, port, 6*time.Second)
+					if derr == nil {
+						return conn, nil
+					}
+					lastErr = derr
+				}
+				return nil, lastErr
+			}
+			desc := "上游 " + ups[0].String()
+			if len(ups) > 1 {
+				desc = fmt.Sprintf("%d 条上游依次试（%s …）", len(ups), ups[0].String())
 			}
 
 			// 探针用真实主机 IP（hosts 里的），不用网段的 .1（那不是真主机）

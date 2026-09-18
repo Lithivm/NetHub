@@ -74,11 +74,12 @@ const modal = {
   error(msg) { document.getElementById('modalErr').textContent = msg; }
 };
 
-function confirmBox(title, text, danger) {
+function confirmBox(title, text, danger, okText) {
   return new Promise(res => {
     const p = el('p', null, text);
     p.style.color = 'var(--body)';
-    modal.open(title, [p], () => { modal.close(); res(true); }, danger ? '删除' : '确定');
+    // okText 可自定义按钮文案；不传就按 danger 给默认值（danger 只是样式，不该抢文案）
+    modal.open(title, [p], () => { modal.close(); res(true); }, okText || (danger ? '删除' : '确定'));
     const cancel = () => { modal.close(); res(false); };
     document.getElementById('modalCancel').onclick = cancel;
     document.getElementById('modalX').onclick = cancel;
@@ -106,6 +107,7 @@ function showPage(name) {
   document.querySelectorAll('.page').forEach(p => p.classList.toggle('is-active', p.id === 'page-' + name));
   if (name === 'log') scrollLogToEnd();
   if (name === 'conn') loadConns();
+  if (name === 'diag') { precheckConfig(); loadTargetHealth(); }
 }
 
 /* ═══════════════ 规则智能：最具体优先 / 命中查询 ═══════════════ */
@@ -164,27 +166,54 @@ async function explainTarget() {
   modal.open('这个目标怎么走 —— ' + v.input, [pre], null);
 }
 
-/* ═══════════════ Windows 服务 ═══════════════ */
+/* ═══════════════ headless 模式（Windows 服务） ═══════════════ */
 
 async function loadService() {
-  const box = document.getElementById('svcInfo');
-  if (!box) return;
+  const top = document.getElementById('svcInfo');
+  const row = document.getElementById('svcStateRow');
+  if (!top || !row) return;
   let v = null;
   try { v = await call('GetService'); } catch (e) { return; }
   if (!v) return;
+
   const map = { running: '运行中', stopped: '已停止', starting: '启动中', stopping: '停止中', 'not installed': '未安装', unknown: '未知' };
-  box.textContent = 'Windows 服务：' + (map[v.state] || v.state) +
-    (v.elevated ? '' : '（当前不是管理员，装/卸会失败）');
+  top.textContent = '服务状态：' + (map[v.state] || v.state) +
+    (v.elevated ? '' : '（非管理员，装/卸会失败）');
+
+  // 最底下那行：装没装一眼能看出来
+  row.replaceChildren();
+  if (!v.known) {
+    row.appendChild(el('span', 'hint', '? 查不到服务状态（需要管理员权限才能问服务管理器）'));
+    return;
+  }
+  if (v.installed) {
+    row.appendChild(el('span', 'svc-ok', '✓ 服务已安装'));
+    row.appendChild(el('span', 'hint', '　当前' + (map[v.state] || v.state)));
+    if (v.state !== 'running') {
+      row.appendChild(el('span', 'hint', '　—— 点「启动」让它跑起来（跑起来才有拦截）'));
+    }
+  } else {
+    row.appendChild(el('span', 'svc-bad', '✗ 服务未安装'));
+    row.appendChild(el('span', 'hint', '　—— 需要开机即启（不等登录）就点「安装服务」'));
+  }
 }
 
 /* ═══════════════ 配置体检 / 备份 / 诊断包 ═══════════════ */
 
 async function precheckConfig() {
+  const out = document.getElementById('precheckOut');
+  if (!out) return;
+  out.textContent = '正在体检…';
   let lines = [];
-  try { lines = await call('PrecheckConfig'); } catch (e) { return fail(e); }
-  const pre = el('pre', 'explain-out mono');
-  pre.textContent = (lines || []).join('\n');
-  modal.open('配置体检', [pre], null);
+  try { lines = await call('PrecheckConfig'); }
+  catch (e) { out.textContent = '体检失败：' + ((e && e.message) || e); return; }
+  const rep = lines || [];
+  out.textContent = rep.join('\n');
+  const bad = rep.filter(l => l.trim().startsWith('✗')).length;
+  const warn = rep.filter(l => l.trim().startsWith('⚠')).length;
+  if (bad) toast('体检发现问题', bad + ' 项错误、' + warn + ' 项提醒，看诊断页的报告', 'error');
+  else if (warn) toast('体检通过（有提醒）', warn + ' 项提醒，看诊断页的报告', 'warn');
+  else toast('体检通过', '没有发现问题', 'success');
 }
 
 async function exportDiagnostics() {
@@ -238,7 +267,7 @@ async function loadTargetHealth() {
     const row = el('div', 'trow target-grid');
     row.appendChild(el('div', 'cell mono', x.target));
     row.appendChild(el('div', 'cell dim', x.chain));
-    row.appendChild(el('div', 'cell' + (x.ok ? ' strong' : ''), x.ok ? '可达' : '不可达'));
+    row.appendChild(el("div", "cell " + (x.ok ? "strong" : "svc-bad"), x.ok ? "可达" : "不可达"));
     row.appendChild(el('div', 'cell mono', x.ok ? x.latency : '—'));
     const c = el('div', 'cell dim', x.checked);
     if (x.error) c.title = x.error;
@@ -913,8 +942,9 @@ function wire() {
   };
   document.getElementById('btnOpenLog').onclick = () => call('OpenLogDir').catch(fail);
   document.getElementById('btnSelfTest').onclick = () => {
-    document.getElementById('logBox').appendChild(
-      logNode({ time: now(), level: 'INFO', text: '开始链路自检…' }));
+    const out = document.getElementById('selfTestOut');
+    if (out) { out.textContent = '正在自检…（逐条链探真实内网主机）'; out.dataset.started = ''; }
+    pushLog({ time: now(), level: 'INFO', text: '开始链路自检…' });
     call('SelfTest').catch(fail);
   };
 
@@ -930,26 +960,29 @@ function wire() {
   document.getElementById('btnPrecheck').onclick = precheckConfig;
   document.getElementById('btnDiag').onclick = exportDiagnostics;
   document.getElementById('btnSvcInstall').onclick = async () => {
-    if (!await confirmBox('安装为 Windows 服务', '装成服务后会随开机自动启动（无人登录也跑，无界面）。确定吗？', true)) return;
-    try { await call('InstallService'); toast('已安装服务', '用 net start NetHub 启动，或点「启动服务」', 'success'); }
-    catch (e) { fail(e); }
-    loadService();
+    if (!await confirmBox('安装为 Windows 服务',
+        '装成服务后会随开机自动启动（无人登录也跑，无界面）。确定吗？', false, '安装')) return;
+    try {
+      await call('InstallService');
+      toast('已安装服务', '点「启动」让它跑起来', 'success');
+    } catch (e) { fail(e); }
+    await loadService();
   };
   document.getElementById('btnSvcStart').onclick = async () => {
-    try { await call('StartService'); toast('服务已启动', '无界面运行中（日志同目录）', 'success'); }
+    try { await call('StartService'); toast('服务已启动', '无界面运行中（日志在程序目录）', 'success'); }
     catch (e) { fail(e); }
-    setTimeout(loadService, 1200);
+    await loadService();
   };
   document.getElementById('btnSvcStop').onclick = async () => {
     try { await call('StopService'); toast('服务已停止', '', 'success'); }
     catch (e) { fail(e); }
-    setTimeout(loadService, 1200);
+    await loadService();
   };
   document.getElementById('btnSvcUninstall').onclick = async () => {
-    if (!await confirmBox('卸载服务', '停止并删除 Windows 服务 NetHub？', true)) return;
+    if (!await confirmBox('卸载服务', '停止并删除 Windows 服务 NetHub？', true, '卸载')) return;
     try { await call('UninstallService'); toast('已卸载服务', '', 'success'); }
     catch (e) { fail(e); }
-    setTimeout(loadService, 1200);
+    await loadService();
   };
 
   // 连接页：业务目标巡检
@@ -1037,9 +1070,19 @@ function wire() {
   R().EventsOn('log', l => pushLog(l));
   R().EventsOn('notify', n => toast(n.title, n.text, n.kind === 'error' ? 'error' : n.kind === 'warn' ? 'warn' : 'success'));
   R().EventsOn('selftest', p => {
-    pushLog({ time: now(), level: p.ok ? 'INFO' : 'ERROR',
-      text: p.ok ? ('自检通过：' + p.target + ':' + p.port) : ('自检失败：' + p.target + ' ' + (p.err || '')) });
+    const text = p.ok ? ('自检通过：' + p.target + ':' + p.port) : ('自检失败：' + p.target + ' ' + (p.err || ''));
+    pushLog({ time: now(), level: p.ok ? 'INFO' : 'ERROR', text });
+    appendSelfTest(text);
   });
+}
+
+/* 自检结果追加到诊断页的输出框（同时也写运行日志）。 */
+function appendSelfTest(text) {
+  const out = document.getElementById('selfTestOut');
+  if (!out) return;
+  const line = now() + '  ' + text;
+  out.textContent = out.dataset.started ? (out.textContent + '\n' + line) : line;
+  out.dataset.started = '1';
 }
 
 function now() {
@@ -1061,7 +1104,7 @@ async function boot() {
   // 连接列表只看当前页：不在这一页就不拉，省得白跑
   setInterval(() => {
     const p = document.getElementById('page-conn');
-    if (p && p.classList.contains('is-active')) { loadConns(); loadTargetHealth(); }
+    if (p && p.classList.contains('is-active')) loadConns();
   }, 1500);
   // 链路页的上游健康：只在这一页时刷新
   setInterval(() => {
@@ -1076,6 +1119,7 @@ async function boot() {
   const panels = await Promise.allSettled([loadLogs(), loadChains(), loadRoutes(), loadSettings()]);
   await loadBackups();
   await loadService();
+  precheckConfig();   // 诊断页的报告先跑出来，切过去就有内容
   const bad = panels.filter(p => p.status === 'rejected');
   if (bad.length) {
     console.error('面板加载失败', bad.map(p => p.reason));
