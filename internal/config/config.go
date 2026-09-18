@@ -241,6 +241,7 @@ type Config struct {
 	Relay  string   `yaml:"relay"` // relay 监听地址，端口写 0 表示自动分配
 	Chains []Chain  `yaml:"chains"`
 	Routes []Route  `yaml:"routes"`
+	Patrol Patrol   `yaml:"patrol,omitempty"` // 业务目标巡检（间隔/每轮数量）
 	Hosts  HostsCfg `yaml:"hosts"`
 	UI     UICfg    `yaml:"ui"`
 
@@ -394,6 +395,11 @@ func (c *Config) Validate() error {
 	}
 	if !strings.Contains(c.Relay, ":") {
 		return fmt.Errorf("relay 应为 host:port，当前 %q", c.Relay)
+	}
+	if iv := strings.TrimSpace(c.Patrol.Interval); iv != "" && !strings.EqualFold(iv, "off") {
+		if d, err := time.ParseDuration(iv); err != nil || d <= 0 {
+			return fmt.Errorf("patrol.interval 应形如 5m / 30s，或写 off 关闭（当前 %q）", iv)
+		}
 	}
 	return nil
 }
@@ -587,6 +593,42 @@ func PortsCover(a, b []string) bool {
 	}
 	return true
 }
+
+// Patrol 业务目标巡检：只探“最近真的被访问过”的内网目标（经隧道连一次、不发数据）。
+type Patrol struct {
+	Interval string `yaml:"interval,omitempty"` // 5m / 30s / off（默认 5m；off = 关闭巡检）
+	Count    int    `yaml:"count,omitempty"`    // 每轮最多探几个目标（默认 8，上限 32）
+}
+
+// PatrolInterval 归一化后的巡检间隔（0 = 关闭）。默认 5 分钟。
+func (c *Config) PatrolInterval() time.Duration {
+	s := strings.ToLower(strings.TrimSpace(c.Patrol.Interval))
+	switch s {
+	case "off", "none", "0":
+		return 0
+	case "":
+		return 5 * time.Minute
+	}
+	if d, err := time.ParseDuration(s); err == nil && d > 0 {
+		return d
+	}
+	return 5 * time.Minute
+}
+
+// PatrolCount 每轮巡检的目标数（默认 8，上限 32，免得一下探爆客户内网）。
+func (c *Config) PatrolCount() int {
+	n := c.Patrol.Count
+	if n <= 0 {
+		return 8
+	}
+	if n > 32 {
+		return 32
+	}
+	return n
+}
+
+// PatrolEnabled 巡检是否开着。
+func (c *Config) PatrolEnabled() bool { return c.PatrolInterval() > 0 }
 
 // FindChain 按下标找链，找不到返回 -1。
 func (c *Config) FindChain(name string) int {

@@ -45,10 +45,12 @@ func TestConnsSnapshot(t *testing.T) {
 	blocked := &connState{dst: net.ParseIP("10.9.9.9"), dport: 22, chain: "block",
 		action: rules.ActionBlock, start: time.Now().Add(-1 * time.Second)}
 	blocked.touch()
+	blocked.last.Store(time.Now().Add(-time.Minute).UnixNano())
 	blocked.packets.Store(3)
 
-	// live 最后 touch：列表里“进行中”按最后活动倒序，它就该排第一
-	live.touch()
+	// live 显式给一个“更晚”的时间戳：列表里“进行中”按最后活动倒序，它就该排第一。
+	// （不能用两次 touch 比先后：Windows 上 time.Now() 精度粗，会落到同一个值）
+	live.last.Store(time.Now().Add(time.Second).UnixNano())
 
 	e.conns[1001] = live
 	e.conns[1002] = done

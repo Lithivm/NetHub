@@ -495,6 +495,53 @@ func (b *Backend) ProbeTargetsNow() error {
 	return nil
 }
 
+// ── 业务目标巡检的设置（开关 + 间隔，用户自己定） ──
+
+// PatrolView 巡检设置（界面用）。
+type PatrolView struct {
+	Enabled  bool   `json:"enabled"`
+	Interval string `json:"interval"` // 归一化后的间隔，如 5m0s
+	Count    int    `json:"count"`
+}
+
+// GetPatrol 当前巡检设置。
+func (b *Backend) GetPatrol() PatrolView {
+	return PatrolView{
+		Enabled:  b.a.Cfg.PatrolEnabled(),
+		Interval: humanInterval(b.a.Cfg.PatrolInterval()),
+		Count:    b.a.Cfg.PatrolCount(),
+	}
+}
+
+// humanInterval 把 5m0s 写成 5m（界面里好看点）。
+func humanInterval(d time.Duration) string {
+	if d >= time.Minute && d%time.Minute == 0 {
+		return fmt.Sprintf("%dm", int(d/time.Minute))
+	}
+	return d.String()
+}
+
+// SetPatrol 改开关与间隔（即时保存；引擎每 10 秒看一眼配置，自己接上）。
+func (b *Backend) SetPatrol(enabled bool, interval string) error {
+	if !enabled {
+		b.a.Cfg.Patrol.Interval = "off"
+		return b.save("关闭业务目标巡检")
+	}
+	iv := strings.TrimSpace(interval)
+	if iv == "" || strings.EqualFold(iv, "off") {
+		iv = "5m"
+	}
+	d, err := time.ParseDuration(iv)
+	if err != nil || d <= 0 {
+		return fmt.Errorf("间隔要形如 30s / 5m / 1h（当前 %q）", interval)
+	}
+	if d < 10*time.Second {
+		return fmt.Errorf("间隔太短：最少 10s —— 每轮都要经隧道去连客户内网")
+	}
+	b.a.Cfg.Patrol.Interval = iv
+	return b.save("业务目标巡检：每 " + iv)
+}
+
 func (b *Backend) GetLogs() []LogView {
 	src := b.a.Bus.Snapshot()
 	out := make([]LogView, 0, len(src))

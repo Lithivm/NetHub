@@ -14,10 +14,8 @@ import (
 // 为什么不用配置里的网段去挨个探：一个 /24 有 254 个地址，全探是骚扰；
 // 而连接表里的目标天然就是"有人在用的业务"，探它们才有意义。
 const (
-	targetProbeCount    = 8                // 一轮最多探几个目标
-	targetProbeInterval = 5 * time.Minute  // 常规巡检间隔
-	targetProbeRecent   = 60 * time.Minute // 多久内被访问过才算"最近"
-	targetProbeTimeout  = 5 * time.Second
+	targetProbeRecent  = 60 * time.Minute // 多久内被访问过才算“最近”
+	targetProbeTimeout = 5 * time.Second
 )
 
 // targetHealth 一个业务目标的巡检结果。
@@ -87,7 +85,7 @@ func (e *Engine) recentTargets(limit int) []targetRef {
 
 // ProbeTargets 巡检最近访问过的业务目标。只建连、不发数据、立刻断开。
 func (e *Engine) ProbeTargets() {
-	for _, ref := range e.recentTargets(targetProbeCount) {
+	for _, ref := range e.recentTargets(e.cfg.PatrolCount()) {
 		e.probeOneTarget(ref)
 	}
 }
@@ -146,16 +144,25 @@ func (e *Engine) markTarget(target, chain string, ok bool, latency time.Duration
 	return flipped, !ok
 }
 
-// targetLoop 常规巡检：每 5 分钟把最近用过的业务目标扫一遍。
+// targetLoop 常规巡检：间隔由配置给（patrol.interval），改配置即时生效；off 则不跑。
 func (e *Engine) targetLoop() {
 	defer e.wg.Done()
-	tk := time.NewTicker(targetProbeInterval)
+	tk := time.NewTicker(10 * time.Second) // 粗粒度调度：每 10 秒看一眼该不该巡检
 	defer tk.Stop()
+	var last time.Time
 	for {
 		select {
 		case <-e.done:
 			return
 		case <-tk.C:
+			iv := e.cfg.PatrolInterval()
+			if iv == 0 {
+				continue // 关了
+			}
+			if !last.IsZero() && time.Since(last) < iv {
+				continue
+			}
+			last = time.Now()
 			e.ProbeTargets()
 		}
 	}
