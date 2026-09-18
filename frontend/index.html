@@ -183,17 +183,28 @@
             <span>开机自动启动<em>用计划任务 + 最高权限：登录后静默启动，不弹 UAC</em></span>
           </label>
           <div class="hint" id="autoInfo"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Windows 服务模式</h2>
+          <span class="hint">装成服务后<b>无人登录也会跑</b>、只有管理员能停（对齐 Proxifier 的 Service Mode）</span>
+          <div class="spacer"></div>
+          <span class="hint" id="svcInfo">—</span>
+        </div>
+        <div class="card-body form">
           <div class="input-row">
-            <span class="hint" id="svcInfo">—</span>
-            <div class="spacer"></div>
-            <button class="btn btn-xs" id="btnSvcInstall">安装为 Windows 服务</button>
-            <button class="btn btn-xs" id="btnSvcStart">启动服务</button>
-            <button class="btn btn-xs" id="btnSvcStop">停止服务</button>
-            <button class="btn btn-xs btn-danger" id="btnSvcUninstall">卸载服务</button>
+            <button class="btn btn-sm btn-primary" id="btnSvcInstall">安装为 Windows 服务</button>
+            <button class="btn btn-sm" id="btnSvcStart">启动服务</button>
+            <button class="btn btn-sm" id="btnSvcStop">停止服务</button>
+            <button class="btn btn-sm btn-danger" id="btnSvcUninstall">卸载服务</button>
           </div>
           <div class="hint">
-            <b>Windows 服务模式</b>：装成服务后无人登录也会跑、只有管理员能停（对齐 Proxifier 的 Service Mode）。
-            服务模式没有界面，配置与日志跟界面版完全共用；开机自启建议二选一（计划任务 <i>或</i> 服务）。
+            服务模式<b>没有界面</b>，配置与日志跟界面版完全共用（都在程序目录）；
+            安装/卸载需要管理员权限（本程序本来就是以管理员跑的，点就行）。<br>
+            <span class="clash-no">⚠ 服务与界面版不能同时跑</span>：两者都要抢 WinDivert 驱动。
+            先在一个里点「停止服务」，再启另一个。开机自启建议**二选一**：计划任务（登录后静默启动）或 Windows 服务（无人登录也跑）。
           </div>
         </div>
       </div>
