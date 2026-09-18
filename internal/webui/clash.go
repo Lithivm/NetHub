@@ -352,6 +352,10 @@ func (b *Backend) clashTargets() []string {
 		out = append(out, s)
 	}
 	for _, e := range entries {
+		// 注释和空行不是条目：否则 "# 每行一条…" 会被当成目标域名拿去检测
+		if s := strings.TrimSpace(e); s == "" || strings.HasPrefix(s, "#") {
+			continue
+		}
 		f := strings.Fields(e)
 		if len(f) >= 2 {
 			add(f[1])

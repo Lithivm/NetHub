@@ -298,12 +298,10 @@ func (b *Backend) GetSettings() SettingsView {
 	}
 }
 
-// defaultHostsEntries 首次打开「hosts 接管」时的空模板：只示范格式，不预置任何真实映射。
-// 刻意用注释行 —— 即使用户不看提示直接点「立即写入 hosts」，写进去的也只是一行注释。
+// defaultHostsEntries 不做任何预置：内置默认里绝不能出现真实环境的映射。
+// 格式提示由界面上的字段标签负责，这里返回空列表（而非 nil，免得前端拿到 null）。
 func defaultHostsEntries() []string {
-	return []string{
-		"# 每行一条：内网IP 域名（例如 10.0.0.10 app.your-domain.com）",
-	}
+	return []string{}
 }
 
 // ───────────────────────── 启停 ─────────────────────────
