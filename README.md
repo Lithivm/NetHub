@@ -419,3 +419,15 @@ internal/autostart/              计划任务自启
 internal/winrun/                 起外部进程时隐藏控制台窗口
 internal/logbus/                 日志总线（环形缓冲 + 订阅 + 落盘）
 ```
+
+---
+
+## 9. 许可证与第三方组件
+
+本程序：**MIT**（见 `LICENSE`）。
+
+| 组件 | 许可 | 说明 |
+|---|---|---|
+| **WinDivert**（`WinDivert.dll` / `WinDivert64.sys`） | LGPLv3 / GPLv2 双许可 | 原样分发（未修改），以**动态链接**方式使用；完整文本见 `third_party/WinDivert-LICENSE.txt` |
+| Go 标准库与依赖 | BSD-3-Clause 等 | 见 `go.mod` / `go.sum` |
+| Wails v2 / WebView2 | MIT / 微软条款 | 界面框架与运行时 |
