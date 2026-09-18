@@ -4,16 +4,13 @@
 #   powershell -ExecutionPolicy Bypass -File make-dist.ps1 -SkipBuild   # 不重新编译
 #
 # dist/ 里放的是“拿到就能跑”的最小集合。注意：
-#   * **绝不带上 config.yaml**（含上游凭据）：谁都不靠包里那份配置，
-#     同事拿到包后把 config.yaml.example 复制成 config.yaml 再填自己的上游。
-#     -Clean 再多去掉 README 与内部运维脚本，产出 dist-public\（给外部/公开用）。
+# 整包**不含任何配置与日志**：config.yaml（含上游凭据）、nethub*.log（含内网地址与访问记录）
+# 都不放；内部运维脚本在 local/（不入库也不入包，它们写死了内网 IP 与域名）。
+# 拿到包的人把 config.yaml.example 复制成 config.yaml，填自己的上游即可。
 #     凭据不在日志/聊天里出现，但这个包本身是敏感的，别往公开地方传。
 #   * dist/ 不进 git（见 .gitignore）：里面是二进制产物，入库没意义且会把仓库撑大。
 param(
-    [switch]$SkipBuild,
-    # 给外部/公开用的包：在“不带 config.yaml”的基础上，再去掉 README 与内部运维脚本，
-    # 产出 dist-public\。两种包都不含任何配置与日志。
-    [switch]$Clean
+    [switch]$SkipBuild
 )
 
 $ErrorActionPreference = 'Stop'
@@ -76,8 +73,7 @@ function Fix-ZipEntryNames($zipPath) {
 }
 
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
-# 两个产物分目录，避免“含凭据的包”被当成“脱敏包”发出去
-$dist = Join-Path $here $(if ($Clean) { 'dist-public' } else { 'dist' })
+$dist = Join-Path $here 'dist'   # 只有一种包：永远不含配置与日志
 
 # ── 1) 编译 ─────────────────────────────────────────────────
 if (-not $SkipBuild) {
@@ -96,34 +92,18 @@ if (-not $SkipBuild) {
 if (Test-Path $dist) { Remove-Item $dist -Recurse -Force }
 New-Item -ItemType Directory -Path $dist | Out-Null
 
-if ($Clean) {
-    # 公开包：只放“能跑 + 怎么用”。
-    # 刻意不放：config.yaml（含上游凭据）、nethub*.log（含内网地址与访问记录）、
-    #           内部运维脚本（e2e / porttest / final-accept / clash-check 等，
-    #           里面写死了客户内网 IP 与域名）、客户化的 README。
-    $files = @(
-        @{n = 'nethub.exe';            must = $true;  desc = '主程序'},
-        @{n = 'nethub.ico';            must = $true;  desc = '图标'},
-        @{n = 'WinDivert.dll';         must = $true;  desc = 'WinDivert 运行库（LGPLv3）'},
-        @{n = 'WinDivert64.sys';       must = $true;  desc = 'WinDivert 内核驱动（LGPLv3）'},
-        @{n = 'WinDivert-LICENSE.txt'; src = 'third_party\WinDivert-LICENSE.txt'; must = $true; desc = 'WinDivert 许可证（随包分发）'},
-        @{n = 'LICENSE';               must = $true;  desc = '本程序许可证'},
-        @{n = 'config.yaml.example';   must = $true;  desc = '配置模板（占位符，无凭据）'},
-        @{n = 'install-task.ps1';      must = $false; desc = '注册开机自启'}
-    )
-} else {
-    $files = @(
-        @{n = 'nethub.exe';      must = $true;  desc = '主程序'},
-        @{n = 'nethub.ico';      must = $true;  desc = '图标'},
-        @{n = 'WinDivert.dll';   must = $true;  desc = 'WinDivert 运行库'},
-        @{n = 'WinDivert64.sys'; must = $true;  desc = 'WinDivert 内核驱动'}, 
-        @{n = 'WinDivert-LICENSE.txt'; src = 'third_party\WinDivert-LICENSE.txt'; must = $false; desc = 'WinDivert 许可证'},
-        @{n = 'LICENSE';         must = $false; desc = '本程序许可证'},
-        @{n = 'config.yaml.example'; must = $true; desc = '配置模板（同学要自己复制成 config.yaml）'},
-        @{n = 'README.md';       must = $false; desc = '完整文档'},
-        @{n = 'install-task.ps1'; must = $false; desc = '注册开机自启'}
-    )
-}
+# 包里的东西：能跑起来 + 知道怎么用。
+$files = @(
+    @{n = 'nethub.exe';      must = $true;  desc = '主程序'},
+    @{n = 'nethub.ico';      must = $true;  desc = '图标'},
+    @{n = 'WinDivert.dll';   must = $true;  desc = 'WinDivert 运行库（LGPLv3）'},
+    @{n = 'WinDivert64.sys'; must = $true;  desc = 'WinDivert 内核驱动（LGPLv3）'}, 
+    @{n = 'WinDivert-LICENSE.txt'; src = 'third_party\WinDivert-LICENSE.txt'; must = $true; desc = 'WinDivert 许可证（随包分发）'},
+    @{n = 'LICENSE';         must = $true;  desc = '本程序许可证'},
+    @{n = 'config.yaml.example'; must = $true; desc = '配置模板（占位符，无凭据）'},
+    @{n = 'README.md';       must = $false; desc = '完整文档'},
+    @{n = 'install-task.ps1'; must = $false; desc = '注册开机自启'}
+)
 
 $missing = @()
 foreach ($f in $files) {
