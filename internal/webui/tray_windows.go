@@ -4,8 +4,9 @@
 // 跟 Wails 自己的 UI 线程/消息泵抢，已知会互相干扰。
 // 这里自己开一条锁定的 OS 线程 + 独立窗口 + 消息循环，完全隔离。
 //
-// 通知走 NIF_INFO 气泡：Win10/11 会把它渲染成标准通知并进操作中心，
-// 不需要 WinRT，也不需要额外依赖。
+// 这里只管图标本身，不发系统通知：NIF_INFO 气泡会被 Win10/11 渲染成标准通知
+// 并进「操作中心」，等于占用户的系统通知位。所有提示一律走应用内
+// （后端 emit("notify") → 前端 toast），窗口收起时不打扰任何人。
 package webui
 
 import (
@@ -14,8 +15,6 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
-
-	"nethub/internal/app"
 )
 
 const (
@@ -28,18 +27,11 @@ const (
 	wmClose         = 0x0010
 
 	nimAdd    = 0x00000000
-	nimModify = 0x00000001
 	nimDelete = 0x00000002
 
 	nifMessage = 0x00000001
 	nifIcon    = 0x00000002
 	nifTip     = 0x00000004
-	nifInfo    = 0x00000010
-
-	niifNone    = 0x00000000
-	niifInfo    = 0x00000001
-	niifWarning = 0x00000002
-	niifError   = 0x00000003
 
 	mfString       = 0x00000000
 	mfSeparator    = 0x00000800
@@ -65,12 +57,15 @@ type notifyIconData struct {
 	szTip            [128]uint16
 	dwState          uint32
 	dwStateMask      uint32
-	szInfo           [256]uint16
-	uVersion         uint32
-	szInfoTitle      [64]uint16
-	dwInfoFlags      uint32
-	guidItem         windows.GUID
-	hBalloonIcon     windows.Handle
+	// 下面几个字段（含气泡通知用的 szInfo/szInfoTitle）虽然用不上了也必须留着：
+	// cbSize 要等于整个结构体大小，少一个字段结构体就“缩水”，
+	// Windows 会按 cbSize 判定布局。
+	szInfo       [256]uint16
+	uVersion     uint32
+	szInfoTitle  [64]uint16
+	dwInfoFlags  uint32
+	guidItem     windows.GUID
+	hBalloonIcon windows.Handle
 }
 
 var (
@@ -213,7 +208,7 @@ func (t *Tray) run(iconPath string) {
 		uCallbackMessage: wmTrayMsg,
 		hIcon:            hIcon,
 	}
-	copyUTF16(t.nid.szTip[:], "NetHub · 内网隧道代理")
+	copyUTF16(t.nid.szTip[:], "NetHub · 内网隧道代理（双击图标打开窗口）")
 	if r, _, _ := pShellNotifyIconW.Call(nimAdd, uintptr(unsafe.Pointer(&t.nid))); r == 0 {
 		t.event("托盘图标注册失败（Shell_NotifyIconW 返回 0）")
 	} else {
@@ -317,27 +312,6 @@ func (t *Tray) popupMenu() {
 	pTrackPopupMenu.Call(hMenu, tpmRightButton|tpmBottomAlign, uintptr(pt.X), uintptr(pt.Y), 0, uintptr(t.hwnd), 0)
 }
 
-// Balloon 弹系统通知（气球）。
-func (t *Tray) Balloon(title, text string, kind app.NotifyKind) {
-	if t == nil || t.hwnd == 0 {
-		return
-	}
-	n := t.nid
-	n.uFlags = nifInfo
-	n.uVersion = 0
-	copyUTF16(n.szInfoTitle[:], truncate(title, 63))
-	copyUTF16(n.szInfo[:], truncate(text, 255))
-	switch kind {
-	case app.NotifyWarn:
-		n.dwInfoFlags = niifWarning
-	case app.NotifyError:
-		n.dwInfoFlags = niifError
-	default:
-		n.dwInfoFlags = niifInfo
-	}
-	pShellNotifyIconW.Call(nimModify, uintptr(unsafe.Pointer(&n)))
-}
-
 // Remove 注销托盘图标（退出前调用，否则图标会残留到鼠标划过）。
 func (t *Tray) Remove() {
 	if t == nil || t.hwnd == 0 {
@@ -358,12 +332,4 @@ func copyUTF16(dst []uint16, s string) {
 	if n > 0 {
 		dst[n-1] = 0
 	}
-}
-
-func truncate(s string, maxRunes int) string {
-	r := []rune(s)
-	if len(r) <= maxRunes {
-		return s
-	}
-	return string(r[:maxRunes])
 }

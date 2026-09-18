@@ -58,11 +58,10 @@ func New(a *app.App) *Backend {
 func (b *Backend) OnStartup(ctx context.Context) {
 	b.ctx = ctx
 	b.refreshAutostart()
+	// 提示只走应用内（前端 toast），不弹 Windows 系统通知：
+	// 既不占用户的「操作中心」，也避免窗口收起来时被系统弹窗打断。
 	b.a.Notify = func(title, text string, kind app.NotifyKind) {
 		b.emit("notify", NotifyView{Title: title, Text: text, Kind: kind.String()})
-		if b.tray != nil {
-			b.tray.Balloon(title, text, kind)
-		}
 	}
 	sub := b.a.Bus.Subscribe()
 	go func() {
@@ -108,9 +107,6 @@ func (b *Backend) OnBeforeClose(ctx context.Context) bool {
 		return false
 	}
 	wruntime.WindowHide(ctx)
-	if b.tray != nil {
-		b.tray.Balloon("NetHub 仍在运行", "已最小化到托盘，双击托盘图标恢复窗口", app.NotifyInfo)
-	}
 	return true
 }
 

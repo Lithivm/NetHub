@@ -417,10 +417,6 @@ func (b *Backend) clashWatch() {
 				Text:  "以下内网目标不在 Clash 绕过列表里，请尽快处理：" + strings.Join(c.Missed, ";"),
 				Kind:  "error",
 			})
-			if b.tray != nil {
-				b.tray.Balloon("内网可能被 Clash 代理",
-					"有 DNS 外泄/封号风险，请到「设置 → 与 Clash 共存」查看", app.NotifyError)
-			}
 		} else {
 			b.a.Bus.Info("✓ Clash 绕过覆盖已恢复，内网目标不会再交给代理")
 			b.emit("notify", NotifyView{Title: "Clash 绕过已恢复", Text: "内网目标不再经过代理", Kind: "info"})
