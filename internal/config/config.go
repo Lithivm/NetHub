@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -335,6 +336,10 @@ func (c *Config) Save() error {
 	}
 	header := "# NetHub 配置 —— 由程序读写，手工改也生效\n" +
 		"# forward 里的凭据是本机敏感信息，不要外传、不要提交进 git。\n"
+	// 覆盖前先备份一份（backups/ 目录，只留最新 20 份），改坏了能回滚
+	if err := c.backupLocked(); err != nil {
+		return fmt.Errorf("备份旧配置失败: %w", err)
+	}
 	tmp := c.path + ".tmp"
 	if err := os.WriteFile(tmp, append([]byte(header), b...), 0o600); err != nil {
 		return err
@@ -743,6 +748,202 @@ func (r *Route) normalize() (changed bool, dup []string, err error) {
 		r.Ports = pout
 	}
 	return changed, dup, nil
+}
+
+// ShadowedTargets 这条规则里哪些目标已经被**前面的**规则完全覆盖
+// （目标相同 + 端口被上面那条全覆盖）—— 那些永远轮不到，界面要标出来。
+func (c *Config) ShadowedTargets(i int) []string {
+	if i < 0 || i >= len(c.Routes) {
+		return nil
+	}
+	rt := c.Routes[i]
+	var out []string
+	for _, t := range rt.Targets {
+		for j := 0; j < i; j++ {
+			r := c.Routes[j]
+			for _, o := range r.Targets {
+				if strings.EqualFold(o, t) && PortsCover(r.Ports, rt.Ports) {
+					out = append(out, t)
+					break
+				}
+			}
+		}
+	}
+	return out
+}
+
+// SortRoutesBySpecificity 按“最具体优先”重排：前缀长（/32 → /24）的靠前，
+// 同前缀时带端口条件的靠前；同具体程度保持原有相对顺序。
+// 返回是否有改动。
+func (c *Config) SortRoutesBySpecificity() bool {
+	type key struct {
+		prefix int
+		ports  int
+	}
+	keys := make([]key, len(c.Routes))
+	sorted := true
+	for i, r := range c.Routes {
+		best := 0
+		for _, t := range r.Targets {
+			if j := strings.IndexByte(t, '/'); j >= 0 {
+				if n, err := strconv.Atoi(t[j+1:]); err == nil && n > best {
+					best = n
+				}
+			}
+		}
+		keys[i] = key{best, len(r.Ports)}
+		if i > 0 {
+			p, q := keys[i-1], keys[i]
+			if q.prefix > p.prefix || (q.prefix == p.prefix && q.ports > 0 && p.ports == 0) {
+				sorted = false
+			}
+		}
+	}
+	if sorted {
+		return false
+	}
+	idx := make([]int, len(c.Routes))
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.SliceStable(idx, func(a, b int) bool {
+		ka, kb := keys[idx[a]], keys[idx[b]]
+		if ka.prefix != kb.prefix {
+			return ka.prefix > kb.prefix
+		}
+		return ka.ports > 0 && kb.ports == 0
+	})
+	out := make([]Route, len(c.Routes))
+	for i, j := range idx {
+		out[i] = c.Routes[j]
+	}
+	c.Routes = out
+	return true
+}
+
+// Precheck 启动前的体检：返回人话报告（✓ 正常 / ⚠ 提醒 / ✗ 问题）。
+// 不修任何东西，只回答“这份配置能不能干活、有没有埋雷”。
+func (c *Config) Precheck() []string {
+	var out []string
+	if err := c.Validate(); err != nil {
+		return []string{"✗ 配置校验失败：" + err.Error()}
+	}
+	out = append(out, fmt.Sprintf("✓ 配置可载入：%d 条链，%d 条规则", len(c.Chains), len(c.Routes)))
+
+	tunnel := 0
+	for _, r := range c.Routes {
+		if r.NeedsChain() {
+			tunnel++
+		}
+	}
+	if tunnel == 0 {
+		out = append(out, "✗ 没有任何“走链”的规则 —— 服务起来也无事可做")
+	} else {
+		out = append(out, fmt.Sprintf("✓ %d 条隧道规则会进内核过滤器（其余流量不经过我们）", tunnel))
+	}
+
+	for i := range c.Routes {
+		if s := c.ShadowedTargets(i); len(s) > 0 {
+			out = append(out, fmt.Sprintf("⚠ 第 %d 条规则%s 里有 %d 个目标被前面的规则完全覆盖（永远不生效）：%s",
+				i+1, c.Routes[i].Describe(), len(s), strings.Join(s, ", ")))
+		}
+	}
+	for _, ch := range c.Chains {
+		n := len(ch.Upstreams())
+		if n == 0 {
+			out = append(out, "✗ 链 "+ch.Name+" 没有上游")
+			continue
+		}
+		detail := fmt.Sprintf("✓ 链 %s：%d 个上游，策略 %s，探测 %s", ch.Name, n, ch.StrategyName(), ch.ProbeInterval())
+		if n == 1 {
+			detail += "（只有一条上游，它挂了业务就断）"
+		}
+		out = append(out, detail)
+	}
+	if !strings.Contains(c.Relay, ":") {
+		out = append(out, "✗ relay 不是 host:port")
+	}
+	return out
+}
+
+// BackupDir 备份目录（与 config 同级）。
+func (c *Config) BackupDir() string {
+	if c.path == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(c.path), "backups")
+}
+
+// Backups 列出已有备份（新的排前面）。
+func (c *Config) Backups() []string {
+	d := c.BackupDir()
+	if d == "" {
+		return nil
+	}
+	ents, err := os.ReadDir(d)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range ents {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".yaml") {
+			out = append(out, e.Name())
+		}
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(out)))
+	return out
+}
+
+// RestoreBackup 用某个备份覆盖当前配置（覆盖前先把当前配置也备一份），并重新载入。
+// 返回载入后的配置。
+func (c *Config) RestoreBackup(name string) (*Config, error) {
+	src := filepath.Join(c.BackupDir(), filepath.Base(name))
+	b, err := os.ReadFile(src)
+	if err != nil {
+		return nil, fmt.Errorf("读备份失败: %w", err)
+	}
+	if err := c.backupLocked(); err != nil { // 回滚前先备当前
+		return nil, err
+	}
+	if err := os.WriteFile(c.path, b, 0o600); err != nil {
+		return nil, err
+	}
+	return Load(c.path)
+}
+
+// backupLocked 把当前配置文件复制进 backups/，并只保留最新的 20 份。
+func (c *Config) backupLocked() error {
+	d := c.BackupDir()
+	if d == "" {
+		return fmt.Errorf("配置路径未设置")
+	}
+	cur, err := os.ReadFile(c.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // 还没有配置文件，没什么好备的
+		}
+		return err
+	}
+	if err := os.MkdirAll(d, 0o700); err != nil {
+		return err
+	}
+	name := "config-" + time.Now().Format("20060102-150405.000") + ".yaml"
+	for i := 2; ; i++ { // 同一毫秒里连存两次也不覆盖（改用 -2/-3…）
+		if _, err := os.Stat(filepath.Join(d, name)); os.IsNotExist(err) {
+			break
+		}
+		name = fmt.Sprintf("config-%s-%d.yaml", time.Now().Format("20060102-150405.000"), i)
+	}
+	if err := os.WriteFile(filepath.Join(d, name), cur, 0o600); err != nil {
+		return err
+	}
+	// 只留最新 20 份
+	if all := c.Backups(); len(all) > 20 {
+		for _, old := range all[20:] {
+			_ = os.Remove(filepath.Join(d, old))
+		}
+	}
+	return nil
 }
 
 // checkTargetsFree 检查 rt 的目标有没有落在别的规则里。

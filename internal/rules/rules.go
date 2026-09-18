@@ -82,6 +82,51 @@ func (r Route) Matches(ip net.IP, port uint16) bool {
 	return false
 }
 
+// MatchesTarget 只看目标（不管端口）—— 界面上“只填了 IP”的查询用。
+func (r Route) MatchesTarget(ip net.IP) bool { return r.matchesIP(ip) }
+
+// Prefix 该规则目标里最长的前缀长度（/32 → 32）。用来做“最具体优先”排序。
+func (r Route) Prefix() int {
+	best := 0
+	for _, n := range r.nets {
+		if ones, _ := n.Mask.Size(); ones > best {
+			best = ones
+		}
+	}
+	return best
+}
+
+// Explain 解释一个连接目标会命中谁：
+//
+//	matched  —— 生效的规则下标（-1 = 都不命中，按“不拦截”处理）
+//	shadowed —— 也匹配、但排在后面永远轮不到的规则下标
+//
+// ignorePort 为真时只看目标（界面上没填端口的情况）。
+func (s *Set) Explain(ip net.IP, port uint16, ignorePort bool) (matched int, shadowed []int, ok bool) {
+	v4 := ip.To4()
+	if v4 == nil {
+		return -1, nil, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	matched = -1
+	for i := range s.routes {
+		hit := s.routes[i].Matches(v4, port)
+		if ignorePort {
+			hit = s.routes[i].MatchesTarget(v4)
+		}
+		if !hit {
+			continue
+		}
+		if matched < 0 {
+			matched = i
+			continue
+		}
+		shadowed = append(shadowed, i)
+	}
+	return matched, shadowed, matched >= 0
+}
+
 // matchesIP 任一目标命中即算该目标的命中（端口不参与）。
 func (r Route) matchesIP(ip net.IP) bool {
 	for _, n := range r.nets {

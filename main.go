@@ -16,6 +16,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"flag"
 	"fmt"
@@ -39,6 +40,7 @@ import (
 	"nethub/internal/gostbat"
 	"nethub/internal/logbus"
 	"nethub/internal/webui"
+	"nethub/internal/winsvc"
 )
 
 //go:embed all:frontend
@@ -51,9 +53,41 @@ func main() {
 	doAutostart := flag.Bool("autostart", false, "把本程序加入开机启动（计划任务，最高权限），随后退出")
 	noAutostart := flag.Bool("no-autostart", false, "从开机启动中移除，随后退出")
 	noElevate := flag.Bool("no-elevate", false, "不要自动提权（调试用）")
+	serviceMode := flag.Bool("service", false, "以 Windows 服务方式运行（由 SCM 拉起，无界面）")
+	svcInstall := flag.Bool("service-install", false, "安装为 Windows 服务（自动启动，需管理员），随后退出")
+	svcUninstall := flag.Bool("service-uninstall", false, "卸载 Windows 服务，随后退出")
+	svcState := flag.Bool("service-state", false, "打印 Windows 服务状态，随后退出")
 	clashCheck := flag.Bool("clash-check", false, "只检测系统代理/Clash 会不会把内网送进代理，然后退出（不需管理员）")
 	upTest := flag.Bool("test-upstream", false, "直接实测原生上游链路（不经 gost），然后退出（不需管理员）")
 	flag.Parse()
+
+	// 服务安装/卸载/查状态：不需要配置，也不需要界面
+	if *svcInstall || *svcUninstall || *svcState {
+		if *svcState {
+			fmt.Println("NetHub 服务状态：" + winsvc.State())
+			return
+		}
+		exe, err := os.Executable()
+		if err != nil {
+			fatal("拿不到自身路径: %v", err)
+		}
+		cfgPath := *cfgPath
+		if cfgPath == "" {
+			cfgPath = filepath.Join(filepath.Dir(exe), "config.yaml")
+		}
+		if *svcUninstall {
+			if err := winsvc.Uninstall(); err != nil {
+				fatal("%v", err)
+			}
+			fmt.Println("已卸载 Windows 服务 " + winsvc.Name)
+			return
+		}
+		if err := winsvc.Install(exe, cfgPath); err != nil {
+			fatal("%v", err)
+		}
+		fmt.Printf("已安装 Windows 服务 %s（自动启动，无界面）\n用 net start %s 启动，或去服务管理器里操作。\n", winsvc.Name, winsvc.Name)
+		return
+	}
 
 	// -test-upstream 直接连上游，不需管理员
 	if *upTest {
@@ -132,6 +166,25 @@ func main() {
 	bus.Info("配置载入：%d 条链，%d 条规则", len(cfg.Chains), len(cfg.Routes))
 
 	a := app.New(cfg, bus)
+
+	// 服务模式（SCM 拉起或手动 -service）：没有窗口、没有托盘，只跑引擎
+	if *serviceMode || winsvc.IsService() {
+		err := winsvc.Run(func(ctx context.Context) error {
+			if err := a.Start(); err != nil {
+				bus.Error("服务模式启动失败: %v", err)
+				return err
+			}
+			bus.Info("服务模式：引擎已就绪（无界面）")
+			<-ctx.Done()
+			bus.Info("服务收到停止请求，正在收尾…")
+			a.Stop()
+			return nil
+		})
+		if err != nil {
+			fatal("服务运行失败: %v", err)
+		}
+		return
+	}
 
 	if *headless {
 		runHeadless(a, bus)

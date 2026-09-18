@@ -185,9 +185,10 @@ type Engine struct {
 	ln      net.Listener
 	relay   string
 	conns   map[uint16]*connState
-	notices map[uint16]noticeSeen  // 直连/阻断日志去重：源端口 → 上次报过的动作+目标
-	health  map[string][]*upHealth // 每条链的上游健康（与 Upstreams() 下标对齐）
-	round   int                    // 轮询策略的游标
+	notices map[uint16]noticeSeen    // 直连/阻断日志去重：源端口 → 上次报过的动作+目标
+	health  map[string][]*upHealth   // 每条链的上游健康（与 Upstreams() 下标对齐）
+	targets map[string]*targetHealth // 业务目标巡检结果（按 ip:port 索引）
+	round   int                      // 轮询策略的游标
 	run     bool
 
 	// 统计
@@ -198,6 +199,10 @@ type Engine struct {
 	stopOnce sync.Once
 	done     chan struct{}
 	wg       sync.WaitGroup
+
+	// Notify 由上层（App）注入：把"状态变化"变成应用内提示。
+	// 第二个参数为 true 表示是不好的消息。
+	Notify func(title, text string, bad bool)
 }
 
 func New(bus *logbus.Bus, rs *rules.Set, cfg *config.Config) *Engine {
@@ -283,11 +288,12 @@ func (e *Engine) Start() error {
 			ch.Name, len(ch.Upstreams()), ch.StrategyName(), ch.ProbeInterval())
 	}
 
-	e.wg.Add(4)
+	e.wg.Add(5)
 	go e.acceptLoop()
 	go e.packetLoop()
 	go e.janitor()
 	go e.healthLoop()
+	go e.targetLoop()
 	return nil
 }
 

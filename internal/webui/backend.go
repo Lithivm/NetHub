@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -147,14 +148,15 @@ type ChainView struct {
 }
 
 type RouteView struct {
-	Index   int      `json:"index"`
-	Name    string   `json:"name"`
-	Targets []string `json:"targets"`
-	Ports   []string `json:"ports"`
-	Chain   string   `json:"chain"`
-	Direct  bool     `json:"direct"`
-	Block   bool     `json:"block"`
-	Note    string   `json:"note"`
+	Index    int      `json:"index"`
+	Name     string   `json:"name"`
+	Targets  []string `json:"targets"`
+	Ports    []string `json:"ports"`
+	Chain    string   `json:"chain"`
+	Direct   bool     `json:"direct"`
+	Block    bool     `json:"block"`
+	Note     string   `json:"note"`
+	Shadowed []string `json:"shadowed"` // 被前面的规则完全覆盖、永远不会生效的目标
 }
 
 type LogView struct {
@@ -309,6 +311,7 @@ func (b *Backend) GetRoutes() []RouteView {
 		out = append(out, RouteView{
 			Index: i, Name: r.Name, Targets: r.Targets, Ports: r.Ports,
 			Chain: r.Chain, Direct: r.IsDirect(), Block: r.IsBlock(), Note: note,
+			Shadowed: b.a.Cfg.ShadowedTargets(i),
 		})
 	}
 	return out
@@ -373,6 +376,123 @@ func (b *Backend) GetConns() ConnList {
 		Active:   active,
 		PerChain: b.a.Engine.ChainCounts(),
 	}
+}
+
+// ───────────────────── 规则智能 / 体检 / 备份 / 诊断 ─────────────────────
+
+// ExplainRef 解释里提到的“另一条也匹配的规则”。
+type ExplainRef struct {
+	Index  int    `json:"index"`
+	Name   string `json:"name"`
+	Action string `json:"action"`
+}
+
+// ExplainView “这个目标会怎么走”的完整解释。
+type ExplainView struct {
+	Input        string                   `json:"input"`
+	Matched      bool                     `json:"matched"`
+	RuleIndex    int                      `json:"ruleIndex"`
+	RuleName     string                   `json:"ruleName"`
+	Action       string                   `json:"action"`
+	Chain        string                   `json:"chain"`
+	PortIgnored  bool                     `json:"portIgnored"`
+	Shadowed     []ExplainRef             `json:"shadowed"`
+	ChainHealth  *engine.ChainHealthView  `json:"chainHealth"`
+	TargetHealth *engine.TargetHealthView `json:"targetHealth"`
+}
+
+// ExplainTarget 回答“这个 IP（可选端口）会走哪条链”：命中的规则、被抢先的规则、
+// 该链的上游健康、以及上次巡检到的可达性。
+func (b *Backend) ExplainTarget(ip, port string) (ExplainView, error) {
+	v := ExplainView{Input: strings.TrimSpace(ip), RuleIndex: -1}
+	addr := net.ParseIP(strings.TrimSpace(ip))
+	if addr == nil {
+		return v, fmt.Errorf("不是合法的 IPv4 地址：%q", ip)
+	}
+
+	var pnum uint16
+	tp := strings.TrimSpace(port)
+	v.PortIgnored = tp == ""
+	if !v.PortIgnored {
+		n, err := strconv.Atoi(tp)
+		if err != nil || n < 1 || n > 65535 {
+			return v, fmt.Errorf("端口要在 1-65535：%q", port)
+		}
+		pnum = uint16(n)
+	}
+	if v.PortIgnored {
+		v.Input = strings.TrimSpace(ip) + "（未填端口 → 只看目标）"
+	}
+
+	idx, shadowed, _ := b.a.Rules.Explain(addr, pnum, v.PortIgnored)
+	if idx >= 0 && idx < len(b.a.Cfg.Routes) {
+		r := b.a.Cfg.Routes[idx]
+		v.Matched, v.RuleIndex, v.RuleName, v.Action, v.Chain = true, idx, r.Name, r.ActionText(), r.Chain
+	}
+	for _, si := range shadowed {
+		if si >= 0 && si < len(b.a.Cfg.Routes) {
+			r := b.a.Cfg.Routes[si]
+			v.Shadowed = append(v.Shadowed, ExplainRef{Index: si, Name: r.Name, Action: r.ActionText()})
+		}
+	}
+	if v.Matched && v.Chain != "" {
+		for _, ch := range b.a.Engine.ChainHealth() {
+			if ch.Name == v.Chain {
+				c := ch
+				v.ChainHealth = &c
+			}
+		}
+		target := fmt.Sprintf("%s:%d", addr, pnum)
+		for _, th := range b.a.Engine.TargetHealth() {
+			if th.Target == target {
+				t := th
+				v.TargetHealth = &t
+			}
+		}
+	}
+	return v, nil
+}
+
+// SortRoutes 按“最具体优先”重排规则（等于帮用户点了几十次上下箭头）。
+func (b *Backend) SortRoutes() error {
+	if !b.a.Cfg.SortRoutesBySpecificity() {
+		return fmt.Errorf("顺序已经是“最具体优先”，不需要调整")
+	}
+	return b.save("按最具体优先整理规则顺序")
+}
+
+// PrecheckConfig 配置体检：返回人话报告（不修任何东西）。
+func (b *Backend) PrecheckConfig() []string { return b.a.Cfg.Precheck() }
+
+// ListBackups 配置备份列表（新的在前）。
+func (b *Backend) ListBackups() []string { return b.a.Cfg.Backups() }
+
+// RestoreBackup 回滚到某个备份：先备当前、再写回、重新载入并重启服务。
+func (b *Backend) RestoreBackup(name string) error {
+	cur, err := b.a.Cfg.RestoreBackup(name)
+	if err != nil {
+		return err
+	}
+	*b.a.Cfg = *cur // 同一个指针：引擎/规则看到的就是新配置（path 也一并带过来）
+	b.a.Bus.Warn("已回滚配置：%s（当前配置已自动备份）", name)
+	return b.a.Restart()
+}
+
+// GetTargetHealth 业务目标巡检快照。
+func (b *Backend) GetTargetHealth() []engine.TargetHealthView {
+	if b.a.Engine == nil {
+		return nil
+	}
+	return b.a.Engine.TargetHealth()
+}
+
+// ProbeTargetsNow 立刻巡检一遍最近用过的业务目标。
+func (b *Backend) ProbeTargetsNow() error {
+	if b.a.Engine == nil {
+		return fmt.Errorf("引擎未初始化")
+	}
+	go b.a.Engine.ProbeTargets()
+	return nil
 }
 
 func (b *Backend) GetLogs() []LogView {

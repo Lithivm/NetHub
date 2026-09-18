@@ -373,6 +373,16 @@ code, .mono { font-family: var(--font-mono); }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; vertical-align: middle; background: var(--muted-soft); }
 .dot.ok  { background: #2f9e5e; }
 .dot.bad { background: #d64545; }
+/* 业务目标巡检表 */
+.target-grid { grid-template-columns: minmax(150px, 1.2fr) 110px 80px 90px 110px; }
+/* 只读解释输出（“这个目标怎么走” / 配置体检） */
+.explain-out {
+  margin: 0; padding: var(--s3); background: var(--canvas-soft);
+  border-radius: var(--r-input); font-size: var(--fs-xs); line-height: 1.75;
+  white-space: pre-wrap; max-height: 52vh; overflow: auto;
+}
+/* 被前面规则完全覆盖、永远不会生效的目标 */
+.shadow-warn { color: #b26a00; }
 
 .empty {
   padding: var(--s6);

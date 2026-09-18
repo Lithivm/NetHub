@@ -39,6 +39,14 @@ func New(cfg *config.Config, bus *logbus.Bus) *App {
 	rs := rules.New()
 	a := &App{Bus: bus, Cfg: cfg, Rules: rs}
 	a.Engine = engine.New(bus, rs, cfg)
+	// 引擎里的"状态变化"（上游挂了、业务目标不通）走同一套应用内提示
+	a.Engine.Notify = func(title, text string, bad bool) {
+		kind := NotifyInfo
+		if bad {
+			kind = NotifyError
+		}
+		a.notify(title, text, kind)
+	}
 	a.Notify = func(string, string, NotifyKind) {} // 默认空实现，GUI 起来后替换
 	return a
 }

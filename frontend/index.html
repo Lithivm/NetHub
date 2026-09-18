@@ -89,7 +89,14 @@
         <h2>路由规则</h2>
         <span class="hint">自上而下匹配，命中即停；一条规则可含多个目标。改动即时保存，点「重启」生效</span>
         <div class="spacer"></div>
+        <button class="btn btn-sm" id="btnRuleSort">按最具体优先排序</button>
         <button class="btn btn-sm btn-primary" id="btnRuleAdd">添加规则</button>
+      </div>
+      <div class="card-body form">
+        <div class="input-row">
+          <input type="text" id="explainIp" class="input mono" placeholder="查一个 IP（可带端口，如 10.0.0.5:5432）—— 它会走哪条链？">
+          <button class="btn btn-sm" id="btnExplain">解释</button>
+        </div>
       </div>
       <div class="table" id="ruleTable"></div>
     </div>
@@ -98,15 +105,27 @@
   <!-- ═══════ 设置 ═══════ -->
   <!-- ═══════ 连接 ═══════ -->
   <section class="page" id="page-conn">
-    <div class="card card-fill">
-      <div class="card-head">
-        <h2>当前连接</h2>
-        <span class="hint">进行中的排在最前；已结束的保留 2 分钟</span>
-        <div class="spacer"></div>
-        <span class="hint" id="connSummary">—</span>
-        <button class="btn btn-sm" id="btnConnRefresh">刷新</button>
+    <div class="settings-scroll">
+      <div class="card">
+        <div class="card-head">
+          <h2>当前连接</h2>
+          <span class="hint">进行中的排在最前；已结束的保留 2 分钟</span>
+          <div class="spacer"></div>
+          <span class="hint" id="connSummary">—</span>
+          <button class="btn btn-sm" id="btnConnRefresh">刷新</button>
+        </div>
+        <div class="table" id="connTable"></div>
       </div>
-      <div class="table" id="connTable"></div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>业务目标巡检</h2>
+          <span class="hint">只探「最近真的访问过」的内网目标：经隧道连一次、不发数据（每 5 分钟一次）</span>
+          <div class="spacer"></div>
+          <button class="btn btn-sm" id="btnProbeTargets">立即巡检</button>
+        </div>
+        <div class="table" id="targetTable"></div>
+      </div>
     </div>
   </section>
 
@@ -164,6 +183,18 @@
             <span>开机自动启动<em>用计划任务 + 最高权限：登录后静默启动，不弹 UAC</em></span>
           </label>
           <div class="hint" id="autoInfo"></div>
+          <div class="input-row">
+            <span class="hint" id="svcInfo">—</span>
+            <div class="spacer"></div>
+            <button class="btn btn-xs" id="btnSvcInstall">安装为 Windows 服务</button>
+            <button class="btn btn-xs" id="btnSvcStart">启动服务</button>
+            <button class="btn btn-xs" id="btnSvcStop">停止服务</button>
+            <button class="btn btn-xs btn-danger" id="btnSvcUninstall">卸载服务</button>
+          </div>
+          <div class="hint">
+            <b>Windows 服务模式</b>：装成服务后无人登录也会跑、只有管理员能停（对齐 Proxifier 的 Service Mode）。
+            服务模式没有界面，配置与日志跟界面版完全共用；开机自启建议二选一（计划任务 <i>或</i> 服务）。
+          </div>
         </div>
       </div>
 
@@ -182,6 +213,18 @@
             <b>导出配置说明</b>：一份纯文本，上游地址已打码、没有口令。
             适合先发出去让人看懂配置，末尾会自动附上对方拿到真配置后的使用步骤。
           </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>配置体检与回滚</h2>
+          <span class="hint">每次保存配置都会自动备份（最多留 20 份）；体检只读不修</span>
+          <div class="spacer"></div>
+          <button class="btn btn-sm" id="btnPrecheck">配置体检</button>
+          <button class="btn btn-sm" id="btnDiag">导出诊断包</button>
+        </div>
+        <div class="card-body form">
+          <div id="backupList" class="hint">—</div>
         </div>
       </div>
 

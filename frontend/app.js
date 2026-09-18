@@ -108,6 +108,145 @@ function showPage(name) {
   if (name === 'conn') loadConns();
 }
 
+/* ═══════════════ 规则智能：最具体优先 / 命中查询 ═══════════════ */
+
+async function sortRoutes() {
+  try {
+    await call('SortRoutes');
+    await loadRoutes();
+    toast('已整理规则顺序', '越具体（/32、带端口）的排在越前面', 'success');
+  } catch (e) { fail(e); }
+}
+
+async function explainTarget() {
+  const raw = (document.getElementById('explainIp').value || '').trim();
+  if (!raw) { toast('先填一个 IP', '例如 10.0.0.5 或 10.0.0.5:5432', 'warn'); return; }
+  const i = raw.lastIndexOf(':');
+  const ip = i > 0 ? raw.slice(0, i) : raw;
+  const port = i > 0 ? raw.slice(i + 1) : '';
+  let v;
+  try { v = await call('ExplainTarget', ip, port); }
+  catch (e) { toast('查不了', (e && e.message) || String(e), 'error'); return; }
+
+  const lines = [];
+  if (!v.matched) {
+    lines.push('不拦截（直连）', '');
+    lines.push('没有任何规则命中这个目标，所以它不经过我们 —— 按系统原本的路由走。');
+  } else {
+    lines.push('命中第 ' + (v.ruleIndex + 1) + ' 条规则' + (v.ruleName ? '「' + v.ruleName + '」' : ''));
+    lines.push('动作：' + v.action);
+    if (v.chain && v.action.indexOf('链') === 0) lines.push('链：' + v.chain);
+    if (v.chainHealth) {
+      lines.push('');
+      lines.push('该链上游（策略 ' + v.chainHealth.strategy + '，探测 ' + v.chainHealth.probe + '）：');
+      v.chainHealth.upstreams.forEach(u => {
+        lines.push('  ' + (u.known ? (u.ok ? '● 可用' : '● 不可用') : '○ 待探测') + '  ' +
+          u.url + (u.latency ? '  ' + u.latency : '') + (u.error ? '  ' + u.error : ''));
+      });
+    }
+    if (v.targetHealth) {
+      lines.push('');
+      lines.push('目标上次巡检：' + (v.targetHealth.ok ? '可达 ' + v.targetHealth.latency : '不可达：' + v.targetHealth.error) +
+        '（' + v.targetHealth.checked + '）');
+    }
+  }
+  if (v.portIgnored) {
+    lines.push('');
+    lines.push('（未填端口 —— 这次只看目标，带端口条件的规则可能没算进来）');
+  }
+  if (v.shadowed && v.shadowed.length) {
+    lines.push('');
+    lines.push('被抢先、永远不会生效的规则：');
+    v.shadowed.forEach(s => lines.push('  第 ' + (s.index + 1) + ' 条' + (s.name ? '「' + s.name + '」' : '') + ' → ' + s.action));
+  }
+  const pre = el('pre', 'explain-out mono');
+  pre.textContent = lines.join('\n');
+  modal.open('这个目标怎么走 —— ' + v.input, [pre], null);
+}
+
+/* ═══════════════ Windows 服务 ═══════════════ */
+
+async function loadService() {
+  const box = document.getElementById('svcInfo');
+  if (!box) return;
+  let v = null;
+  try { v = await call('GetService'); } catch (e) { return; }
+  if (!v) return;
+  const map = { running: '运行中', stopped: '已停止', starting: '启动中', stopping: '停止中', 'not installed': '未安装', unknown: '未知' };
+  box.textContent = 'Windows 服务：' + (map[v.state] || v.state) +
+    (v.elevated ? '' : '（当前不是管理员，装/卸会失败）');
+}
+
+/* ═══════════════ 配置体检 / 备份 / 诊断包 ═══════════════ */
+
+async function precheckConfig() {
+  let lines = [];
+  try { lines = await call('PrecheckConfig'); } catch (e) { return fail(e); }
+  const pre = el('pre', 'explain-out mono');
+  pre.textContent = (lines || []).join('\n');
+  modal.open('配置体检', [pre], null);
+}
+
+async function exportDiagnostics() {
+  try {
+    const p = await call('ExportDiagnostics');
+    if (p) toast('已导出诊断包', p + '　　凭据已抹掉，可直接发出去', 'success');
+  } catch (e) { fail(e); }
+}
+
+async function loadBackups() {
+  const box = document.getElementById('backupList');
+  if (!box) return;
+  let list = [];
+  try { list = await call('ListBackups'); } catch (e) { return; }
+  box.replaceChildren();
+  if (!list || !list.length) {
+    box.appendChild(el('div', null, '还没有备份。每次保存配置都会自动备一份。'));
+    return;
+  }
+  box.appendChild(el('div', null, '最近 ' + list.length + ' 份备份（恢复前会先把当前配置也备一份）：'));
+  const row = el('div', 'input-row');
+  list.slice(0, 8).forEach(name => {
+    row.appendChild(btn(name.replace(/^config-|\.yaml$/g, ''), 'btn btn-xs', async () => {
+      if (!await confirmBox('回滚配置', '用备份 ' + name + ' 覆盖当前配置并重启服务？', true)) return;
+      try {
+        await call('RestoreBackup', name);
+        await loadSettings(); await loadChains(); await loadRoutes(); await loadBackups();
+        toast('已回滚', name, 'success');
+      } catch (e) { fail(e); }
+    }));
+  });
+  box.appendChild(row);
+}
+
+/* ═══════════════ 业务目标巡检 ═══════════════ */
+
+async function loadTargetHealth() {
+  let list = [];
+  try { list = await call('GetTargetHealth'); } catch (e) { return; }
+  const t = document.getElementById('targetTable');
+  if (!t) return;
+  t.replaceChildren();
+  const head = el('div', 'trow thead target-grid');
+  ['目标', '链', '状态', '延迟', '检查时间'].forEach(h => head.appendChild(el('div', 'cell', h)));
+  t.appendChild(head);
+  if (!list || !list.length) {
+    t.appendChild(el('div', 'empty', '还没有可以巡检的目标 —— 等有内网连接之后（或点「立即巡检」）。'));
+    return;
+  }
+  list.forEach(x => {
+    const row = el('div', 'trow target-grid');
+    row.appendChild(el('div', 'cell mono', x.target));
+    row.appendChild(el('div', 'cell dim', x.chain));
+    row.appendChild(el('div', 'cell' + (x.ok ? ' strong' : ''), x.ok ? '可达' : '不可达'));
+    row.appendChild(el('div', 'cell mono', x.ok ? x.latency : '—'));
+    const c = el('div', 'cell dim', x.checked);
+    if (x.error) c.title = x.error;
+    row.appendChild(c);
+    t.appendChild(row);
+  });
+}
+
 /* ═══════════════ 连接列表 ═══════════════ */
 
 /* 字节数的人类可读写法（与后端 humanBytes 对齐）。 */
@@ -478,7 +617,7 @@ async function loadRoutes() {
     idxCell.appendChild(el('span', 'idx', String(r.index + 1)));
     row.appendChild(idxCell);
     row.appendChild(el('div', 'cell' + (r.name ? ' strong' : ' dim'), r.name || '（未命名）'));
-    row.appendChild(targetsCell(r.targets || [], r.ports || []));
+    row.appendChild(targetsCell(r.targets || [], r.ports || [], r.shadowed || []));
     row.appendChild(el('div', 'cell' + (r.direct || r.block ? ' dim' : ''), actionLabel(r)));
     row.appendChild(el('div', 'cell dim', r.note || ''));
 
@@ -494,14 +633,20 @@ async function loadRoutes() {
 
 /* 目标列：一条规则可以挂十几个目标，列表里只给摘要，全量放 title，悬停能看全。
    带端口条件时在末尾追一个暗淡的“· 端口 …”标签。 */
-function targetsCell(list, ports) {
+function targetsCell(list, ports, shadowed) {
   const cap = 3;
   const c = el('div', 'cell mono');
   c.textContent = list.slice(0, cap).join(' ') +
     (list.length > cap ? '  +' + (list.length - cap) + ' 个' : '');
   ports = ports || [];
   if (ports.length) c.appendChild(el('span', 'dim', '  · 端口 ' + ports.join(',')));
-  if (list.length > 1 || ports.length) {
+  shadowed = shadowed || [];
+  if (shadowed.length) {
+    const warn = el('span', 'shadow-warn', '  ⚠ ' + shadowed.length + ' 个目标被前面的规则覆盖');
+    warn.title = '这些目标永远轮不到（自上而下、命中即停）：\n' + shadowed.join('\n');
+    c.appendChild(warn);
+  }
+  if (list.length > 1 || ports.length || shadowed.length) {
     c.title = list.join('\n') + (ports.length ? '\n端口 ' + ports.join(',') : '');
   }
   return c;
@@ -776,6 +921,44 @@ function wire() {
   // 连接页
   document.getElementById('btnConnRefresh').onclick = () => loadConns();
 
+  // 规则页
+  document.getElementById('btnRuleSort').onclick = sortRoutes;
+  document.getElementById('btnExplain').onclick = explainTarget;
+  document.getElementById('explainIp').onkeydown = e => { if (e.key === 'Enter') explainTarget(); };
+
+  // 设置页：体检 / 诊断包 / Windows 服务
+  document.getElementById('btnPrecheck').onclick = precheckConfig;
+  document.getElementById('btnDiag').onclick = exportDiagnostics;
+  document.getElementById('btnSvcInstall').onclick = async () => {
+    if (!await confirmBox('安装为 Windows 服务', '装成服务后会随开机自动启动（无人登录也跑，无界面）。确定吗？', true)) return;
+    try { await call('InstallService'); toast('已安装服务', '用 net start NetHub 启动，或点「启动服务」', 'success'); }
+    catch (e) { fail(e); }
+    loadService();
+  };
+  document.getElementById('btnSvcStart').onclick = async () => {
+    try { await call('StartService'); toast('服务已启动', '无界面运行中（日志同目录）', 'success'); }
+    catch (e) { fail(e); }
+    setTimeout(loadService, 1200);
+  };
+  document.getElementById('btnSvcStop').onclick = async () => {
+    try { await call('StopService'); toast('服务已停止', '', 'success'); }
+    catch (e) { fail(e); }
+    setTimeout(loadService, 1200);
+  };
+  document.getElementById('btnSvcUninstall').onclick = async () => {
+    if (!await confirmBox('卸载服务', '停止并删除 Windows 服务 NetHub？', true)) return;
+    try { await call('UninstallService'); toast('已卸载服务', '', 'success'); }
+    catch (e) { fail(e); }
+    setTimeout(loadService, 1200);
+  };
+
+  // 连接页：业务目标巡检
+  document.getElementById('btnProbeTargets').onclick = async () => {
+    try { await call('ProbeTargetsNow'); toast('正在巡检业务目标', '经隧道连一次、不发数据', 'info'); }
+    catch (e) { fail(e); }
+    setTimeout(loadTargetHealth, 3000);
+  };
+
   // 链路页
   document.getElementById('btnChainAdd').onclick = () => chainForm(null);
   document.getElementById('btnChainProbe').onclick = async () => {
@@ -878,7 +1061,7 @@ async function boot() {
   // 连接列表只看当前页：不在这一页就不拉，省得白跑
   setInterval(() => {
     const p = document.getElementById('page-conn');
-    if (p && p.classList.contains('is-active')) loadConns();
+    if (p && p.classList.contains('is-active')) { loadConns(); loadTargetHealth(); }
   }, 1500);
   // 链路页的上游健康：只在这一页时刷新
   setInterval(() => {
@@ -891,6 +1074,8 @@ async function boot() {
 
   // 各面板独立加载：一个坏了不影响其他，而且要把错误显性报出来
   const panels = await Promise.allSettled([loadLogs(), loadChains(), loadRoutes(), loadSettings()]);
+  await loadBackups();
+  await loadService();
   const bad = panels.filter(p => p.status === 'rejected');
   if (bad.length) {
     console.error('面板加载失败', bad.map(p => p.reason));

@@ -422,3 +422,101 @@ func TestChainYAMLShape(t *testing.T) {
 		t.Errorf("多上游应写成 forwards:\n%s", b)
 	}
 }
+
+// 规则智能：影子目标（被前面的规则完全覆盖）、最具体优先排序、配置体检。
+func TestShadowSortPrecheck(t *testing.T) {
+	c := &Config{
+		Relay: "127.0.0.1:0",
+		Chains: []Chain{
+			{Name: "a", Forward: "socks5://127.0.0.1:1080"},
+			{Name: "b", Forwards: []string{"socks5://127.0.0.1:1081", "socks5://127.0.0.1:1082"}},
+		},
+		Routes: []Route{
+			// 先宽
+			{Name: "宽", Targets: []string{"10.0.0.0/24"}, Chain: "a"},
+			// 再窄：这是正常用法，不该被当成影子
+			{Name: "窄", Targets: []string{"10.0.0.5/32"}, Chain: "b"},
+			// 这条完全被第一条覆盖（目标相同 + 端口没写 = 端口被覆盖）
+			{Name: "没用", Targets: []string{"10.0.0.0/24"}, Chain: "b"},
+			// 同目标但端口不同 —— 不算影子（端口维度上是两条不同的规则）
+			{Name: "端口版", Targets: []string{"10.0.0.7/32"}, Ports: []string{"443"}, Chain: "b"},
+			{Name: "端口版2", Targets: []string{"10.0.0.7/32"}, Ports: []string{"5432"}, Chain: "b"},
+		},
+	}
+	if _, err := c.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.ShadowedTargets(2); len(got) != 1 || got[0] != "10.0.0.0/24" {
+		t.Errorf("第 3 条应被标成影子: %v", got)
+	}
+	if got := c.ShadowedTargets(1); len(got) != 0 {
+		t.Errorf("窄规则不该被标成影子: %v", got)
+	}
+	if got := c.ShadowedTargets(4); len(got) != 0 {
+		t.Errorf("同目标不同端口不是影子: %v", got)
+	}
+
+	// 体检报告要把影子与“单上游”都点出来
+	rep := strings.Join(c.Precheck(), "\n")
+	if !strings.Contains(rep, "永远不生效") {
+		t.Errorf("体检要指出影子目标:\n%s", rep)
+	}
+	if !strings.Contains(rep, "只有一条上游") {
+		t.Errorf("体检要提醒单上游风险:\n%s", rep)
+	}
+
+	// 最具体优先排序：/32 与带端口的排前面
+	if !c.SortRoutesBySpecificity() {
+		t.Fatal("乱序时应返回“有改动”")
+	}
+	order := []string{}
+	for _, r := range c.Routes {
+		order = append(order, r.Name)
+	}
+	// 期望：两个带端口的 /32 在最前，其次不带端口的 /32，然后是 /24，最后是被覆盖的那条
+	if order[0] != "端口版" || order[1] != "端口版2" {
+		t.Errorf("带端口的 /32 应排最前: %v", order)
+	}
+	if order[2] != "窄" {
+		t.Errorf("不带端口的 /32 应排在带端口的后面: %v", order)
+	}
+	if order[3] != "宽" {
+		t.Errorf("/24 应排在 /32 后面: %v", order)
+	}
+	if c.SortRoutesBySpecificity() {
+		t.Error("已经有序时不该再返回有改动")
+	}
+}
+
+// 配置备份：保存会自动备一份（最多留 20），能列出来也能回滚。
+func TestConfigBackupRestore(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.yaml")
+	seed := "relay: 127.0.0.1:0\nchains:\n  - name: a\n    forward: socks5://127.0.0.1:1080\nroutes: []\n"
+	if err := os.WriteFile(p, []byte(seed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 改点东西再存：应产生备份
+	c.Routes = []Route{{Name: "新的", Targets: []string{"10.0.0.0/24"}, Chain: "a"}}
+	if err := c.Save(); err != nil {
+		t.Fatal(err)
+	}
+	list := c.Backups()
+	if len(list) != 1 {
+		t.Fatalf("保存应产生 1 份备份，实际 %d: %v", len(list), list)
+	}
+	// 回滚：配置应回到“没有规则”的状态，且当前配置被再备一份
+	restored, err := c.RestoreBackup(list[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(restored.Routes) != 0 {
+		t.Errorf("回滚后应没有规则: %+v", restored.Routes)
+	}
+	if got := restored.Backups(); len(got) < 2 {
+		t.Errorf("回滚前应把当前配置也备一份: %v", got)
+	}
+}
