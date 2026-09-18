@@ -90,14 +90,15 @@ func (c *Config) Path() string { return c.path }
 // Default 返回一份内置默认配置（首次运行且没有现成 config.yaml 时写出来给用户改）。
 //
 // 刻意地"什么都不预设"：链名是示例、forward 留空、不预置任何网段。
-// 默认配置绝不指向任何真实环境 —— 否则新机器一启动就会去接管别人的网段，
-// 而 forward 为空会让 Validate 直接拒绝启动，用户必须先填自己的上游。
+// 默认配置绝不指向任何真实环境 —— 否则新机器一启动就会去接管别人的网段。
+//
+// 只用**一条**示例链（不是两条）：保存配置时要过校验，两条空链会让人
+// "只填了一条却存不下去"，而界面里完全可以再加。
 func Default() *Config {
 	return &Config{
 		Relay: "127.0.0.1:0",
 		Chains: []Chain{
-			{Name: "proxy-a", Note: "示例链路 A —— 把 forward 换成你自己的上游"},
-			{Name: "proxy-b", Note: "示例链路 B"},
+			{Name: "proxy-a", Note: "示例链路 —— 把 forward 换成你自己的上游"},
 		},
 		Routes: nil,
 		Hosts:  HostsCfg{Manage: false},
