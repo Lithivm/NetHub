@@ -104,7 +104,9 @@ async function toggleTheme() {
 /* ═══════════════ 标签页 ═══════════════ */
 
 function showPage(name) {
-  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('is-active', t.dataset.page === name));
+  // 选项卡 + 顶部栏里的「设置」（它不在 tab 组里，但用的是同一套切换）
+  document.querySelectorAll('.tab, .tab-top').forEach(t =>
+    t.classList.toggle('is-active', t.dataset.page === name));
   document.querySelectorAll('.page').forEach(p => p.classList.toggle('is-active', p.id === 'page-' + name));
   if (name === 'log') scrollLogToEnd();
   if (name === 'conn') loadConns();
@@ -992,6 +994,7 @@ function wire() {
 
   // 标签
   document.querySelectorAll('.tab').forEach(t => t.onclick = () => showPage(t.dataset.page));
+  document.getElementById('btnSettings').onclick = () => showPage('settings');
 
   // 主操作
   document.getElementById('btnToggle').onclick = async () => {

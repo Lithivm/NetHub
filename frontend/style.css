@@ -255,16 +255,11 @@ code, .mono { font-family: var(--font-mono); }
   border: 1px solid var(--hairline);
   border-radius: calc(var(--r-chip) + 3px);
 }
-/* 顶部栏里的「设置」：长得像旁边的按钮，但保留 .tab 的选中态逻辑 */
-.tab-top {
-  padding: 5px var(--s3);
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-btn);
-  background: var(--canvas);
-  color: var(--ink);
-  font-weight: 600;
-}
-.tab-top:hover { background: var(--canvas-soft); color: var(--ink); }
+/* 顶部栏里的「设置」：外观与旁边的 .btn 完全一致（它就是 .btn），
+   只额外兼容 .tab 的选中态（在设置页时高亮成主色，否则看不出当前在哪一页） */
+.tab-top { padding: 7px var(--s3); border-radius: var(--r-btn); font-weight: 600; }
+.tab-top.is-active { background: var(--primary-soft); color: var(--primary); border-color: var(--primary); }
+.tab-top.is-active:hover { background: var(--primary-soft); color: var(--primary); }
 .tab {
   font-family: inherit; font-size: var(--fs-sm); font-weight: 600;
   padding: 6px var(--s4);
