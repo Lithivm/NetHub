@@ -107,7 +107,7 @@ function showPage(name) {
   document.querySelectorAll('.page').forEach(p => p.classList.toggle('is-active', p.id === 'page-' + name));
   if (name === 'log') scrollLogToEnd();
   if (name === 'conn') loadConns();
-  if (name === 'diag') { precheckConfig(); loadTargetHealth(); }
+  if (name === 'diag') { precheckConfig(true); loadTargetHealth(); }
 }
 
 /* ═══════════════ 规则智能：最具体优先 / 命中查询 ═══════════════ */
@@ -200,7 +200,7 @@ async function loadService() {
 
 /* ═══════════════ 配置体检 / 备份 / 诊断包 ═══════════════ */
 
-async function precheckConfig() {
+async function precheckConfig(quiet) {
   const out = document.getElementById('precheckOut');
   if (!out) return;
   out.textContent = '正在体检…';
@@ -209,11 +209,11 @@ async function precheckConfig() {
   catch (e) { out.textContent = '体检失败：' + ((e && e.message) || e); return; }
   const rep = lines || [];
   out.textContent = rep.join('\n');
+  // 进页面自动跑的那次不弹提示（报告就在眼前）；手动点只报“有错”
   const bad = rep.filter(l => l.trim().startsWith('✗')).length;
-  const warn = rep.filter(l => l.trim().startsWith('⚠')).length;
-  if (bad) toast('体检发现问题', bad + ' 项错误、' + warn + ' 项提醒，看诊断页的报告', 'error');
-  else if (warn) toast('体检通过（有提醒）', warn + ' 项提醒，看诊断页的报告', 'warn');
-  else toast('体检通过', '没有发现问题', 'success');
+  if (!quiet && bad) {
+    toast('体检发现问题', bad + ' 项错误，见上方报告', 'error');
+  }
 }
 
 async function exportDiagnostics() {
@@ -957,7 +957,7 @@ function wire() {
   document.getElementById('explainIp').onkeydown = e => { if (e.key === 'Enter') explainTarget(); };
 
   // 设置页：体检 / 诊断包 / Windows 服务
-  document.getElementById('btnPrecheck').onclick = precheckConfig;
+  document.getElementById('btnPrecheck').onclick = () => precheckConfig(false);
   document.getElementById('btnDiag').onclick = exportDiagnostics;
   document.getElementById('btnSvcInstall').onclick = async () => {
     if (!await confirmBox('安装为 Windows 服务',
@@ -1119,7 +1119,6 @@ async function boot() {
   const panels = await Promise.allSettled([loadLogs(), loadChains(), loadRoutes(), loadSettings()]);
   await loadBackups();
   await loadService();
-  precheckConfig();   // 诊断页的报告先跑出来，切过去就有内容
   const bad = panels.filter(p => p.status === 'rejected');
   if (bad.length) {
     console.error('面板加载失败', bad.map(p => p.reason));
