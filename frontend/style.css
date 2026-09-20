@@ -630,3 +630,6 @@ code, .mono { font-family: var(--font-mono); }
 
 /* 规则重叠检查结果 */
 .ov-grid { grid-template-columns: minmax(160px, 1.1fr) minmax(140px, 1fr) minmax(200px, 1.4fr) minmax(220px, 1.4fr); }
+
+/* 链路表里的「凭据已加密」标签（口令封存后地址里就没有 auth= 了，必须说清楚） */
+.cred-tag { color: var(--ok, #2f9e5e); font-size: var(--fs-xs); font-weight: 600; }

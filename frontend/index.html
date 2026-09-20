@@ -331,9 +331,32 @@
         <div class="card-body form">
           <div class="pathline"><span class="hint">配置文件</span><code id="pathConfig">-</code></div>
           <div class="pathline"><span class="hint">日志文件</span><code id="pathLog">-</code></div>
+          <div class="pathline"><span class="hint">凭据保险箱</span><code id="pathSecrets">-</code></div>
           <div class="input-row">
             <button class="btn btn-sm" id="btnOpenConfig">打开配置文件</button>
             <button class="btn btn-sm" id="btnOpenDir">打开程序目录</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>关于</h2>
+          <span class="hint">版本、项目地址、许可</span>
+        </div>
+        <div class="card-body form">
+          <div class="pathline"><span class="hint">程序版本</span><code id="aboutVersion">-</code></div>
+          <div class="pathline"><span class="hint">运行环境</span><code id="aboutEnv">-</code></div>
+          <div class="input-row">
+            <button class="btn btn-sm btn-primary" id="btnOpenRepo">打开项目主页</button>
+            <button class="btn btn-sm" id="btnCopyRepo">复制地址</button>
+            <button class="btn btn-sm" id="btnOpenReleases">检查新版本</button>
+          </div>
+          <div class="hint">
+            项目地址 <code class="mono">github.com/Lithivm/NetHub</code>
+            —— 提问题、看更新都在那里（下载页就是 Releases）。<br>
+            本程序用 WinDivert 做流量接管（第三方组件，见程序目录的 <code>LICENSE</code>）；
+            界面是 Wails + WebView2。<b>不上传任何数据</b>：除了你要访问的内网目标和上游代理，它不连任何地方。
           </div>
         </div>
       </div>

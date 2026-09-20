@@ -130,3 +130,63 @@ func TestSealDisabledKeepsPlaintext(t *testing.T) {
 		t.Error("关掉加密后不该生成 secrets.dat")
 	}
 }
+
+// ⚠ 回归测试：界面上编辑链路时，表单里看不到已封存的口令 ——
+// 保存时绝不能把 secret 引用抹掉（否则就是真丢口令）。
+func TestUpdateChainKeepsSecret(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.yaml")
+	body := "relay: 127.0.0.1:0\n" +
+		"chains:\n  - name: 主链路\n    forward: socks5+tls://user:pw123@10.0.0.9:10080\n" +
+		"routes: []\n"
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Save(); err != nil { // 封存：forward 变成 10.0.0.9:10080 + secret
+		t.Fatal(err)
+	}
+	if cfg.Chains[0].Secret == "" {
+		t.Fatal("前置条件不成立：应该已封存")
+	}
+	if got := cfg.ChainCredUser(cfg.Chains[0]); got != "user" {
+		t.Errorf("账号名应能取到：%q", got)
+	}
+
+	// 模拟界面保存：表单里只有 host:port（没有凭据），还改了链路名
+	updated := Chain{Name: "改过名的主链路", Forward: "socks5+tls://10.0.0.9:10080"}
+	if err := cfg.UpdateChain("主链路", updated); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Chains[0].Secret == "" {
+		t.Fatal("保存时把 secret 引用抹掉了 —— 口令丢了")
+	}
+	// 还原后仍然带凭据
+	ups := cfg.UpstreamsResolved(cfg.Chains[0])
+	if len(ups) != 1 || !strings.Contains(ups[0], "pw123") {
+		t.Errorf("改完链路后口令应还可用：%v", ups)
+	}
+
+	// 反过来：用户明确填了新凭据 → 丢弃旧引用（保存时重新封存）
+	updated2 := Chain{Name: "改过名的主链路", Forward: "socks5+tls://newuser:newpw@10.0.0.9:10080"}
+	if err := cfg.UpdateChain("改过名的主链路", updated2); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Chains[0].Secret != "" {
+		t.Error("填了新凭据就该丢掉旧引用")
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	ups = cfg.UpstreamsResolved(cfg.Chains[0])
+	if len(ups) != 1 || !strings.Contains(ups[0], "newpw") {
+		t.Errorf("新凭据应生效：%v", ups)
+	}
+	raw, _ := os.ReadFile(p)
+	if strings.Contains(string(raw), "newpw") {
+		t.Error("新凭据保存后也该被封存（盘上不能有明文）")
+	}
+}

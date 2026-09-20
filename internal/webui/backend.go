@@ -151,6 +151,8 @@ type ChainView struct {
 	Note     string   `json:"note"`
 	// Secret 口令存在 DPAPI 保险箱里（界面显示“凭据已加密”，而不是把口令显示出来）
 	Secret bool `json:"secret"`
+	// CredUser 已封存口令的账号名（只显示账号，不显示口令，用来让人确认“还是我那个账号”）
+	CredUser string `json:"credUser"`
 }
 
 type RouteView struct {
@@ -295,6 +297,7 @@ func (b *Backend) GetChains() []ChainView {
 		out = append(out, ChainView{
 			Name: c.Name, Forward: first, Forwards: red,
 			Strategy: c.StrategyName(), Probe: c.ProbeInterval().String(), Note: c.Note,
+			Secret: c.Secret != "", CredUser: b.a.Cfg.ChainCredUser(c),
 		})
 	}
 	return out
@@ -1412,3 +1415,39 @@ func (b *Backend) SetSecrets(on bool) error {
 
 // intPtr 取个指针（给"区分没传与传了 0"的字段用）。
 func intPtr(v int) *int { return &v }
+
+// ───────── 关于 ─────────
+
+// Version 版本号（发布构建可用 -ldflags -X 覆盖）。
+var Version = "dev"
+
+// AboutView 关于卡的信息。
+type AboutView struct {
+	Version   string `json:"version"`
+	Repo      string `json:"repo"`
+	Releases  string `json:"releases"`
+	Elevated  bool   `json:"elevated"`
+	GoVersion string `json:"goVersion"`
+	ConfigDir string `json:"configDir"`
+}
+
+const (
+	repoURL     = "https://github.com/Lithivm/NetHub"
+	releasesURL = "https://github.com/Lithivm/NetHub/releases"
+)
+
+// GetAbout 版本与项目地址（界面「关于」卡用）。
+func (b *Backend) GetAbout() AboutView {
+	return AboutView{
+		Version:   Version,
+		Repo:      repoURL,
+		Releases:  releasesURL,
+		Elevated:  isElevated(),
+		GoVersion: runtime.Version(),
+		ConfigDir: dirOf(b.a.Cfg.Path()),
+	}
+}
+
+// OpenRepo / OpenReleases 打开浏览器。
+func (b *Backend) OpenRepo()     { openPath(repoURL) }
+func (b *Backend) OpenReleases() { openPath(releasesURL) }

@@ -51,6 +51,7 @@ docs/                    截图等
 export PATH="/c/Program Files/Go/bin:$PATH"                 # git-bash
 go build -tags production -ldflags "-H=windowsgui -s -w" -o run/nethub.exe .
 go test ./internal/...                                      # 全量测试
+pwsh -NoProfile -File ./local/check-ui.ps1                   # 前端自检（用假数据跑一遍 boot，抓“引用了不存在的函数”这类错）
 pwsh -NoProfile -File ./local/restart.ps1                   # 优雅重启 + 复测 6 个内网目标
 ```
 

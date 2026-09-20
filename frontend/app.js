@@ -547,6 +547,15 @@ async function loadChains() {
       (ups.length > 1 ? '  +' + (ups.length - 1) + ' 个' : ''));
     if (ups.length > 1) upCell.title = ups.join('\n');
     else upCell.title = ups[0];
+    // 口令封存后，上面的地址里就没有 auth= 了 —— 必须说清楚
+    // “不是被清掉了，而是挪到 secrets.dat 加密存着”，否则看起来就像配置丢了。
+    if (c.secret) {
+      const tag = el('span', 'cred-tag',
+        '  凭据已加密' + (c.credUser ? '（账号 ' + c.credUser + '）' : ''));
+      tag.title = '上游用户名/口令存在 secrets.dat（Windows DPAPI 加密，绑定本机与本用户），\n' +
+        '所以这里看不到 auth= 参数。要换账号：点「编辑」把完整 URL（含 user:pass@）填进去保存即可。';
+      upCell.appendChild(tag);
+    }
     row.appendChild(upCell);
 
     row.appendChild(healthCell(chainHealth[c.name]));
@@ -610,6 +619,16 @@ function chainForm(index, preset) {
   const forwards = textarea(ups.join('\n'),
     '一行一个上游。填多个就是故障转移/负载转移：\nsocks5+tls://host-a:10080?auth=…\nsocks5+tls://host-b:10080?auth=…', 3);
   forwards.classList.add('mono');
+  // 口令封存后，这里的 URL 是**不含凭据**的（因为口令在 secrets.dat）——
+  // 必须在表单里说清楚，否则会让人以为“我的 auth= 被谁删了”。
+  const credNote = el('div', 'hint');
+  if (src.secret) {
+    credNote.className = 'export-warn';
+    credNote.textContent = '⚠ 这条链的口令已加密保存在 secrets.dat（账号 ' + (src.credUser || '—') +
+      '）。上面地址里看不到 auth= 是正常的；保持原样点保存，口令不会丢。要换账号就把完整 URL（含 user:pass@）填进去。';
+  } else {
+    credNote.textContent = '上游 URL 里带 user:pass@ 或 ?auth=base64(user:pass) 都可以；保存时会被加密存进 secrets.dat（设置页可关）。';
+  }
 
   const strategy = el('select', 'input');
   [['failover', '故障转移（按顺序试，第一个能用的就用）'],
@@ -639,6 +658,7 @@ function chainForm(index, preset) {
   const nodes = [
     field('链名', name),
     field('上游', forwards, '支持 socks5 / socks5+tls / socks4 / http / https；旧 gost 脚本可直接导入'),
+    field('', credNote),
     field('', importBtn),
     field('策略', strategy, '多条上游时怎么挑：故障转移（默认）/ 轮询 / 随机'),
     field('健康探测', probe, '定时只探到代理这一段（不碰业务目标）；探到不通的会先排到最后'),
@@ -836,8 +856,7 @@ function ruleForm(index) {
   const oBlock = el('option', null, '阻断（丢弃）');
   oBlock.value = 'block';
   sel.appendChild(oBlock);
-  chains.forEach(c => {
-    const o = el('option', null, c.name + '   —   ' + (c.forward || ''));
+  chains.forEach(c => {    const o = el('option', null, c.name + '   —   ' + (c.forward || ''));
     o.value = c.name;
     sel.appendChild(o);
   });
@@ -1026,6 +1045,7 @@ async function loadSettings() {
   setChecked('setHostsManage', s.hostsManage);
   setValue('setHostsEntries', (s.hostsEntries || []).join('\n'));
   loadSecretsSetting();
+  loadAbout();
   setValue('setDialTimeout', s.dialTimeout || 5);
   setValue('setDialBudget', s.dialBudget || 10);
   setValue('setRaceAfter', s.raceAfter === 0 ? 0 : (s.raceAfter || 300));
@@ -1200,6 +1220,7 @@ function wire() {
   document.getElementById('btnSaveRestart').onclick = () => saveSettings(true);
   document.getElementById('btnOpenConfig').onclick = () => call('OpenConfigFile').catch(fail);
   document.getElementById('btnOpenDir').onclick = () => call('OpenProgramDir').catch(fail);
+  wireAbout();
   document.getElementById('btnExportCfg').onclick = async () => {
     try {
       const p = await call('ExportConfig');
@@ -1458,4 +1479,46 @@ async function importConfigFromURL() {
       await loadAll();
     }
   } catch (e) { fail(e); }
+}
+
+/* 关于卡 */
+function setText(id, t) {
+  const e = document.getElementById(id);
+  if (e) e.textContent = t == null ? '-' : String(t);
+}
+
+async function loadAbout() {
+  let v = null;
+  try { v = await call('GetAbout'); } catch (e) { return; }
+  if (!v) return;
+  setText('aboutVersion', v.version === 'dev' ? 'dev（本地构建）' : v.version);
+  setText('aboutEnv', (v.elevated ? '管理员运行' : '普通权限运行') + ' · ' + (v.goVersion || ''));
+  setText('pathSecrets', v.configDir ? (v.configDir + '\secrets.dat') : '-');
+  const repo = v.repo || 'https://github.com/Lithivm/NetHub';
+  state.repo = repo;
+}
+
+/* 关于卡的按钮 */
+function wireAbout() {
+  const elRepo = document.getElementById('btnOpenRepo');
+  if (elRepo) elRepo.onclick = () => call('OpenRepo').catch(fail);
+  const elRel = document.getElementById('btnOpenReleases');
+  if (elRel) elRel.onclick = () => call('OpenReleases').catch(fail);
+  const elCopy = document.getElementById('btnCopyRepo');
+  if (elCopy) {
+    elCopy.onclick = async () => {
+      const u = state.repo || 'https://github.com/Lithivm/NetHub';
+      try { await navigator.clipboard.writeText(u); toast('已复制', u, 'success'); }
+      catch (e) { toast('复制失败', '手动复制：' + u, 'warn'); }
+    };
+  }
+}
+
+/* 上游拨号：重置为默认（只回填输入框。保存与重启仍由用户决定 —— 不在用户没点保存时动线上服务） */
+function resetDialDefaults() {
+  setValue('setDialTimeout', 5);
+  setValue('setDialBudget', 10);
+  setValue('setRaceAfter', 300);
+  setValue('setWarm', 2);
+  toast('已填回默认值', '单次 5s / 总预算 10s / 竞速起跑 300ms / 预热 2 条。点「保存并重启」才生效。', 'success');
 }

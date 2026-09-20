@@ -280,7 +280,7 @@ func Default() *Config {
 		},
 		Routes: nil,
 		Hosts:  HostsCfg{Manage: false},
-		UI:     UICfg{Theme: "light"},
+		UI:     UICfg{Theme: "dark"}, // 默认深色：这程序多数时间在盯日志/连接表，深色看久了不刺眼
 	}
 }
 
@@ -763,6 +763,36 @@ func (c *Config) AddChain(ch Chain) error {
 	return nil
 }
 
+// chainHasCreds 这条链的上游 URL 里有没有明文凭据（user:pass@ 或 ?auth=）。
+func chainHasCreds(ch Chain) bool {
+	for _, raw := range ch.Upstreams() {
+		up, err := upstream.Parse(raw)
+		if err != nil {
+			continue
+		}
+		if up.Creds.User != "" || up.Creds.Pass != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// ChainCredUser 已封存口令的账号名（只给界面显示"账号还是那个"，不暴露口令）。
+func (c *Config) ChainCredUser(ch Chain) string {
+	if ch.Secret == "" {
+		return ""
+	}
+	store := c.Secrets()
+	if store == nil {
+		return ""
+	}
+	cred := store.Get(ch.Secret)
+	if i := strings.Index(cred, ":"); i >= 0 {
+		return cred[:i]
+	}
+	return cred
+}
+
 // UpdateChain 把 oldName 这条链替换成 ch（允许改名）。
 func (c *Config) UpdateChain(oldName string, ch Chain) error {
 	i := c.FindChain(oldName)
@@ -773,6 +803,16 @@ func (c *Config) UpdateChain(oldName string, ch Chain) error {
 		return fmt.Errorf("链名 %q 已存在", ch.Name)
 	}
 	old := c.Chains[i]
+	// ⚠ 关键：界面上编辑链路时，表单里看不到已封存的口令（forward 只剩 host:port），
+	// 如果直接整体替换，就会把 secret: 引用一并抹掉 —— 那才是真丢口令。
+	// 所以：新写法里没有凭据时，继承旧的 secret 引用；
+	// 若用户确实填了新凭据（URL 里带 user:pass@），则丢掉旧引用，交给保存时重新封存。
+	if ch.Secret == "" && old.Secret != "" && !chainHasCreds(ch) {
+		ch.Secret = old.Secret
+	}
+	if chainHasCreds(ch) {
+		ch.Secret = ""
+	}
 	c.Chains[i] = ch
 	if ch.Name != oldName {
 		// 改名同步改所有引用
