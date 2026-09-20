@@ -13,7 +13,7 @@ let chains = [];
 let chainHealth = {};   // 链名 → 上游健康快照
 let routes = [];
 let conns = [];
-let lastPrecheck = [];   // 最近一次体检报告（一键诊断的汇总要用）
+let lastPrecheck = [];   // 最近一次体检报告（诊断页那张卡渲染用）
 let autoScrollLog = true;
 
 /* ═══════════════ 基础工具 ═══════════════ */
@@ -250,46 +250,7 @@ async function loadService() {
   }
 }
 
-/* ═══════════════ 一键诊断 / 巡检设置 ═══════════════ */
-
-/* 四项全跑一遍：体检 → 巡检 → 共存 → 自检，然后在卡片里给一句汇总。 */
-async function runAllDiagnostics() {
-  const sum = document.getElementById('diagSummary');
-  if (sum) sum.textContent = '正在跑：体检 → 巡检 → 共存检测 → 链路自检（自检要几十秒，结果在下面各卡）…';
-
-  await precheckConfig(true);
-  try { await call('ProbeTargetsNow'); } catch (e) { /* 引擎没起就算了 */ }
-  await new Promise(r => setTimeout(r, 2500));
-  await loadTargetHealth();
-  try { await clashCheck(); } catch (e) { /* 只读检测，失败不影响其他项 */ }
-  const btn = document.getElementById('btnSelfTest');
-  if (btn) btn.onclick();
-  await new Promise(r => setTimeout(r, 9000)); // 自检是流式的，等它跑完
-  await updateDiagSummary();
-}
-
-async function updateDiagSummary() {
-  const sum = document.getElementById('diagSummary');
-  if (!sum) return;
-  const parts = [];
-  const bad = lastPrecheck.filter(l => l.trim().startsWith('✗')).length;
-  const warn = lastPrecheck.filter(l => l.trim().startsWith('⚠')).length;
-  parts.push('体检：' + (bad ? bad + ' 项错误' : '通过') + (warn ? '（' + warn + ' 项提醒）' : ''));
-  try {
-    const hs = await call('GetChainHealth');
-    let ok = 0, total = 0;
-    (hs || []).forEach(h => (h.upstreams || []).forEach(u => { total++; if (u.known && u.ok) ok++; }));
-    parts.push('上游：' + ok + '/' + total + ' 可用');
-  } catch (e) { /* 拿不到就不报这一项 */ }
-  try {
-    const ts = await call('GetTargetHealth');
-    const list = ts || [];
-    const badT = list.filter(t => !t.ok).length;
-    parts.push('目标巡检：' + (list.length ? ((list.length - badT) + '/' + list.length + ' 可达') : '暂无目标'));
-  } catch (e) { /* 同上 */ }
-  sum.textContent = '最近一次诊断（' + now().slice(0, 8) + '）：' + parts.join('　|　') +
-    '　—— Clash 共存结论见最下面那张卡';
-}
+/* ═══════════════ 巡检设置 ═══════════════ */
 
 /* 巡检的开关与间隔（用户自己定） */
 async function loadPatrol() {
@@ -1104,8 +1065,7 @@ function wire() {
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) explainTarget();
   };
 
-  // 诊断页：一键诊断 / 巡检设置
-  document.getElementById('btnDiagAll').onclick = runAllDiagnostics;
+  // 诊断页：巡检设置
   document.getElementById('btnPatrolSave').onclick = savePatrol;
 
   // 设置页：体检 / 诊断包 / Windows 服务
