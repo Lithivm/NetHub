@@ -342,21 +342,32 @@
       <div class="card">
         <div class="card-head">
           <h2>关于</h2>
-          <span class="hint">版本、项目地址、许可</span>
         </div>
         <div class="card-body form">
-          <div class="pathline"><span class="hint">程序版本</span><code id="aboutVersion">-</code></div>
-          <div class="pathline"><span class="hint">运行环境</span><code id="aboutEnv">-</code></div>
+          <!-- 第一行：左边 GitHub 标识+链接，右边检查更新 -->
           <div class="input-row">
-            <button class="btn btn-sm btn-primary" id="btnOpenRepo">打开项目主页</button>
-            <button class="btn btn-sm" id="btnCopyRepo">复制地址</button>
-            <button class="btn btn-sm" id="btnOpenReleases">检查新版本</button>
+            <a class="repo-link" id="repoLink" href="https://github.com/Lithivm/NetHub" target="_blank" rel="noreferrer">
+              <svg class="gh-logo" viewBox="0 0 16 16" aria-hidden="true">
+                <path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/>
+              </svg>
+              <span>github.com/Lithivm/NetHub</span>
+            </a>
+            <div class="spacer"></div>
+            <button class="btn btn-sm" id="btnCheckUpdate">检查更新</button>
           </div>
-          <div class="hint">
-            项目地址 <code class="mono">github.com/Lithivm/NetHub</code>
-            —— 提问题、看更新都在那里（下载页就是 Releases）。<br>
-            本程序用 WinDivert 做流量接管（第三方组件，见程序目录的 <code>LICENSE</code>）；
-            界面是 Wails + WebView2。<b>不上传任何数据</b>：除了你要访问的内网目标和上游代理，它不连任何地方。
+
+          <!-- 第二行：Go 版本 / 软件版本 -->
+          <div class="input-row">
+            <span class="hint">Go 版本</span>
+            <code id="aboutGo">-</code>
+            <span class="hint" style="margin-left:var(--s4)">软件版本</span>
+            <code id="aboutVersion">-</code>
+          </div>
+
+          <!-- 第三行：开源协议（行业惯例写法，纯英文） -->
+          <div class="about-legal">
+            © 2026 Lithivm. Released under the MIT License.<br>
+            Bundles WinDivert (LGPL-3.0). Built with Go, Wails and WebView2.
           </div>
         </div>
       </div>

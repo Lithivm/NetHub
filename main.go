@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/wailsapp/wails/v2"
@@ -39,6 +40,7 @@ import (
 	"nethub/internal/config"
 	"nethub/internal/gostbat"
 	"nethub/internal/logbus"
+	"nethub/internal/selfupdate"
 	"nethub/internal/webui"
 	"nethub/internal/winsvc"
 )
@@ -58,9 +60,46 @@ func main() {
 	svcUninstall := flag.Bool("service-uninstall", false, "卸载 Windows 服务，随后退出")
 	svcState := flag.Bool("service-state", false, "打印 Windows 服务状态，随后退出")
 	doQuit := flag.Bool("quit", false, "请已在运行的界面版优雅退出（会先停服务、移除托盘图标），随后退出")
+	verFlag := flag.Bool("version", false, "打印版本号，随后退出")
+	rollbackFlag := flag.Bool("rollback", false, "回滚到上一版本并重启（一键更新出问题时用），随后退出")
+	afterUpdate := flag.Bool("after-update", false, "更新收尾：先等旧进程退出，再替换被占用的文件（由一键更新自动拉起）")
 	clashCheck := flag.Bool("clash-check", false, "只检测系统代理/Clash 会不会把内网送进代理，然后退出（不需管理员）")
 	upTest := flag.Bool("test-upstream", false, "直接实测原生上游链路（不经 gost），然后退出（不需管理员）")
 	flag.Parse()
+
+	if *verFlag {
+		fmt.Println(webui.Version)
+		return
+	}
+
+	// -rollback：一键更新出问题时回到上一版本（把 nethub.exe.old 换回来）
+	if *rollbackFlag {
+		progDir := filepath.Dir(exePath())
+		if !selfupdate.HasRollback(progDir) {
+			fmt.Println("没有可回滚的上一版本（nethub.exe.old 不存在）")
+			return
+		}
+		if err := selfupdate.Rollback(progDir); err != nil {
+			fatal("回滚失败: %v", err)
+		}
+		fmt.Println("已回滚上一版本，请手动启动 nethub.exe（或等开机自启）")
+		return
+	}
+
+	// -after-update：一键更新的收尾。必须放在**任何东西之前** ——
+	// 因为要替换的 WinDivert.dll 一旦被本进程加载就换不掉了。
+	if *afterUpdate {
+		progDir := filepath.Dir(exePath())
+		done, err := selfupdate.ApplyPending(progDir, waitProcGone)
+		selfupdate.CleanupStale(progDir)
+		if len(done) > 0 {
+			fmt.Println("更新收尾完成：" + selfupdate.Describe(done))
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "更新收尾未完成："+err.Error())
+		}
+		// 继续正常启动
+	}
 
 	// -quit：请运行中的界面版优雅退出（重启脚本用）。
 	// 强杀进程会让托盘图标变成“僵尸”，鼠标扫过才会消失；走这条路就没有。
@@ -342,4 +381,41 @@ func doImportBats(cfgPath, dir string) error {
 func fatal(format string, a ...any) {
 	log.SetFlags(0)
 	log.Fatalf(format, a...)
+}
+
+// exePath 自身路径（拿不到就用相对名兜底）。
+func exePath() string {
+	if p, err := os.Executable(); err == nil && p != "" {
+		return p
+	}
+	return "nethub.exe"
+}
+
+// waitProcGone 等某个 PID 消失（更新收尾用：旧进程不退，文件就换不掉）。
+func waitProcGone(pid int, max time.Duration) bool {
+	if pid <= 0 {
+		return true
+	}
+	deadline := time.Now().Add(max)
+	for time.Now().Before(deadline) {
+		if !procAlive(pid) {
+			return true
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return false
+}
+
+// procAlive 这个 PID 还在不在（用 FindProcess + OpenProcess 判活）。
+func procAlive(pid int) bool {
+	const processQueryLimitedInformation = 0x1000
+	k := windows.NewLazySystemDLL("kernel32.dll")
+	open := k.NewProc("OpenProcess")
+	h, _, _ := open.Call(processQueryLimitedInformation, 0, uintptr(pid))
+	if h == 0 {
+		return false
+	}
+	closeH := k.NewProc("CloseHandle")
+	closeH.Call(h)
+	return true
 }

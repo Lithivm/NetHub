@@ -633,3 +633,22 @@ code, .mono { font-family: var(--font-mono); }
 
 /* 链路表里的「凭据已加密」标签（口令封存后地址里就没有 auth= 了，必须说清楚） */
 .cred-tag { color: var(--ok, #2f9e5e); font-size: var(--fs-xs); font-weight: 600; }
+
+/* 关于卡：GitHub 标识 + 链接（内嵌 SVG，不依赖网络） */
+.repo-link {
+  display: inline-flex; align-items: center; gap: var(--s2);
+  color: var(--ink); text-decoration: none;
+  font-weight: 600; font-family: var(--font-mono); font-size: var(--fs-sm);
+}
+.repo-link:hover { color: var(--primary); }
+.repo-link:hover span { text-decoration: underline; }
+.gh-logo { width: 18px; height: 18px; flex: 0 0 auto; }
+
+/* 关于卡第三行：开源协议（居中小字，行业惯例的英文写法） */
+.about-legal {
+  margin-top: var(--s2);
+  text-align: center;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  line-height: 1.7;
+}

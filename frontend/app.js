@@ -1251,7 +1251,7 @@ function wire() {
       const p = await call('ImportConfig');
       if (p) {
         toast('已导入配置并重启', p, 'success');
-        await loadAll();
+        await reloadAll();
       }
     } catch (e) { fail(e); }
   };
@@ -1476,7 +1476,7 @@ async function importConfigFromURL() {
     const p = await call('ImportConfigFromURL', url);
     if (p) {
       toast('已从地址导入配置并重启', p, 'success');
-      await loadAll();
+      await reloadAll();
     }
   } catch (e) { fail(e); }
 }
@@ -1491,27 +1491,79 @@ async function loadAbout() {
   let v = null;
   try { v = await call('GetAbout'); } catch (e) { return; }
   if (!v) return;
-  setText('aboutVersion', v.version === 'dev' ? 'dev（本地构建）' : v.version);
-  setText('aboutEnv', (v.elevated ? '管理员运行' : '普通权限运行') + ' · ' + (v.goVersion || ''));
+  setText('aboutGo', v.goVersion || '-');
+  setText('aboutVersion', v.version === 'dev' ? 'dev' : v.version);
   setText('pathSecrets', v.configDir ? (v.configDir + '\secrets.dat') : '-');
-  const repo = v.repo || 'https://github.com/Lithivm/NetHub';
-  state.repo = repo;
+  state.repo = v.repo || 'https://github.com/Lithivm/NetHub';
+  const link = document.getElementById('repoLink');
+  if (link) link.href = state.repo;
 }
 
-/* 关于卡的按钮 */
+/* 关于卡：同一个按钮两种状态 —— 没新版时是「检查更新」，查到新版就变成「下载并更新」。
+   过程与结果都走 toast 与按钮文字，卡片里不堆说明文字。 */
 function wireAbout() {
-  const elRepo = document.getElementById('btnOpenRepo');
-  if (elRepo) elRepo.onclick = () => call('OpenRepo').catch(fail);
-  const elRel = document.getElementById('btnOpenReleases');
-  if (elRel) elRel.onclick = () => call('OpenReleases').catch(fail);
-  const elCopy = document.getElementById('btnCopyRepo');
-  if (elCopy) {
-    elCopy.onclick = async () => {
-      const u = state.repo || 'https://github.com/Lithivm/NetHub';
-      try { await navigator.clipboard.writeText(u); toast('已复制', u, 'success'); }
-      catch (e) { toast('复制失败', '手动复制：' + u, 'warn'); }
-    };
+  const btn = document.getElementById('btnCheckUpdate');
+  if (!btn) return;
+  let pending = null;
+  btn.onclick = async () => {
+    if (pending) return startUpdate(btn, pending);
+    btn.disabled = true;
+    btn.textContent = '检查中…';
+    try {
+      const v = await call('CheckUpdate');
+      if (v && v.hasNew) {
+        pending = v;
+        btn.textContent = '下载并更新';
+        btn.className = 'btn btn-sm btn-primary';
+        toast('有新版本 ' + v.latest, '当前 ' + v.current + '。点「下载并更新」会自动升级并重启。', 'success');
+      } else {
+        btn.textContent = '检查更新';
+        toast('检查更新', (v && v.note) ? v.note : '没拿到结果。', 'info');
+      }
+    } catch (e) {
+      btn.textContent = '检查更新';
+      fail(e);
+    } finally { btn.disabled = false; }
+  };
+}
+
+/* 一键更新：确认 → 下载（进度写在按钮上）→ 校验 → 替换 → 自动重启 */
+async function startUpdate(btn, info) {
+  const ok = await confirmBox('下载并更新到 ' + info.latest,
+    '会从 GitHub 下载新版本、校验完整性、替换程序文件，然后自动重启。\n' +
+    '重启时隧道会中断几秒；上一版本保留为 nethub.exe.old，出问题可回滚（命令行 nethub.exe -rollback）。',
+    false, '开始更新');
+  if (!ok) return;
+  btn.disabled = true;
+  btn.textContent = '准备中…';
+  try {
+    await call('DownloadAndUpdate');
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = '下载并更新';
+    return fail(e);
   }
+  const tick = setInterval(async () => {
+    let s = null;
+    try { s = await call('GetUpdateStatus'); } catch (e) { return; }
+    if (!s) return;
+    if (s.stage === 'download') btn.textContent = s.percent >= 0 ? ('下载中 ' + s.percent + '%') : '下载中…';
+    else if (s.stage === 'verify') btn.textContent = '校验中…';
+    else if (s.stage === 'stage') btn.textContent = '解包中…';
+    else if (s.stage === 'swap' || s.stage === 'restart') btn.textContent = '重启中…';
+    if (s.stage === 'error' || s.stage === 'done') {
+      clearInterval(tick);
+      btn.disabled = false;
+      if (s.stage === 'error') {
+        btn.textContent = '下载并更新';
+        toast('更新失败', s.err || s.text || '', 'error');
+      } else {
+        btn.textContent = '检查更新';
+        btn.className = 'btn btn-sm';
+        toast('检查更新', s.text || '', 'info');
+      }
+    }
+  }, 500);
 }
 
 /* 上游拨号：重置为默认（只回填输入框。保存与重启仍由用户决定 —— 不在用户没点保存时动线上服务） */
@@ -1521,4 +1573,20 @@ function resetDialDefaults() {
   setValue('setRaceAfter', 300);
   setValue('setWarm', 2);
   toast('已填回默认值', '单次 5s / 总预算 10s / 竞速起跑 300ms / 预热 2 条。点「保存并重启」才生效。', 'success');
+}
+
+
+/* 导入配置（本地文件 / 从地址）后把界面整体刷一遍。
+   之前这里调用的函数根本不存在（名字不写在这里，免得自检把它当成一处调用），导入成功后界面会直接抛错、停在不刷新状态。 */
+async function reloadAll() {
+  await Promise.all([
+    loadChains(),
+    loadRoutes(),
+    loadSettings(),
+    loadBackups(),
+    loadConns(),
+    loadTargetHealth(),
+    precheckConfig(true),
+  ]);
+  await refreshState();
 }
