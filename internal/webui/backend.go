@@ -653,13 +653,7 @@ func (b *Backend) RestoreBackup(name string) error {
 		return err
 	}
 	*b.a.Cfg = *cur
-	// 导入进来的口令是明文的（导出件为了“一个文件就能用”必须带明文），
-	// 在本机落地时立即封进 DPAPI 保险箱 —— 之后盘上就不再有明文口令了。
-	if cur.SealEnabled() {
-		if err := b.a.Cfg.Save(); err != nil {
-			b.a.Bus.Warn("导入的配置已生效，但封存凭据失败（口令仍是明文）: %v", err)
-		}
-	} // 同一个指针：引擎/规则看到的就是新配置（path 也一并带过来）
+	// 同一个指针：引擎/规则看到的就是新配置（path 也一并带过来）
 	b.a.Bus.Warn("已回滚配置：%s（当前配置已自动备份）", name)
 	return b.a.Restart()
 }
@@ -1454,10 +1448,10 @@ func (b *Backend) ExportConfig() (string, error) {
 	if !strings.HasSuffix(strings.ToLower(path), ".yaml") && !strings.HasSuffix(strings.ToLower(path), ".yml") {
 		path += ".yaml"
 	}
-	if err := b.a.Cfg.ExportPlain(path); err != nil {
+	if err := b.a.Cfg.SaveAs(path); err != nil {
 		return "", err
 	}
-	b.a.Bus.Info("设置已导出到 %s（含上游凭据，请通过安全渠道分发）", path)
+	b.a.Bus.Info("设置已导出到 %s（含明文口令，别发到群里/仓库）", path)
 	return path, nil
 }
 
@@ -1591,46 +1585,6 @@ func (b *Backend) CheckOverlaps() OverlapResult {
 }
 
 // ───────── 凭据加密开关（A18）─────────
-
-// SecretsSetting 凭据是否加密保存。
-type SecretsSetting struct {
-	On      bool     `json:"on"`
-	Path    string   `json:"path"`
-	Names   []string `json:"names"`
-	Pending int      `json:"pending"` // 还有几条链的口令是明文（保存一次即封存）
-	Err     string   `json:"err"`
-}
-
-// GetSecretsSetting 当前凭据加密设置与保险箱状态。
-func (b *Backend) GetSecretsSetting() SecretsSetting {
-	return SecretsSetting{
-		On:      b.a.Cfg.SealEnabled(),
-		Path:    b.a.Cfg.SecretsPath(),
-		Names:   b.a.Cfg.SecretNames(),
-		Pending: b.a.Cfg.PendingPlaintext(),
-		Err:     b.a.Cfg.SecretsError(),
-	}
-}
-
-// SetSecrets 开关凭据加密。打开时立即把现有的明文口令封存进保险箱。
-func (b *Backend) SetSecrets(on bool) error {
-	if on {
-		v := true
-		b.a.Cfg.Tuning.Secrets = &v
-	} else {
-		v := false
-		b.a.Cfg.Tuning.Secrets = &v
-	}
-	if err := b.a.SaveConfig(); err != nil {
-		return err
-	}
-	if on {
-		b.a.Bus.Info("已开启凭据加密：上游口令存进 secrets.dat（Windows DPAPI，换机器解不开）")
-	} else {
-		b.a.Bus.Warn("已关闭凭据加密：上游口令会以明文写在 config.yaml 里")
-	}
-	return nil
-}
 
 // intPtr 取个指针（给"区分没传与传了 0"的字段用）。
 func intPtr(v int) *int { return &v }

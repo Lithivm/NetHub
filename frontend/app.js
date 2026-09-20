@@ -584,8 +584,8 @@ async function loadChains() {
     if (c.auth) {
       const tag = el('span', 'cred-tag',
         '  带凭据' + (c.credUser ? '（' + c.credUser + '）' : ''));
-      tag.title = '这条链的上游需要认证，凭据加过密存在 secrets.dat 里。\n' +
-        '要看/改真实地址（含账号口令）：点「编辑」，里面是明文。';
+      tag.title = '这条链的上游需要认证（地址里带账号口令，明文存在 config.yaml）。\n' +
+        '要看/改真实地址：点「编辑」，里面就是完整地址。';
       upCell.appendChild(tag);
     } else {
       const tag = el('span', 'cred-tag', '  无凭据');
@@ -670,10 +670,10 @@ async function chainForm(index, preset) {
   const credNote = el('div', 'hint');
   if (src.auth) {
     credNote.className = 'export-warn';
-    credNote.textContent = '⚠ 上面是**明文**（含账号口令）。保存时会加密存进 secrets.dat，' +
-      'config.yaml 里只留一个引用（账号 ' + (src.credUser || '—') + '）。';
+    credNote.textContent = '⚠ 上面就是完整地址（含账号口令）。保存后也**明文**写在 config.yaml 里' +
+      '（和 gost 的启动脚本一样），账号 ' + (src.credUser || '—') + '。';
   } else {
-    credNote.textContent = '上游 URL 里带 user:pass@ 或 ?auth=base64(user:pass) 都可以；保存时会加密存进 secrets.dat（设置页可关）。';
+    credNote.textContent = '上游 URL 里带 user:pass@ 或 ?auth=base64(user:pass) 都可以；保存后明文写在 config.yaml 里，别外传。';
   }
 
   const strategy = el('select', 'input');
@@ -700,7 +700,7 @@ async function chainForm(index, preset) {
     } catch (e) { modal.error(fail(e)); }
   });
 
-  const warn = el('p', 'hint', '凭据保存进 secrets.dat（加密），config.yaml 里只留引用；导出配置时可以选“含凭据”。');
+  const warn = el('p', 'hint', '口令是明文存在 config.yaml 里（和 gost 脚本一样）—— 别提交进 git、别发群里。');
   const nodes = [
     field('链名', name),
     field('上游', forwards, '支持 socks5 / socks5+tls / socks4 / http / https；旧 gost 脚本可直接导入'),
@@ -994,7 +994,7 @@ function ruleForm(index) {
   const nodes = [
     field('规则名', name, '给这条规则起个名字（可留空）'),
     field('目标', targetsBox,
-      '单个 IP 会自动存成 /32；填多个目标就是同一条规则 —— 命中其中任意一个都走下面这个动作'),
+      "单个 IP 会自动存成 /32；也可以直接写域名（main.his.com）；填多个目标就是同一条规则 —— 命中其中任意一个都走下面这个动作"),
     field('端口', ports,
       '留空 = 任意端口。填了就要求「目标命中 且 端口命中」；' +
       '想排除某个端口（比如 Windows 更新的 7680），把它写成前面一条「直连」规则、端口只填那个端口'),
@@ -1236,7 +1236,6 @@ async function loadSettings() {
   // 那会抛 TypeError 把 boot() 整个搞挂，导致状态轮询都注册不上）
   setChecked('setHostsManage', s.hostsManage);
   setValue('setHostsEntries', (s.hostsEntries || []).join('\n'));
-  loadSecretsSetting();
   loadAbout();
   setValue('setDialTimeout', s.dialTimeout || 5);
   setValue('setDialBudget', s.dialBudget || 10);
@@ -1417,24 +1416,17 @@ function wire() {
   document.getElementById('btnExportCfg').onclick = async () => {
     try {
       const p = await call('ExportConfig');
-      if (p) toast('已导出配置', p + '　（含上游凭据；新机器上「导入配置」选它即可开箱即用。请私发）', 'success');
+      if (p) toast('已导出配置', p + '　（里面是明文上游口令：新机器上「导入配置」选它即可开箱即用；别发群里）', 'success');
     } catch (e) { fail(e); }
   };
   document.getElementById('btnExportDoc').onclick = async () => {
     try {
       const p = await call('ExportConfigRedacted');
-      if (p) toast('已导出无凭据配置', p + '　（同样可导入，但需补上游口令；可安全发送）', 'success');
+      if (p) toast('已导出（口令已抹掉）', p + '　（可以发给别人看配置；导入后需补上游口令）', 'success');
     } catch (e) { fail(e); }
   };
   document.getElementById('btnDialReset').onclick = resetDialDefaults;
   document.getElementById('btnImportURL').onclick = importConfigFromURL;
-  document.getElementById('setSecrets').onchange = async (ev) => {
-    try {
-      await call('SetSecrets', ev.target.checked);
-      toast('已保存', ev.target.checked ? '现有明文口令已封存进 secrets.dat' : '口令会以明文写在 config.yaml 里', 'success');
-      await loadSecretsSetting();
-    } catch (e) { fail(e); ev.target.checked = !ev.target.checked; }
-  };
   document.getElementById('btnImportCfg').onclick = async () => {
     const ok = await confirmBox('导入配置',
       '会先用新配置做一次完整校验，通过后自动备份当前配置再生效并重启服务。校验不过则什么都不改。确定继续？',
@@ -1634,33 +1626,6 @@ async function checkOverlaps() {
   modal.open('规则重叠检查', [box], null);
 }
 
-/* 凭据加密开关（A18） */
-async function loadSecretsSetting() {
-  const cb = document.getElementById('setSecrets');
-  const info = document.getElementById('secretsInfo');
-  if (!cb) return;
-  let v = null;
-  try { v = await call('GetSecretsSetting'); } catch (e) { return; }
-  if (!v) return;
-  cb.checked = !!v.on;
-  if (!info) return;
-  if (v.err) {
-    info.className = 'export-warn';
-    info.textContent = '⚠ 凭据保险箱有问题：' + v.err;
-    return;
-  }
-  info.className = 'hint';
-  if (!v.on) {
-    info.textContent = '当前：明文。上游口令就写在 config.yaml 的 forward 里。';
-  } else if (v.pending > 0) {
-    info.className = 'export-warn';
-    info.textContent = '当前：加密已开，但配置文件里还有 ' + v.pending + ' 条明文口令 —— 点一下「保存设置」（或随便改个设置保存）就会封存进 secrets.dat。';
-  } else {
-    info.textContent = '当前：加密。口令存在 ' + (v.path || 'secrets.dat') +
-      (v.names && v.names.length ? '（已封存 ' + v.names.length + ' 条：' + v.names.join('、') + '）' : '（暂时没有需要封存的口令）');
-  }
-}
-
 /* 从 URL 导入配置（团队统一下发的最小形态） */
 async function importConfigFromURL() {
   const el = document.getElementById('importURL');
@@ -1689,7 +1654,6 @@ async function loadAbout() {
   if (!v) return;
   setText('aboutGo', v.goVersion || '-');
   setText('aboutVersion', v.version === 'dev' ? 'dev' : v.version);
-  setText('pathSecrets', v.configDir ? (v.configDir + '\secrets.dat') : '-');
   state.repo = v.repo || 'https://github.com/Lithivm/NetHub';
   const link = document.getElementById('repoLink');
   if (link) link.href = state.repo;

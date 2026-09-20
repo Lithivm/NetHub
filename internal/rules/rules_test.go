@@ -234,3 +234,51 @@ func TestNeedsProcFalse(t *testing.T) {
 }
 
 func parseIP4(s string) net.IP { return net.ParseIP(s).To4() }
+
+// 域名目标：解析出来的 IP 参与匹配，过滤器也要把它包含进去。
+func TestHostnameTarget(t *testing.T) {
+	s := New()
+	if err := s.Load([]Route{
+		{Name: "按域名", Targets: []string{"main.his.com"}, Chain: "tun"},
+		{Name: "按网段", Targets: []string{"10.0.0.0/8"}, Chain: "tun"},
+	}); err != nil {
+		t.Fatalf("载入失败（域名目标应该被接受）: %v", err)
+	}
+	if got := s.HostTargets(); len(got) != 1 || got[0] != "main.his.com" {
+		t.Fatalf("HostTargets = %v", got)
+	}
+	// 解析之前：域名那条不匹配任何东西（也不该崩）
+	if _, _, ok := s.Match(net.ParseIP("172.30.4.217"), 443); ok {
+		t.Error("还没解析时不该命中域名规则")
+	}
+	// 过滤器：解析前不该出现域名那个 IP（而**不能**退化成拦全部）
+	for _, rg := range s.FilterRanges(false) {
+		if rg.First == 0 && rg.Last == 0xFFFFFFFF {
+			t.Fatalf("解析不出来时不该拦全部流量（性能地雷）: %+v", rg)
+		}
+		if rg.First <= IP2U(net.ParseIP("172.30.4.217").To4()) && IP2U(net.ParseIP("172.30.4.217").To4()) <= rg.Last {
+			t.Errorf("解析前不该包含域名那个 IP: %+v", rg)
+		}
+	}
+
+	// 引擎解析完之后填进来 → 匹配与过滤器都要生效
+	s.SetHostIPs(map[string][]*net.IPNet{
+		"main.his.com": {{IP: net.ParseIP("172.30.4.217").To4(), Mask: net.CIDRMask(32, 32)}},
+	})
+	if chain, _, ok := s.Match(net.ParseIP("172.30.4.217"), 443); !ok || chain != "tun" {
+		t.Errorf("解析后应命中域名规则，得到 %q ok=%v", chain, ok)
+	}
+	var hasHostIP bool
+	for _, rg := range s.FilterRanges(false) {
+		if rg.First == IP2U(net.ParseIP("172.30.4.217").To4()) && rg.Last == rg.First {
+			hasHostIP = true
+		}
+	}
+	if !hasHostIP {
+		t.Error("过滤器要包含域名解析出的 IP（否则包根本到不了我们手上）")
+	}
+	// 通配域名：明确拒绝，并把替代方案说出来
+	if err := New().Load([]Route{{Targets: []string{"main.*.com"}, Chain: "tun"}}); err == nil {
+		t.Error("通配域名暂时应被拒绝")
+	}
+}

@@ -1,7 +1,6 @@
 package config
 
 import (
-	"fmt"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -51,26 +50,7 @@ func (c *Config) Secrets() *secret.Store {
 	return s
 }
 
-// SecretsError 保险箱加载失败的原因（界面显示用）。
-func (c *Config) SecretsError() string {
-	c.Secrets()
-	secretMu.Lock()
-	defer secretMu.Unlock()
-	if secretErr == nil {
-		return ""
-	}
-	return secretErr.Error()
-}
-
-// SecretsPath 保险箱文件路径。
-func (c *Config) SecretsPath() string {
-	if s := c.Secrets(); s != nil {
-		return s.Path()
-	}
-	return ""
-}
-
-// dir 配置所在目录（保险箱跟配置放一起）。
+// dir 配置所在目录（历史遗留的 secrets.dat 跟配置放一起）。
 func (c *Config) dir() string {
 	if c.path == "" {
 		return ""
@@ -80,60 +60,6 @@ func (c *Config) dir() string {
 		return ""
 	}
 	return d
-}
-
-// SealEnabled 凭据是否加密保存（默认开：没写就是开）。
-func (c *Config) SealEnabled() bool {
-	if c.Tuning.Secrets == nil {
-		return true
-	}
-	return *c.Tuning.Secrets
-}
-
-// sealLocked 把明文口令挪进保险箱，配置里只留 secret: 引用。
-// 只在"单上游 + 有凭据"时做（多上游的每条口令要多个名字，先不引入这份复杂度）。
-// 返回改动过的链数量。
-func (c *Config) sealLocked() (int, error) {
-	if !c.SealEnabled() {
-		return 0, nil
-	}
-	store := c.Secrets()
-	if store == nil {
-		return 0, fmt.Errorf("凭据保险箱不可用：%s", c.SecretsError())
-	}
-	changed := 0
-	for i := range c.Chains {
-		ch := &c.Chains[i]
-		// 多上游不处理（保持明文），免得多出口场景配不明白
-		if len(ch.Forwards) > 1 {
-			continue
-		}
-		raw := ch.Forward
-		if raw == "" && len(ch.Forwards) == 1 {
-			raw = ch.Forwards[0]
-		}
-		if strings.TrimSpace(raw) == "" {
-			continue
-		}
-		up, err := upstream.Parse(raw)
-		if err != nil {
-			continue // 解析不了就交给校验去报错
-		}
-		if up.Creds.User == "" && up.Creds.Pass == "" {
-			continue // 没凭据，无需处理
-		}
-		name := "chain-" + ch.Name
-		if strings.TrimSpace(ch.Name) == "" {
-			name = fmt.Sprintf("chain-%d", i+1)
-		}
-		if err := store.Put(name, up.Creds.User+":"+up.Creds.Pass); err != nil {
-			return changed, fmt.Errorf("写凭据保险箱失败：%w", err)
-		}
-		pub := publicURL(up)
-		ch.Forward, ch.Forwards, ch.Secret = pub, nil, name
-		changed++
-	}
-	return changed, nil
 }
 
 // publicURL 去掉凭据、保留协议与地址（可被 upstream.Parse 解析）。
@@ -148,7 +74,10 @@ func publicURL(up *upstream.Upstream) string {
 	return scheme + "://" + up.Addr
 }
 
-// UpstreamsResolved 把 secret: 引用还原成带凭据的上游 URL（引擎拨号/探测用）。
+// UpstreamsResolved 把历史遗留的 secret: 引用还原成带凭据的上游 URL。
+//
+// 【现在只为了读老配置】新版不再加密：口令就是明文写在 forward 里（与 gost 脚本一致），
+// 下一次保存会被 flattenSecrets 摊平成明文，之后这个函数就走直通分支了。
 // 没有 secret 的链就是原样。
 func (c *Config) UpstreamsResolved(ch Chain) []string {
 	raws := ch.Upstreams()
@@ -196,56 +125,68 @@ func withCreds(up *upstream.Upstream, user, pass string) string {
 	return u.String()
 }
 
-// SecretNames 当前配置里用到的凭据名字（界面显示"已加密"用）。
-func (c *Config) SecretNames() []string {
+// flattenSecrets 把保险箱里的口令搬回配置字段（明文），并清掉 secret 引用。
+//
+// 落盘前调用：这样"以前加过密"的配置下一次保存就变成和 gost 脚本一样的明文，
+// 之后 secrets.dat 也不再需要（没有引用了就删掉它）。
+func (c *Config) flattenSecrets() int {
+	if c.Secrets() == nil {
+		return 0 // 保险箱打不开（或没装）：保持原样，别把口令弄丢
+	}
+	n := 0
+	for i := range c.Chains {
+		ch := &c.Chains[i]
+		if ch.Secret == "" {
+			continue
+		}
+		raws := c.UpstreamsResolved(*ch)
+		if len(raws) == 0 {
+			continue
+		}
+		hasCred := false
+		for _, r := range raws {
+			if strings.Contains(r, "@") || strings.Contains(r, "auth=") {
+				hasCred = true
+			}
+		}
+		if !hasCred {
+			continue // 解出来还是没凭据 → 不动，免得把 secret 引用丢掉
+		}
+		if len(raws) == 1 {
+			ch.Forwards, ch.Forward = nil, raws[0]
+		} else {
+			ch.Forwards, ch.Forward = raws, ""
+		}
+		ch.Secret = ""
+		n++
+	}
+	return n
+}
+
+// LegacySecretWarning 老配置里还有 secret: 引用、但保险箱打不开/不在了 —— 这条链路必然认证失败。
+//
+// 为什么要专门喊一声：加密保存已经取消（口令就是明文）。如果谁手里还留着旧版配置，
+// 而 secrets.dat 丢了，现象是"链路上游明明填了、却报认证被拒"，很难一眼看出原因。
+// 这里在载入时就把话说明白。返回涉及的链名。
+func (c *Config) LegacySecretWarning() []string {
 	var out []string
 	for _, ch := range c.Chains {
-		if ch.Secret != "" {
-			out = append(out, ch.Secret)
+		if ch.Secret == "" {
+			continue
+		}
+		if len(c.UpstreamsResolved(ch)) == 0 {
+			continue
+		}
+		// 解出来有没有凭据？没有就是解不开
+		hasCred := false
+		for _, u := range c.UpstreamsResolved(ch) {
+			if strings.Contains(u, "@") || strings.Contains(u, "auth=") {
+				hasCred = true
+			}
+		}
+		if !hasCred {
+			out = append(out, ch.Name+"（引用 "+ch.Secret+"）")
 		}
 	}
 	return out
-}
-
-// ExportPlain 导出一份"带明文凭据"的配置（给人拿到新机器上一键导入用）。
-// 与 SaveAs 的区别：这里会把 secret: 引用还原成明文口令。
-func (c *Config) ExportPlain(path string) error {
-	cp := *c
-	cp.Chains = make([]Chain, len(c.Chains))
-	for i, ch := range c.Chains {
-		n := ch
-		if ch.Secret != "" {
-			if raws := c.UpstreamsResolved(ch); len(raws) > 0 {
-				n.Forward = raws[0]
-				if len(raws) > 1 {
-					n.Forwards = raws
-					n.Forward = ""
-				}
-			}
-			n.Secret = ""
-		}
-		cp.Chains[i] = n
-	}
-	cp.path = path
-	return cp.writeTo(path, false) // 导出件不加密：新机器直接导入就能用
-}
-
-// PendingPlaintext 还有几条链的口令是明文写在配置里的（保存一次就会被封存）。
-// 界面用它把状态说准：开关是"开"、但文件里还是明文时，必须让人看出来。
-func (c *Config) PendingPlaintext() int {
-	n := 0
-	for _, ch := range c.Chains {
-		if ch.Secret != "" {
-			continue
-		}
-		raws := ch.Upstreams()
-		if len(raws) != 1 {
-			continue // 多上游不做封存（见 sealLocked 的说明）
-		}
-		up, err := upstream.Parse(raws[0])
-		if err == nil && (up.Creds.User != "" || up.Creds.Pass != "") {
-			n++
-		}
-	}
-	return n
 }

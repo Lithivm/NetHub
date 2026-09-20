@@ -16,6 +16,7 @@ package engine
 import (
 	"fmt"
 	"net"
+	"nethub/internal/dnsmap"
 	"nethub/internal/winrun"
 	"os"
 	"path/filepath"
@@ -249,6 +250,9 @@ type Engine struct {
 	// proc 端口→进程（A20）：只在规则里写了进程条件时才查（见 rules.NeedsProc）
 	proc *proc.Resolver
 
+	// names 域名↔IP 映射（域名规则 + 把域名交给上游都用它）
+	names *dnsmap.Map
+
 	done chan struct{}
 	wg   sync.WaitGroup
 
@@ -267,6 +271,7 @@ func New(bus *logbus.Bus, rs *rules.Set, cfg *config.Config) *Engine {
 		loop:        newLoopGuard(),
 		cap:         newCapturer(),
 		proc:        proc.NewResolver(),
+		names:       dnsmap.New(),
 	}
 }
 
@@ -312,6 +317,10 @@ func (e *Engine) Start() error {
 	relay := ln.Addr().String()
 	port := uint16(ln.Addr().(*net.TCPAddr).Port)
 
+	// 域名规则：先把域名解析成 IP（供匹配与过滤器用），再装配过滤器。
+	// 必须在 buildFilter 之前 —— 否则这些 IP 不在过滤器里，包根本不到我们手上。
+	e.resolveHostTargets(false)
+
 	// 2) 用规则区间拼内核过滤器（直连规则的目标不进过滤器，见 rules.FilterRanges）
 	rs := e.rules.FilterRanges(e.cfg.CountDirectEnabled())
 	if len(rs) == 0 {
@@ -353,6 +362,7 @@ func (e *Engine) Start() error {
 	go e.packetLoop()
 	go e.janitor()
 	go e.relayWatch()
+	go e.nameLoop()
 	go e.healthLoop()
 	go e.targetLoop()
 	go e.localNetLoop()
@@ -460,14 +470,14 @@ func (e *Engine) dialUpstreamKeyed(ch config.Chain, dst net.IP, dport uint16, ke
 	// 只有在“第一条明显慢”时才值得。实测 etyy 的 CONNECT 阶段要 620ms、sjy 只要 75ms，
 	// 这一招能把业务直接拉到快链路。
 	if len(cands) > 1 && e.cfg.RaceAfterDur() > 0 {
-		c, ok, raced := e.dialRacing(ch, raws, cands, dst, dport, per, budget)
+		c, ok, raced, raceErr := e.dialRacing(ch, raws, cands, dst, dport, per, budget)
 		if ok {
 			return c, nil
 		}
 		if raced {
 			// 竞速已经把**所有**候选都拨过一遍了，失败就是真失败；
 			// 再回退一次顺序试等于把同一批上游拨两遍（白等一个预算）。
-			return nil, fmt.Errorf("链 %s：所有上游都连不上", ch.Name)
+			return nil, raceErr
 		}
 		// 第一条在起跑前就明确失败 → 从第二条开始顺序试（不重复第一条）
 		return e.dialSequential(ch, raws, cands[1:], dst, dport, per, budget)
@@ -501,7 +511,7 @@ func (e *Engine) dialSequential(ch config.Chain, raws []string, cands []int,
 		}
 		errs = append(errs, msg)
 	}
-	return nil, fmt.Errorf("%s", strings.Join(errs, "；"))
+	return nil, fmt.Errorf("%s", strings.Join(errs, "\n"))
 }
 
 // tryUpstream 试一条上游，并把结果记进健康表。
@@ -520,7 +530,11 @@ func (e *Engine) tryUpstream(ch config.Chain, raw string, idx int, dst net.IP, d
 		return c, nil, ""
 	}
 	e.markUp(ch.Name, idx, false, lat, err.Error())
-	return nil, err, fmt.Sprintf("%s: %v", up.String(), err)
+	// 每条上游一行、带耗时与本次超时 —— 现场把日志整段复制给 agent 时，
+	// “谁、排第几、等了多久、原始报错是什么”都在这一行里。
+	// 上游地址用 maskUpstream（保留协议/主机/端口，去掉凭据）。
+	return nil, err, fmt.Sprintf("上游 #%d %s（单次超时 %s，已等 %s）：%v",
+		idx+1, maskUpstream(up.Raw), timeout, lat.Round(time.Millisecond), err)
 }
 
 // dialAttempt 一次拨号尝试的结果（竞速用）。
@@ -535,7 +549,7 @@ type dialAttempt struct {
 // 返回：conn（成功时）、ok（拿到连接）、raced（是否真的进过竞速阶段）。
 // 　　　raced=false 表示第一条在起跑前就明确失败，调用方应从第二条开始顺序试。
 func (e *Engine) dialRacing(ch config.Chain, raws []string, cands []int,
-	dst net.IP, dport uint16, per, budget time.Duration) (net.Conn, bool, bool) {
+	dst net.IP, dport uint16, per, budget time.Duration) (net.Conn, bool, bool, error) {
 	race := e.cfg.RaceAfterDur()
 	if race <= 0 || race >= per {
 		race = per / 2 // 竞速必须早于单次超时，否则没意义
@@ -550,13 +564,13 @@ func (e *Engine) dialRacing(ch config.Chain, raws []string, cands []int,
 	select {
 	case a := <-first:
 		if a.err == nil {
-			return a.c, true, true
+			return a.c, true, true, nil
 		}
 		// 第一条已经明确失败（被拒/解析错）→ 交给顺序试，它从第二条开始
 		if a.c != nil {
 			a.c.Close()
 		}
-		return nil, false, false
+		return nil, false, false, a.err
 	case <-time.After(race):
 	}
 
@@ -586,20 +600,24 @@ func (e *Engine) dialRacing(ch config.Chain, raws []string, cands []int,
 				// 其余候选还在跑：它们的连接成功也来不及用了，收尾时关掉
 				go drainAttempts(rest, n-readRest, per)
 				go drainAttempts(first, 1-firstRead, per)
-				return a.c, true, true
+				return a.c, true, true, nil
 			}
 			errs = append(errs, a.msg)
 		case a := <-first:
 			firstRead = 1
 			if a.err == nil {
 				go drainAttempts(rest, n-readRest, per)
-				return a.c, true, true
+				return a.c, true, true, nil
 			}
 			errs = append(errs, a.msg)
 		}
 	}
-	e.bus.Warn("链 %s 竞速全失败：%s", ch.Name, strings.Join(errs, "；"))
-	return nil, false, true
+	e.bus.Warn("链 %s 竞速全失败：\n%s", ch.Name, strings.Join(errs, "\n"))
+	detail := strings.Join(errs, "\n")
+	if detail == "" {
+		detail = "所有上游都连不上"
+	}
+	return nil, false, true, fmt.Errorf("链 %s：所有上游都连不上\n%s", ch.Name, detail)
 }
 
 // drainAttempts 把竞速里多余的尝试收干净：成功的连接要关掉，不能漏。
@@ -649,9 +667,56 @@ func (e *Engine) handleConn(c net.Conn) {
 		return
 	}
 
-	up, err := e.dialUpstreamKeyed(ch, st.dst, st.dport, st.app.String())
+	// 域名规则命中时，按配置决定“本机解析”还是“交给上游解析”：
+	//
+	//	local（默认）   按本机解析出的 IP 连 —— 客户内网域名通常只有本机能解答
+	//	upstream        把域名交给上游解析（同一域名两边解析不同时用）
+	//	auto            本机优先，连不上再把域名交给上游试一次
+	//
+	// 实测教训：我们这套环境里 main.his.com 只有客户网内的 DNS 能解答，
+	// 上游是公网中转服务器、解析不到（host unreachable）—— 所以不能默认透传。
+	host, hasName := e.names.NameFor(st.dst)
+	mode := e.cfg.DomainResolveMode()
+	var up net.Conn
+	var err error
+	tryName := func() bool {
+		if !hasName {
+			return false
+		}
+		up, err = e.dialViaName(ch, host, st.dport)
+		if err == nil {
+			e.bus.Info("[%s] 用域名 %s 建隧道（交给上游解析）", st.chain, host)
+			return true
+		}
+		return false
+	}
+	switch {
+	case mode == "upstream" && hasName:
+		if !tryName() {
+			up, err = e.dialUpstreamKeyed(ch, st.dst, st.dport, st.app.String())
+		}
+	case mode == "upstream":
+		up, err = e.dialUpstreamKeyed(ch, st.dst, st.dport, st.app.String())
+	default: // local / auto：先用本机解析出的 IP
+		up, err = e.dialUpstreamKeyed(ch, st.dst, st.dport, st.app.String())
+		if err != nil && mode == "auto" && hasName {
+			e.bus.Info("[%s] 按 IP %s 连不上（%v），改用域名 %s 交给上游再试", st.chain, st.dst, err, host)
+			tryName()
+		}
+	}
 	if err != nil {
-		e.bus.Error("[%s] 隧道建立失败 %s:%d — %v", st.chain, st.dst, st.dport, err)
+		// 原始报错一字不改地打出来（现场是把日志整段复制给 agent 看的，
+		// 任何“翻译成人话”都会把底层信息抹掉）。这里只补几项我们才知道的上下文：
+		// 命中哪条链、谁发起的、以及这条链试过哪些上游。
+		who := st.procName
+		if who == "" {
+			who = "未知进程"
+		}
+		e.bus.Error("[%s] 隧道建立失败 %s:%d（进程 %s，PID %d，源端口 %d）",
+			st.chain, st.dst, st.dport, who, st.pid, sport)
+		for _, line := range strings.Split(err.Error(), "\n") {
+			e.bus.Error("    %s", line)
+		}
 		st.fail(err.Error())
 		e.finish(st)
 		return
@@ -1355,3 +1420,133 @@ func ipsKey(ips []net.IP) string {
 
 // procNewResolver 供测试直接造一个进程解析器（生产路径由 New 注入）。
 func procNewResolver() *proc.Resolver { return proc.NewResolver() }
+
+// ───────────────────────── 域名规则（名字↔IP）─────────────────────────
+
+// resolveHostTargets 把规则里的域名解析成 IP，填进规则集（供匹配与过滤器用）。
+//
+// 解析不到的域名**不阻断启动**（DNS 一时不可用很常见）：那条规则暂时不匹配任何东西，
+// 界面上能看到它没解析出来。warnChange 为真时（定期刷新）把"IP 变了"说出来，
+// 因为过滤器在启动时就装配好了，新 IP 要重启服务才生效。
+func (e *Engine) resolveHostTargets(warnChange bool) {
+	hosts := e.rules.HostTargets()
+	if len(hosts) == 0 {
+		return
+	}
+	byHost := map[string][]*net.IPNet{}
+	var unresolved []string
+	for _, h := range hosts {
+		before := e.names.IPsFor(h)
+		ips, err := e.names.Resolve(h, dnsmap.PrioRule)
+		if err != nil || len(ips) == 0 {
+			unresolved = append(unresolved, h)
+			continue
+		}
+		var nets []*net.IPNet
+		for _, s := range ips {
+			if ip := net.ParseIP(s); ip != nil {
+				nets = append(nets, &net.IPNet{IP: ip.To4(), Mask: net.CIDRMask(32, 32)})
+			}
+		}
+		byHost[h] = nets
+		if warnChange && len(before) > 0 && !sameIPSet(before, ips) {
+			e.bus.Warn("域名 %s 的 IP 变了（%v → %v）—— 过滤器在启动时装配，重启服务后新 IP 才生效",
+				h, before, ips)
+		}
+	}
+	e.rules.SetHostIPs(byHost)
+	if warnChange && len(unresolved) > 0 {
+		e.bus.Warn("这些域名规则暂时解析不到，暂时不匹配任何流量：%v", unresolved)
+	}
+}
+
+func sameIPSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// nameLoop 定期刷新域名解析（内网 DNS 记录会变；不刷新就一直是启动那一份）。
+func (e *Engine) nameLoop() {
+	defer e.wg.Done()
+	tk := time.NewTicker(dnsmap.TTL)
+	defer tk.Stop()
+	for {
+		select {
+		case <-e.done:
+			return
+		case <-tk.C:
+			e.resolveHostTargets(true)
+		}
+	}
+}
+
+// HostResolveView 域名解析状态（界面/诊断页看"这个域名现在指到哪"）。
+type HostResolveView struct {
+	Host    string   `json:"host"`
+	IPs     []string `json:"ips"`
+	Age     string   `json:"age"`
+	Stale   bool     `json:"stale"`
+	Failed  bool     `json:"failed"`
+	LastErr string   `json:"lastErr"`
+}
+
+// HostResolves 列出所有域名规则的解析状态。
+func (e *Engine) HostResolves() []HostResolveView {
+	if e.names == nil {
+		return nil
+	}
+	st := e.names.Status()
+	out := make([]HostResolveView, 0, len(st))
+	for _, s := range st {
+		out = append(out, HostResolveView{
+			Host: s.Host, IPs: s.IPs, Age: s.Age.Truncate(time.Second).String(),
+			Stale: s.Stale, Failed: s.Failed, LastErr: s.LastErr,
+		})
+	}
+	return out
+}
+
+// NameForIP 这个 IP 当前对应哪个域名（界面解释"这条连接为什么走了隧道"用）。
+func (e *Engine) NameForIP(ip net.IP) string {
+	if e.names == nil {
+		return ""
+	}
+	n, _ := e.names.NameFor(ip)
+	return n
+}
+
+// dialViaName 把**域名**交给上游解析并连接（而不是本机先解析成 IP）。
+//
+// 为什么单独一条路（不走预热池/竞速）：那两套是围绕"目标 IP"建的，
+// 而这里的目标是名字 —— 混进去只会把两条路径都弄乱；域名规则的连接量本来也小。
+func (e *Engine) dialViaName(ch config.Chain, host string, dport uint16) (net.Conn, error) {
+	raws := e.cfg.UpstreamsResolved(ch)
+	if len(raws) == 0 {
+		return nil, fmt.Errorf("链 %s 没有配置上游", ch.Name)
+	}
+	per := e.cfg.DialTimeoutDur()
+	var lastErr error
+	for _, raw := range raws {
+		u, err := upstream.Parse(raw)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		conn, err := u.DialHost(host, dport, per)
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("没有可用上游")
+	}
+	return nil, fmt.Errorf("把域名 %s 交给上游解析失败: %w", host, lastErr)
+}

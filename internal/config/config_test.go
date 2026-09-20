@@ -4,10 +4,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"testing"
 	"time"
 
 	"gopkg.in/yaml.v3"
-	"testing"
+
+	"nethub/internal/secret"
 )
 
 // NormalizeTargets 是"一条规则填多个目标"的入口：拆分 + 归一化 + 组内去重。
@@ -848,5 +850,131 @@ func TestSortPutsLocalDirectLast(t *testing.T) {
 	// 直连但目标是公网 → 不算兜底（那是“这些公网地址不走代理”的具体决定）
 	if selfRule(Route{Targets: []string{"39.103.146.155/32"}, Chain: DirectChain}) {
 		t.Error("直连的公网目标不该算兜底类")
+	}
+}
+
+// 规则目标可以是域名（原样保留，不换成 IP），通配暂时明确拒绝。
+func TestTargetAcceptsHostname(t *testing.T) {
+	for in, want := range map[string]string{
+		"main.his.com":    "main.his.com",
+		"MAIN.HIS.COM":    "main.his.com",
+		"opm.his.com.":    "opm.his.com.",
+		"10.0.0.5":        "10.0.0.5/32",
+		"10.0.0.0/24":     "10.0.0.0/24",
+		"main-wbzxyy.cn":  "main-wbzxyy.cn",
+		"a1.b2-c3.d4.com": "a1.b2-c3.d4.com",
+	} {
+		got, err := NormalizeTarget(in)
+		if err != nil {
+			t.Errorf("NormalizeTarget(%q) 报错: %v", in, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("NormalizeTarget(%q) = %q，期望 %q", in, got, want)
+		}
+	}
+	// 通配：拒绝，但要把"为什么 + 替代方案"说清楚
+	for _, bad := range []string{"main.*.com", "*.his.com"} {
+		_, err := NormalizeTarget(bad)
+		if err == nil {
+			t.Errorf("%q 应该被拒绝（通配还没支持）", bad)
+			continue
+		}
+		if !strings.Contains(err.Error(), "通配") || !strings.Contains(err.Error(), "具体域名") {
+			t.Errorf("%q 的报错要说明现状与替代方案，得到 %v", bad, err)
+		}
+	}
+	// 明显不是域名也不是 IP 的写法仍要被挡
+	for _, bad := range []string{"hello", "10.0.0.5/33", "a b.com"} {
+		if _, err := NormalizeTarget(bad); err == nil {
+			t.Errorf("%q 不是合法目标，应被拒绝", bad)
+		}
+	}
+}
+
+// IP 通配（Proxifier 写法）：10.100.100.* = 10.100.100.0/24。
+func TestIPWildcard(t *testing.T) {
+	for in, want := range map[string]string{
+		"10.100.100.*": "10.100.100.0/24",
+		"172.30.4.*":   "172.30.4.0/24",
+		"192.168.1.*":  "192.168.1.0/24",
+	} {
+		got, err := NormalizeTarget(in)
+		if err != nil {
+			t.Errorf("NormalizeTarget(%q) 报错: %v", in, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("NormalizeTarget(%q) = %q，期望 %q", in, got, want)
+		}
+	}
+	// 猜不出范围的写法要拒绝，并且说清怎么写
+	for _, bad := range []string{"10.*.100.5", "10.100.*.5", "*"} {
+		_, err := NormalizeTarget(bad)
+		if err == nil {
+			t.Errorf("%q 应该被拒绝", bad)
+			continue
+		}
+		if !strings.Contains(err.Error(), "CIDR") {
+			t.Errorf("%q 的报错要告诉用户改用 CIDR，得到 %v", bad, err)
+		}
+	}
+}
+
+// 不再加密：保存后配置里就是明文口令（和 gost 脚本一样），并且老配置的
+// `secret:` 引用会被摊平成明文（下次保存自动迁移，不需要手工处理）。
+func TestSaveWritesPlaintextCreds(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	c := Default()
+	c.Chains = []Chain{{Name: "tun", Forward: "socks5+tls://u:p@1.2.3.4:10080"}}
+	c.Routes = nil
+	if err := c.SaveAs(path); err != nil { // SaveAs 也走同一条落盘路径
+		t.Fatalf("保存失败: %v", err)
+	}
+	raw, _ := os.ReadFile(path)
+	if !strings.Contains(string(raw), "u:p@1.2.3.4:10080") {
+		t.Errorf("配置里应该是明文口令（不再加密），实际内容：\n%s", raw)
+	}
+	if strings.Contains(string(raw), "secret:") {
+		t.Errorf("新版不该再写 secret: 引用：\n%s", raw)
+	}
+}
+
+// 老配置（带 secret: 引用 + 保险箱里有口令）保存后要变成明文，引用被清掉。
+func TestFlattenLegacySecrets(t *testing.T) {
+	dir := t.TempDir()
+	store, err := secret.Load(dir)
+	if err != nil {
+		t.Fatalf("打开假保险箱失败: %v", err)
+	}
+	if err := store.Put("chain-a", "userA:passA"); err != nil {
+		t.Fatalf("写入假保险箱失败: %v", err)
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("保存假保险箱失败: %v", err)
+	}
+	path := filepath.Join(dir, "config.yaml")
+	seed := "relay: 127.0.0.1:0\nchains:\n  - name: tun\n    forward: socks5+tls://1.2.3.4:10080\n    secret: chain-a\nroutes: []\n"
+	if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("载入失败: %v", err)
+	}
+	if got := c.UpstreamsResolved(c.Chains[0]); len(got) != 1 || !strings.Contains(got[0], "userA:passA") {
+		t.Fatalf("引用的口令应该解得出来，得到 %v", got)
+	}
+	if err := c.Save(); err != nil {
+		t.Fatalf("保存失败: %v", err)
+	}
+	raw, _ := os.ReadFile(path)
+	s := string(raw)
+	if !strings.Contains(s, "userA:passA") {
+		t.Errorf("保存后应把口令摊平成明文，实际：\n%s", s)
+	}
+	if strings.Contains(s, "secret:") {
+		t.Errorf("摊平后不该再有 secret: 引用：\n%s", s)
 	}
 }

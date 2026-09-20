@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"time"
 )
 
@@ -363,4 +364,16 @@ func DialSOCKS4TLS(proxy, user, host string, dstPort uint16, tlsConf *tls.Config
 		return nil, err
 	}
 	return c, nil
+}
+
+// DialTLSHost 同 DialTLS，但把**域名**交给代理解析（SOCKS5 的 ATYP=域名）。
+//
+// 用途："域名交给上游" —— 内网域名不必在本机解析得出，本机 DNS 也不会泄漏内网域名。
+func DialTLSHost(addr string, c Creds, tlsConf *tls.Config, host string, dstPort uint16,
+	timeout time.Duration) (net.Conn, error) {
+	if strings.Contains(host, ":") {
+		return nil, fmt.Errorf("域名里不该带端口: %q", host)
+	}
+	body := append([]byte{byte(len(host))}, []byte(host)...)
+	return dialWith(addr, c, tlsConf, atypDomain, body, dstPort, timeout)
 }

@@ -249,3 +249,42 @@ func (u *Upstream) ConnectOn(conn net.Conn, targetIP net.IP, targetPort uint16, 
 
 // ErrNoPrepare 这条上游不支持"先预备后打通"（只能整体 Dial）。
 var ErrNoPrepare = errors.New("这条上游不支持预热（只能一次性拨号）")
+
+// DialHost 把**域名**交给上游去解析并连接（而不是本机先解析成 IP）。
+//
+// 为什么需要它（真实场景）：内网域名往往只有上游那一侧能解析 —— 本机 DNS 要么查不到、
+// 要么查到的是公网 IP。旧方案（Proxifier + 本地 gost）就是一路把域名传到上游的，
+// 本工具要对齐这个能力，同时本机也不泄漏内网域名。
+//
+// 各协议的支持情况：
+//
+//	socks5        原生支持（ATYP=域名）
+//	socks4a       原生支持（0.0.0.x 约定）
+//	socks4        不支持域名 → 只能本机解析成 IP 再连（保底，会失去"上游侧解析"的意义）
+//	http / https  CONNECT 里写 host:port，由代理解析
+func (u *Upstream) DialHost(host string, port uint16, timeout time.Duration) (net.Conn, error) {
+	host = strings.TrimSpace(strings.TrimSuffix(host, "."))
+	if host == "" {
+		return nil, fmt.Errorf("域名为空")
+	}
+	switch u.Protocol {
+	case "socks5":
+		return socks.DialTLSHost(u.Addr, u.Creds, u.tls(), host, port, timeout)
+	case "socks4a":
+		return socks.DialSOCKS4TLS(u.Addr, u.Creds.User, host, port, u.tls(), timeout)
+	case "socks4":
+		ips, err := net.LookupIP(host)
+		if err != nil || len(ips) == 0 {
+			return nil, fmt.Errorf("SOCKS4 不支持域名，且本机解析 %s 失败: %v", host, err)
+		}
+		v4 := ips[0].To4()
+		if v4 == nil {
+			return nil, fmt.Errorf("SOCKS4 只支持 IPv4，%s 解析到 %v", host, ips[0])
+		}
+		return socks.DialSOCKS4TLS(u.Addr, u.Creds.User, v4.String(), port, u.tls(), timeout)
+	case "http":
+		return dialHTTPConnectHost(u, host, port, timeout)
+	default:
+		return nil, fmt.Errorf("这条上游不支持把域名交给它解析（协议 %s）", u.Protocol)
+	}
+}

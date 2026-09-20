@@ -2,6 +2,7 @@ package engine
 
 import (
 	"net"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -337,5 +338,38 @@ func TestWarmPoolDisabled(t *testing.T) {
 	}
 	if taken, made, warm := e.PoolStats(); taken != 0 || made != 0 || warm != 0 {
 		t.Errorf("关掉预热后不该有池子活动：taken=%d made=%d warm=%d", taken, made, warm)
+	}
+}
+
+// 隧道建立失败的报错要“原始且完整”：现场是把日志整段复制给 agent 的，
+// 所以每条上游试过什么、等了多久、底层错误原文都必须留在里面。
+func TestDialFailureDetail(t *testing.T) {
+	e := newTestEngine()
+	// 一个没人监听的本地端口 → 立刻 ECONNREFUSED（原始错误里带 dial tcp 字样）
+	ch := config.Chain{Name: "t", Forward: "socks5://127.0.0.1:1"}
+	_, err, msg := e.tryUpstream(ch, ch.Forward, 0, net.ParseIP("10.0.0.5"), 443, time.Second)
+	if err == nil {
+		t.Fatal("应该连不上")
+	}
+	for _, want := range []string{"上游 #1", "127.0.0.1:1", "单次超时", "已等", "dial tcp"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("详细报错里应该包含 %q，实际：%s", want, msg)
+		}
+	}
+	// 多上游顺序试：每条一行（便于复制）
+	e2 := newTestEngine()
+	_, err2 := e2.dialSequential(ch, []string{ch.Forward, "socks5://127.0.0.1:2"}, []int{0, 1},
+		net.ParseIP("10.0.0.5"), 443, time.Second, 5*time.Second)
+	if err2 == nil {
+		t.Fatal("两条都不通应该报错")
+	}
+	lines := strings.Split(err2.Error(), "\n")
+	if len(lines) != 2 {
+		t.Errorf("两条上游应报两行，得到 %d 行：\n%s", len(lines), err2.Error())
+	}
+	for _, l := range lines {
+		if !strings.Contains(l, "上游 #") {
+			t.Errorf("每行都要标明是第几条上游：%q", l)
+		}
 	}
 }

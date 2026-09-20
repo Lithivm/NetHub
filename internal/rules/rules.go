@@ -8,6 +8,7 @@ package rules
 import (
 	"fmt"
 	"net"
+	"nethub/internal/dnsmap"
 	"sort"
 	"strconv"
 	"strings"
@@ -65,10 +66,15 @@ type Route struct {
 	// 进程就改变流量走向”，宁可漏过也不误伤（fail-open）。
 	Apps []string `yaml:"apps,omitempty" json:"apps,omitempty"`
 
-	nets  []*net.IPNet // 解析缓存，与 Targets 一一对应
-	ports []portRange  // 解析缓存，与 Ports 一一对应；留空 = 任意端口
-	local []*net.IPNet // 解析缓存，与 LocalNets 一一对应
-	apps  []string     // 解析缓存，与 Apps 一一对应（已去空白）
+	nets []*net.IPNet // 解析缓存，与 Targets 里的 IP/CIDR 一一对应
+	// hosts 与 hostIPs：目标里的**域名**部分（原样保留）+ 它们当前解析到的 IP。
+	// 为什么不把域名直接换成 IP 写进配置：IP 会变（多 A 记录/备用机房），
+	// 写死很快就错。运行时由引擎解析后通过 SetHostIPs 填进来。
+	hosts   []string
+	hostIPs []*net.IPNet
+	ports   []portRange  // 解析缓存，与 Ports 一一对应；留空 = 任意端口
+	local   []*net.IPNet // 解析缓存，与 LocalNets 一一对应
+	apps    []string     // 解析缓存，与 Apps 一一对应（已去空白）
 }
 
 // HasApps 这条规则带进程条件。
@@ -182,7 +188,34 @@ func (r Route) matchesIP(ip net.IP) bool {
 			return true
 		}
 	}
+	for _, n := range r.hostIPs { // 域名目标当前解析到的 IP
+		if n.Contains(ip) {
+			return true
+		}
+	}
 	return false
+}
+
+// HostTargets 这条规则里写的域名（原样，供引擎去解析与透传给上游）。
+func (r Route) HostTargets() []string { return append([]string{}, r.hosts...) }
+
+// SetHostIPs 把引擎解析出来的「域名 → IP」填进整组规则。
+//
+// 解析放到引擎而不是这里，是因为它要做 DNS I/O 且会定期刷新；
+// 规则层只负责“拿到就用”，保持无副作用、可单测。
+func (s *Set) SetHostIPs(byHost map[string][]*net.IPNet) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.routes {
+		if len(s.routes[i].hosts) == 0 {
+			continue
+		}
+		var ips []*net.IPNet
+		for _, h := range s.routes[i].hosts {
+			ips = append(ips, byHost[h]...)
+		}
+		s.routes[i].hostIPs = ips
+	}
 }
 
 // Set 是一组有序规则（先匹配先生效，和 Proxifier 语义一致）。
@@ -246,10 +279,21 @@ func (s *Set) Load(routes []Route) error {
 			return fmt.Errorf("第 %d 条规则%s: chain 为空", i+1, r.Label())
 		}
 		nets := make([]*net.IPNet, 0, len(r.Targets))
+		hosts := make([]string, 0, len(r.Targets))
 		for j, t := range r.Targets {
 			t = strings.TrimSpace(t)
 			if t == "" {
 				return fmt.Errorf("第 %d 条规则%s: 第 %d 个目标为空", i+1, r.Label(), j+1)
+			}
+			// 域名目标：不适求当下能解析（DNS 可能一时不可用），原样记下，
+			// 由引擎解析成功后通过 SetHostIPs 填进来；解析不到顶多是这条不命中。
+			if dnsmap.IsHostname(t) {
+				if dnsmap.IsWildcard(t) {
+					return fmt.Errorf("第 %d 条规则%s: 目标 %s 是通配域名 —— 暂时还没支持（要偷看 DNS 才能匹配），"+
+						"先写具体域名，或者用这些域名实际所在的 IP 段", i+1, r.Label(), t)
+				}
+				hosts = append(hosts, strings.ToLower(t))
+				continue
 			}
 			ipnet, err := parseTarget(t)
 			if err != nil {
@@ -278,7 +322,7 @@ func (s *Set) Load(routes []Route) error {
 			}
 			local = append(local, ipnet)
 		}
-		r.ports, r.nets, r.local, r.apps = ports, nets, local, apps
+		r.ports, r.nets, r.local, r.apps, r.hosts = ports, nets, local, apps, hosts
 		out = append(out, r)
 	}
 	s.mu.Lock()
@@ -383,11 +427,21 @@ func (s *Set) FilterRanges(includeDirect bool) []Range {
 		for _, p := range r.ports {
 			ports = append(ports, PortRange{p.first, p.last})
 		}
-		// 只按进程的规则没写目标 —— 目标提前不可知，只能拦全部（用户显式这么写才发生）。
+		// 只按进程的规则：**一个目标都没写** → 目标提前不可知，只能拦全部（用户显式这么写才发生）。
 		// 代价：所有流量都要过一遍用户态（见 packetLoop 里“没命中任何规则→原样放回”）。
-		if len(r.nets) == 0 {
+		// ⚠ 这里必须看“总目标数”而不是 nets：域名规则在解析出来之前 nets 也是空的，
+		// 若把它也归到这一类，一条还没生效的域名规则会让**全部流量**过用户态（性能地雷）。
+		if len(r.nets) == 0 && len(r.hosts) == 0 {
 			rs = append(rs, Range{0, 0xFFFFFFFF, ports})
 			continue
+		}
+		// 域名目标：拦它**当前解析到**的 IP（引擎定期刷新并重建过滤器）。
+		// 解析不到 → 这条现在什么都不拦（不猜、也不全拦），日志里会说哪几个域名没解析出来。
+		for _, n := range r.hostIPs {
+			first := IP2U(n.IP.To4())
+			mask := IP2U(net.IP(n.Mask).To4())
+			last := first | ^mask
+			rs = append(rs, Range{first, last, ports})
 		}
 		for _, n := range r.nets {
 			first := IP2U(n.IP.To4())
@@ -536,4 +590,22 @@ func IP2U(ip net.IP) uint32 {
 // IP2U / U2IP 在 IPv4 与 uint32 之间转换（过滤器表达式与测试用）。
 func U2IP(u uint32) net.IP {
 	return net.IPv4(byte(u>>24), byte(u>>16), byte(u>>8), byte(u)).To4()
+}
+
+// HostTargets 整组规则里出现的所有域名（引擎按它做解析与刷新）。
+func (s *Set) HostTargets() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	seen := map[string]bool{}
+	var out []string
+	for i := range s.routes {
+		for _, h := range s.routes[i].hosts {
+			if !seen[h] {
+				seen[h] = true
+				out = append(out, h)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }

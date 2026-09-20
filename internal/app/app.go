@@ -126,6 +126,12 @@ func (a *App) Start() error {
 		a.notify("启动失败", err.Error(), NotifyError)
 		return err
 	}
+	// 旧版加过密的配置 + 保险箱丢了 → 这条链必然认证失败，先把话说清楚
+	if legacy := a.Cfg.LegacySecretWarning(); len(legacy) > 0 {
+		a.Bus.Error("⚠ 这些链还引用着旧版加密口令，但解不开（secrets.dat 丢了或换了机器）：%v", legacy)
+		a.Bus.Error("   新版不再加密口令 —— 请把口令直接填回链路的 forward（形如 socks5+tls://用户名:口令@主机:端口）")
+		a.notify("有链路的旧版口令解不开", "请把口令重新填进链路的上游地址（新版用明文）", NotifyError)
+	}
 	if err := a.Rules.Load(toRules(a.Cfg.Routes)); err != nil {
 		a.Bus.Error("规则载入失败: %v", err)
 		a.setLastError("规则载入失败：" + err.Error())

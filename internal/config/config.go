@@ -362,35 +362,33 @@ func (c *Config) Normalize() (bool, error) {
 }
 
 // Save 原子写回配置文件。
+// Save 落盘。
+//
+// 刻意**不加密**上游口令（与 gost 的启动脚本一样是明文）：
+//
+//	· 要防的是“配置被误传/推到 GitHub” —— 那靠 .gitignore 与人工注意，不靠加密；
+//	· 加密带来的是一整套麻烦（换机器解不开、导出要还原、编辑时看不到口令、
+//	  还多一个 secrets.dat 要管），而这些麻烦在真实现场都是实打实的成本。
+//
+// 历史遗留：早先版本用 DPAPI 存过（配置里是 `secret: xxx` 引用），
+// 那些配置仍然读得出来（见 UpstreamsResolved），下一次保存就会自动变成明文。
 func (c *Config) Save() error {
 	if c.path == "" {
 		return fmt.Errorf("配置路径未设置")
 	}
-	return c.writeTo(c.path, true)
+	return c.writeTo(c.path, false)
 }
 
-// writeTo 落盘。seal=true 时先把明文口令挪进 DPAPI 保险箱（A18）。
-// 导出一份“给人拿去新机器用”的配置时传 false —— 那份必须是明文，否则新机器用不了。
+// writeTo 落盘。seal 参数只为兼容导出路径保留，现一律不封存。
 func (c *Config) writeTo(path string, seal bool) error {
-	var sealErr error
-	if seal {
-		_, sealErr = c.sealLocked()
-	}
+	c.flattenSecrets() // 老配置里的 secret: 引用在这里摊平成明文（只做一次，之后就没引用了）
+	_ = seal
 	b, err := yaml.Marshal(c)
 	if err != nil {
 		return err
 	}
 	header := "# NetHub 配置 —— 由程序读写，手工改也生效\n"
-	switch {
-	case !seal:
-		header += "# 这份是导出件（含明文口令），给新机器「导入配置」用。\n"
-	case sealErr == nil && c.SealEnabled():
-		header += "# 上游口令存在同目录 secrets.dat（Windows DPAPI 加密，换机器解不开）。\n"
-	case sealErr != nil:
-		header += "# ⚠ 这次没能把口令存进保险箱（" + sealErr.Error() + "），下面仍是明文。\n"
-	default:
-		header += "# forward 里的凭据是本机敏感信息，不要外传、不要提交进 git。\n"
-	}
+	header += "# ⚠ 下面 forward 里是上游明文口令（和 gost 脚本一样）。不要把本文件提交进 git、不要贴到群里。\n"
 	// 覆盖前先备份一份（backups/ 目录，只留最新 3 份），改坏了能回滚
 	if err := c.backupLocked(); err != nil {
 		return fmt.Errorf("备份旧配置失败: %w", err)
@@ -470,13 +468,45 @@ func (c *Config) Validate() error {
 // ───────────────────── 链 / 规则的编辑操作（供 GUI 调用）─────────────────────
 
 // NormalizeTarget 把目标写成 CIDR：单 IP → /32，并校验合法性。
+// NormalizeTarget 归一化一个规则目标：IP / CIDR / **域名**。
+//
+// 域名的处理（和 IP 不同）：IP 会被拆成 /32、CIDR 会被规整；而域名**原样保留**——
+// 不把域名换成 IP 写进配置：
+//
+//	· IP 会变（多 A 记录/备用机房），写死的 IP 很快就是错的
+//	· 运行时我们同时准备了两条路：本机解析（供匹配）+ 把域名交给上游去解析
+//
+// 通配域名（*.x.com）暂时拒绝，但错误信息要说清楚现状与替代方案。
 func NormalizeTarget(s string) (string, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return "", fmt.Errorf("不能为空")
 	}
-	if !strings.Contains(s, "/") {
+	// IP 通配（Proxifier 的写法：10.100.100.* = 一整段）→ 展开成 CIDR
+	if strings.HasSuffix(s, ".*") {
+		cidr, err := ipWildcardToCIDR(s)
+		if err != nil {
+			return "", err
+		}
+		s = cidr
+	}
+	// 还剩 * 且不是域名（如 10.*.100.5）→ 直接说清改写方式，
+	// 别拖到最后报一句没有信息量的“解析失败”。
+	if strings.Contains(s, "*") && !isHostname(s) {
+		return "", fmt.Errorf("这种写法猜不出范围 —— 末尾一段才能用 *（如 10.100.100.*）；" +
+			"其他情况请写 CIDR（如 10.100.0.0/16）")
+	}
+	if !strings.Contains(s, "/") && !isHostname(s) {
 		s += "/32"
+	} else if isHostname(s) {
+		if strings.Contains(s, "*") {
+			return "", fmt.Errorf("通配域名还没支持（要偷看 DNS 才能匹配）—— 先写具体域名，" +
+				"或者用这些域名实际所在的 IP 段")
+		}
+		if !validHostname(s) {
+			return "", fmt.Errorf("不是合法的域名")
+		}
+		return strings.ToLower(s), nil
 	}
 	ip, n, err := net.ParseCIDR(s)
 	if err != nil {
@@ -491,6 +521,57 @@ func NormalizeTarget(s string) (string, error) {
 		return "", fmt.Errorf("只支持 IPv4")
 	}
 	return fmt.Sprintf("%s/%d", n.IP.String(), ones), nil
+}
+
+// isHostname 目标写法是不是域名（而不是 IP/CIDR）。
+func isHostname(s string) bool {
+	if s == "" || strings.Contains(s, "/") || net.ParseIP(s) != nil {
+		return false
+	}
+	return strings.ContainsAny(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+}
+
+// validHostname 粗校域名（不追求 RFC 完备：拦下空格/下划线以外明显不对的写法）。
+func validHostname(s string) bool {
+	if len(s) > 253 || !strings.Contains(s, ".") {
+		return false
+	}
+	for i, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-' || r == '.' || r == '_':
+			if r == '-' && (i == 0 || s[i-1] == '.') {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// ipWildcardToCIDR 把 10.100.100.* 这种写法展开成整段 CIDR。
+//
+// 为什么单独支持它：这是 Proxifier 的写法（从它那儿搬过来的规则与工单里到处都是），
+// 语义就是“最后一段随便填”= 一整段网段。不展开的话用户会以为我们连“通配”都不支持。
+// 只允许**末尾一段**是 *（10.100.100.* ✓）；中间带 * 的（10.*.100.5）猜不出范围，不要猜。
+func ipWildcardToCIDR(s string) (string, error) {
+	parts := strings.Split(s, ".")
+	if len(parts) != 4 || parts[3] != "*" {
+		return "", fmt.Errorf("这种写法猜不出范围 —— 末尾一段才能用 *（如 10.100.100.*）；" +
+			"其他情况请写 CIDR（如 10.100.0.0/16）")
+	}
+	for _, p := range parts[:3] {
+		if p == "" || len(p) > 3 {
+			return "", fmt.Errorf("%q 不是合法的 IP 段", s)
+		}
+		for _, c := range p {
+			if c < '0' || c > '9' {
+				return "", fmt.Errorf("%q 不是合法的 IP 段（* 只能出现在最后一段）", s)
+			}
+		}
+	}
+	return strings.Join(parts[:3], ".") + ".0/24", nil
 }
 
 // targetSep 判断多目标输入里的分隔符：换行、Tab、空格等所有空白，
@@ -697,6 +778,15 @@ type Tuning struct {
 	RaceAfter string `yaml:"race_after,omitempty"`
 	// CountDirect 是否把直连流量也纳入统计（默认 false：直连不进内核过滤器，完全零开销）。
 	CountDirect bool `yaml:"count_direct,omitempty"`
+	// DomainResolve 规则里的域名怎么变成实际连接：
+	//
+	//	local（默认）本机解析出 IP 后按 IP 连 —— 客户内网域名通常只有本机能解答
+	//	upstream       把域名交给上游去解析（域名不出本机；适合同一个域名两边解析不同的场景）
+	//	auto           本机优先，连不上再把域名交给上游试一次
+	//
+	// 实测教训：我们这套环境里内网域名（main.his.com）**只有客户网内的 DNS 能解答**，
+	// 上游是公网中转服务器、根本解析不到 —— 所以默认必须是 local，不能默认透传。
+	DomainResolve string `yaml:"domain_resolve,omitempty"`
 	// Secrets 上游凭据是否加密保存（默认 true；显式写 false 才关）。
 	Secrets *bool `yaml:"secrets_encrypted,omitempty"`
 	// WarmSessions 每条上游预热几条"已握手、只差 CONNECT"的会话（默认 2；0 = 关）。
@@ -1512,6 +1602,21 @@ func (c *Config) SaveAs(path string) error {
 //	""(没写) → 默认 2 条
 //	off/0    → 关闭预热
 //	1～8     → 指定条数（超过 8 按 8，别养一堆让上游嫌弃）
+//
+// DomainResolveMode 域名解析策略：local（默认）| upstream | auto。
+func (c *Config) DomainResolveMode() string {
+	s := strings.ToLower(strings.TrimSpace(c.Tuning.DomainResolve))
+	switch s {
+	case "upstream", "remote", "proxy":
+		return "upstream"
+	case "auto", "both":
+		return "auto"
+	default:
+		return "local"
+	}
+}
+
+// WarmTarget 每条上游预热几条"已握手、只差 CONNECT"的会话。
 func (c *Config) WarmTarget() int {
 	s := strings.ToLower(strings.TrimSpace(c.Tuning.WarmSessions))
 	switch s {

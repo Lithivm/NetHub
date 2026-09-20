@@ -53,12 +53,17 @@ func prepareHTTPConnect(u *Upstream, timeout time.Duration) (net.Conn, error) {
 }
 
 // connectHTTPConnect 在已预备好的连接上发 CONNECT 并读应答（2xx = 隧道建立）。
+// 目标用 IP（引擎拿到的是内网 IP）。要把域名交给代理解析时用 sendConnectRequest。
 func connectHTTPConnect(u *Upstream, conn net.Conn, targetIP net.IP, targetPort uint16, timeout time.Duration) error {
+	target := net.JoinHostPort(targetIP.String(), fmt.Sprint(targetPort))
+	return sendConnectRequest(u, conn, target, timeout)
+}
+
+// sendConnectRequest 发一个 CONNECT target（可以是 IP:port，也可以是域名:port）。
+func sendConnectRequest(u *Upstream, conn net.Conn, target string, timeout time.Duration) error {
 	if timeout > 0 {
 		_ = conn.SetDeadline(time.Now().Add(timeout))
 	}
-	// CONNECT 的目标一律用 IP：我们的引擎拿到的就是内网 IP，不需要代理解析域名
-	target := net.JoinHostPort(targetIP.String(), fmt.Sprint(targetPort))
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "CONNECT %s HTTP/1.1\r\n", target)
 	fmt.Fprintf(&sb, "Host: %s\r\n", target)
@@ -133,4 +138,19 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// dialHTTPConnectHost 与 dialHTTPConnect 相同，但 CONNECT 的目标写成**域名**，
+// 由 HTTP 代理自己去解析（= "域名交给上游"）。
+func dialHTTPConnectHost(u *Upstream, host string, port uint16, timeout time.Duration) (net.Conn, error) {
+	conn, err := prepareHTTPConnect(u, timeout)
+	if err != nil {
+		return nil, err
+	}
+	target := net.JoinHostPort(host, fmt.Sprint(port))
+	if err := sendConnectRequest(u, conn, target, timeout); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return conn, nil
 }
