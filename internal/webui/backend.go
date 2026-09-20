@@ -142,16 +142,18 @@ type StateView struct {
 }
 
 type ChainView struct {
-	Name     string   `json:"name"`
-	_        struct{} `json:"-"`
-	Forward  string   `json:"forward"`  // 第一个上游（已遮蔽），兼容旧界面
-	Forwards []string `json:"forwards"` // 全部上游（已遮蔽）
+	Name string `json:"name"`
+	// Forward / Forwards 只给个**能认出来是哪台机器**的简化地址：
+	// 去掉 userinfo 与查询参数（auth=… 里是凭据），尾部带上 “带凭据” 标记。
+	// 列表不需要完整细节；要看/改真实地址就去编辑页（那里明文）。
+	Forward  string   `json:"forward"`
+	Forwards []string `json:"forwards"`
 	Strategy string   `json:"strategy"`
 	Probe    string   `json:"probe"`
 	Note     string   `json:"note"`
-	// Secret 口令存在 DPAPI 保险箱里（界面显示“凭据已加密”，而不是把口令显示出来）
-	Secret bool `json:"secret"`
-	// CredUser 已封存口令的账号名（只显示账号，不显示口令，用来让人确认“还是我那个账号”）
+	// Auth 这条链有没有凭据（列表上只表达这一件事）
+	Auth bool `json:"auth"`
+	// CredUser 账号名（只显示账号、不显示口令 —— 列表上用来确认“还是我那个账号”）
 	CredUser string `json:"credUser"`
 }
 
@@ -290,21 +292,76 @@ func (b *Backend) autostartDetailCached() string {
 func (b *Backend) GetChains() []ChainView {
 	out := make([]ChainView, 0, len(b.a.Cfg.Chains))
 	for _, c := range b.a.Cfg.Chains {
-		red := make([]string, 0, len(c.Upstreams()))
-		for _, f := range c.Upstreams() {
-			red = append(red, gostbat.Redact(f))
+		ups := c.Upstreams()
+		brief := make([]string, 0, len(ups))
+		hasAuth := false
+		for _, f := range ups {
+			if hasCred(f) {
+				hasAuth = true
+			}
+			brief = append(brief, briefUpstream(f))
 		}
 		first := ""
-		if len(red) > 0 {
-			first = red[0]
+		if len(brief) > 0 {
+			first = brief[0]
+		}
+		user := b.a.Cfg.ChainCredUser(c)
+		if user == "" {
+			user = credUserIn(ups)
 		}
 		out = append(out, ChainView{
-			Name: c.Name, Forward: first, Forwards: red,
+			Name: c.Name, Forward: first, Forwards: brief,
 			Strategy: c.StrategyName(), Probe: c.ProbeInterval().String(), Note: c.Note,
-			Secret: c.Secret != "", CredUser: b.a.Cfg.ChainCredUser(c),
+			Auth: hasAuth || c.Secret != "", CredUser: user,
 		})
 	}
 	return out
+}
+
+// briefUpstream 列表用的简化地址：协议 + 主机:端口 +（有凭据）“带凭据”。
+func briefUpstream(raw string) string {
+	b := gostbat.Redact(raw)
+	if u, err := upstream.Parse(raw); err == nil && u.Addr != "" {
+		proto := u.Protocol
+		if u.TLS {
+			proto += "+tls"
+		}
+		b = proto + "://" + u.Addr
+	}
+	if hasCred(raw) {
+		b += "（带凭据）"
+	}
+	return b
+}
+
+// hasCred 这个上游地址里到底有没有凭据（userinfo 或 ?auth=）。
+func hasCred(raw string) bool {
+	if u, err := upstream.Parse(raw); err == nil {
+		return u.Creds.User != "" || u.Creds.Pass != ""
+	}
+	return strings.Contains(raw, "auth=") || strings.Contains(raw, "@")
+}
+
+// credUserIn 从一串上游地址里找出账号名（只给界面显示，不泄口令）。
+func credUserIn(raws []string) string {
+	for _, raw := range raws {
+		if u, err := upstream.Parse(raw); err == nil && u.Creds.User != "" {
+			return u.Creds.User
+		}
+	}
+	return ""
+}
+
+// ChainForwardPlain 取一条链的**真实**上游地址（含凭据），专给编辑页面用。
+//
+// 为什么不在列表里就明文：列表是拿来一眼扫“哪条链路是什么”的，不需要细节；
+// 而编辑页面就是拿来实现/修正凭据的 —— 那里藏起来除了多造麻烦没任何意义。
+func (b *Backend) ChainForwardPlain(name string) ([]string, error) {
+	ch, ok := b.a.Cfg.ChainByName(name)
+	if !ok {
+		return nil, fmt.Errorf("没有这条链: %s", name)
+	}
+	return b.a.Cfg.UpstreamsResolved(ch), nil
 }
 
 // GetChainHealth 每条链的上游健康（主动探测 + 真实连接失败都会记进来）。
@@ -1152,23 +1209,40 @@ func (b *Backend) SelfTest() {
 		recent := b.a.Engine.RecentTargets(64)
 		bad := 0
 		for _, ch := range chains {
-			// 一条链可能有多条上游：按顺序试，能连上的就用（跟引擎实际的选路一致）
-			var ups []*upstream.Upstream
-			for _, raw := range ch.Upstreams() {
+			// ⓪ 代理段体检（TCP+TLS+**认证**）—— 先回答“这条链还能用吗”，再谈目标。
+			//
+			// 这里必须用 UpstreamsResolved（含保险箱里的凭据）：以前用 ch.Upstreams()
+			// 拿到的是**不带凭据**的地址，于是“口令错了”自检根本发现不了。
+			var live []*upstream.Upstream
+			var lastProbe upstream.ProbeAuthResult
+			for _, raw := range b.a.Cfg.UpstreamsResolved(ch) {
 				u, perr := upstream.Parse(raw)
 				if perr != nil {
 					b.a.Bus.Error("[%s] 上游无法解析，跳过：%v", ch.Name, perr)
 					continue
 				}
-				ups = append(ups, u)
+				r := u.ProbeAuth(6 * time.Second)
+				if r.AuthOK {
+					live = append(live, u)
+					lastProbe = r
+				}
 			}
-			if len(ups) == 0 {
+			if len(live) == 0 {
+				errText := "连不上上游"
+				if lastProbe.Err != nil {
+					errText = lastProbe.Err.Error()
+				}
+				b.a.Bus.Error("[%s] ✗ 代理段不可用：%s（先解决这个，再谈内网目标）", ch.Name, errText)
 				bad++
+				b.emit("selftest", ProbeView{Target: ch.Name, OK: false, Err: "代理段不可用：" + errText})
 				continue
+			}
+			if !lastProbe.Public {
+				b.a.Bus.Info("[%s] 代理段正常（认证通过）；出口没连到公网 —— 很多客户出口就是这样，对内网无影响", ch.Name)
 			}
 			dial := func(ip net.IP, port uint16) (net.Conn, error) {
 				var lastErr error
-				for _, u := range ups {
+				for _, u := range live {
 					conn, derr := u.Dial(ip, port, 6*time.Second)
 					if derr == nil {
 						return conn, nil
@@ -1177,9 +1251,9 @@ func (b *Backend) SelfTest() {
 				}
 				return nil, lastErr
 			}
-			desc := "上游 " + ups[0].String()
-			if len(ups) > 1 {
-				desc = fmt.Sprintf("%d 条上游依次试（%s …）", len(ups), ups[0].String())
+			desc := "上游 " + live[0].String()
+			if len(live) > 1 {
+				desc = fmt.Sprintf("%d 条上游依次试（%s …）", len(live), live[0].String())
 			}
 
 			// ① 先用“最近真的访问过的 目标:端口”：端口是真的，
@@ -1238,9 +1312,10 @@ func (b *Backend) SelfTest() {
 				}
 				b.emit("selftest", ProbeView{Target: ip.String(), Port: hit, OK: true})
 			} else if guessed {
-				// 端口是猜的：不下结论，也不计入“有问题”（这是以前误报的来源）
-				b.a.Bus.Warn("[%s]  %s 的常见端口都没通 —— 这不能说明链路有问题（端口是猜的），"+
-					"等有过内网访问记录后自检才准", ch.Name, ip)
+				// 端口是猜的：不下结论，也不计入“有问题”（以前误报的来源）
+				b.a.Bus.Info("[%s] 代理段与认证都正常；%s 的常见端口没通 —— 内网目标要有过访问记录才测得准，现在不下结论",
+					ch.Name, ip)
+				b.emit("selftest", ProbeView{Target: ch.Name, OK: true})
 			} else {
 				b.a.Bus.Error("[%s] ✗ 经该链连不上 %s 的任何端口（上游挂了？上游限制了目标？）", ch.Name, ip)
 				bad++

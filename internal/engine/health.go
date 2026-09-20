@@ -167,7 +167,13 @@ func fnv32a(s string) uint32 {
 	return h
 }
 
-// probeChain 探一条链的所有上游（顺序做；只测到代理这一段，不碰业务目标）。
+// probeChain 探一条链的所有上游（顺序做）。
+//
+// 探到什么程度：TCP+TLS+**认证**，再 CONNECT 一个公网地址确认它真能转发。
+//
+// 为什么必须带上认证：旧版只做 TCP+TLS，于是**口令错了也报“可用（96ms）”** ——
+// 真实事故里 sjy 的口令被上游间歇性拒掉，界面一直绿着，靠外部工具才查出来。
+// 公网探针（223.5.5.5:443）不涉及客户内网的任何服务器，所以“不打扰内网”这条仍然成立。
 func (e *Engine) probeChain(ch config.Chain) {
 	e.healthOf(ch) // 先确保健康表存在（markUp 依赖它）
 	for i, raw := range e.cfg.UpstreamsResolved(ch) {
@@ -176,15 +182,21 @@ func (e *Engine) probeChain(ch config.Chain) {
 			e.markUp(ch.Name, i, false, 0, err.Error())
 			continue
 		}
-		lat, perr := u.Probe(6 * time.Second)
+		r := u.ProbeAuth(6 * time.Second)
 		msg := ""
-		if perr != nil {
-			msg = perr.Error()
+		if !r.AuthOK {
+			msg = r.Err.Error()
 		}
-		if flipped, upRaw := e.markUp(ch.Name, i, perr == nil, lat, msg); flipped {
-			if perr == nil {
+		if flipped, upRaw := e.markUp(ch.Name, i, r.AuthOK, r.Latency, msg); flipped {
+			if r.AuthOK {
 				// 恢复只写日志（链路会不时抖一下，弹窗太吵）
-				e.bus.Info("链路 %s 上游 %s 可用（%d ms）", ch.Name, maskUpstream(upRaw), lat.Milliseconds())
+				if r.Public {
+					e.bus.Info("链路 %s 上游 %s 可用（%d ms，认证通过）", ch.Name, maskUpstream(upRaw), r.Latency.Milliseconds())
+				} else {
+					// 很多客户出口就是不让自己出公网 —— 对“访问内网”而言这不算故障
+					e.bus.Info("链路 %s 上游 %s 可用（%d ms，认证通过；出口未连到公网，对内网访问无影响）",
+						ch.Name, maskUpstream(upRaw), r.Latency.Milliseconds())
+				}
 			} else {
 				e.bus.Warn("链路 %s 上游 %s 不可用：%s", ch.Name, maskUpstream(upRaw), msg)
 				if e.Notify != nil {

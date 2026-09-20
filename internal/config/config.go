@@ -1150,25 +1150,73 @@ func (c *Config) SortRoutesBySpecificity() bool {
 	return true
 }
 
-// selfRule 这条规则是不是“本机自身/环回”类（目标全在 127.0.0.0/8 里）。
+// selfRule 这条规则是不是“本机/兜底”类 —— 自动排序时统一放最后。
+//
+// 两类都算：
+//
+//	① 目标全在环回（127.0.0.0/8）—— “别把我们自己的流量拿去代理”
+//	② 动作是**直连**且目标全是私网地址（10/8、172.16/12、192.168/16、环回…）——
+//	   “这些地址不走隧道”这种本机/局域网兜底规则。
+//
+// 为什么不按“具体的例外”排：这类规则的前缀往往很短（/20、/24），按前缀排会夹在
+// 业务网段中间（真实反馈：“bs 排在两个本机中间”），而它的语义是**兜底**，
+// 该待在最后。代价：若某条直连规则与更宽的走链规则重叠，排序后会变成“直连胜” ——
+// 所以这仍然只在你亲手点「按优先级排序」时发生，且可用「检查重叠」提前看出来。
 func selfRule(r Route) bool {
 	if len(r.Targets) == 0 {
 		return false
 	}
+	allLoopback := true
+	allPrivate := true
 	for _, t := range r.Targets {
 		n := targetNet(t)
-		if n == nil || !loopbackNet.Contains(n.IP) {
+		if n == nil {
 			return false
 		}
+		if !loopbackNet.Contains(n.IP) {
+			allLoopback = false
+		}
+		if !containsNet(privateNets, n.IP) {
+			allPrivate = false
+		}
 	}
-	return true
+	if allLoopback {
+		return true
+	}
+	return r.IsDirect() && allPrivate
 }
 
-// loopbackNet 127.0.0.0/8。
-var loopbackNet = func() *net.IPNet {
-	_, n, _ := net.ParseCIDR("127.0.0.0/8")
+// loopbackNet 127.0.0.0/8；privateNets 全部私有/本机地址段。
+var (
+	loopbackNet = mustCIDR("127.0.0.0/8")
+	privateNets = parseCIDRs("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "169.254.0.0/16", "100.64.0.0/10")
+)
+
+// containsNet 某个 IP 是否落在这些网段里的任意一个。
+func containsNet(nets []*net.IPNet, ip net.IP) bool {
+	for _, n := range nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func mustCIDR(s string) *net.IPNet {
+	_, n, err := net.ParseCIDR(s)
+	if err != nil {
+		panic("内置网段写错了: " + s)
+	}
 	return n
-}()
+}
+
+func parseCIDRs(list ...string) []*net.IPNet {
+	out := make([]*net.IPNet, 0, len(list))
+	for _, s := range list {
+		out = append(out, mustCIDR(s))
+	}
+	return out
+}
 
 // Precheck 启动前的体检：返回人话报告（✓ 正常 / ⚠ 提醒 / ✗ 问题）。
 // 不修任何东西，只回答“这份配置能不能干活、有没有埋雷”。

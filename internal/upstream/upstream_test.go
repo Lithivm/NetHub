@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"io"
 	"math/big"
 	"net"
 	"strings"
@@ -175,4 +176,92 @@ func selfSignedCert(t *testing.T) tls.Certificate {
 		t.Fatal(err)
 	}
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+}
+
+// 代理段体检：口令对 → AuthOK；口令错 → AuthOK=false 且原因说清"认证被拒"。
+//
+// 钉住一个真实教训：旧的探测只做 TCP+TLS，口令错了界面照样显示"可用（96ms）"，
+// 把人骗了很久（真实事故：sjy 的口令被上游间歇性拒掉，界面一直绿着）。
+func TestProbeAuth(t *testing.T) {
+	addr, stop := fakeSocks5(t, "u", "p")
+	defer stop()
+
+	good, err := Parse("socks5://u:p@" + addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := good.ProbeAuth(3 * time.Second); !r.AuthOK {
+		t.Fatalf("口令正确时应通过认证，得到 %+v", r)
+	}
+
+	bad, err := Parse("socks5://u:wrong@" + addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2 := bad.ProbeAuth(3 * time.Second)
+	if r2.AuthOK {
+		t.Error("口令错误时必须判为不通过（否则界面会一直显示“可用”）")
+	}
+	if r2.Err == nil || !strings.Contains(r2.Err.Error(), "认证") {
+		t.Errorf("原因要说清是认证问题，得到 %v", r2.Err)
+	}
+}
+
+// fakeSocks5 起一个最小 SOCKS5 服务端：只支持 用户名/口令 认证，CONNECT 一律回成功。
+func fakeSocks5(t *testing.T, user, pass string) (string, func()) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("起假上游失败: %v", err)
+	}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				buf := make([]byte, 512)
+				// ① 方法协商：只提供"用户名/口令"
+				if _, err := c.Read(buf); err != nil {
+					return
+				}
+				if _, err := c.Write([]byte{0x05, 0x02}); err != nil {
+					return
+				}
+				// ② 认证：ULEN + USER + PLEN + PASS（按长度精确读）
+				head := make([]byte, 2)
+				if _, err := io.ReadFull(c, head); err != nil {
+					return
+				}
+				uname := make([]byte, head[1])
+				if _, err := io.ReadFull(c, uname); err != nil {
+					return
+				}
+				plen := make([]byte, 1)
+				if _, err := io.ReadFull(c, plen); err != nil {
+					return
+				}
+				passwd := make([]byte, plen[0])
+				if _, err := io.ReadFull(c, passwd); err != nil {
+					return
+				}
+				if string(uname) != user || string(passwd) != pass {
+					_, _ = c.Write([]byte{0x01, 0x01})
+					return
+				}
+				if _, err := c.Write([]byte{0x01, 0x00}); err != nil {
+					return
+				}
+				// ③ CONNECT → 一律成功，然后挂住（模拟隧道，由调用方关闭）
+				if _, err := c.Read(buf); err != nil {
+					return
+				}
+				_, _ = c.Write([]byte{0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0x1f, 0x90})
+				_, _ = c.Read(buf)
+			}(c)
+		}
+	}()
+	return ln.Addr().String(), func() { ln.Close() }
 }

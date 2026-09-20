@@ -559,18 +559,21 @@ async function loadChains() {
     const row = el('div', 'trow chain-grid');
     row.appendChild(el('div', 'cell strong', c.name));
 
-    const ups = c.forwards && c.forwards.length ? c.forwards : [c.forward || ''];
+    const ups = c.forwards && c.forwards.length ? c.forwards : [c.forward || ""];
     const upCell = el('div', 'cell mono', ups[0] +
       (ups.length > 1 ? '  +' + (ups.length - 1) + ' 个' : ''));
     if (ups.length > 1) upCell.title = ups.join('\n');
     else upCell.title = ups[0];
-    // 口令封存后，上面的地址里就没有 auth= 了 —— 必须说清楚
-    // “不是被清掉了，而是挪到 secrets.dat 加密存着”，否则看起来就像配置丢了。
-    if (c.secret) {
+    // 列表只回答一件事：这条链带不带凭据。地址细节（含口令）在编辑页明文看。
+    if (c.auth) {
       const tag = el('span', 'cred-tag',
-        '  凭据已加密' + (c.credUser ? '（账号 ' + c.credUser + '）' : ''));
-      tag.title = '上游用户名/口令存在 secrets.dat（Windows DPAPI 加密，绑定本机与本用户），\n' +
-        '所以这里看不到 auth= 参数。要换账号：点「编辑」把完整 URL（含 user:pass@）填进去保存即可。';
+        '  带凭据' + (c.credUser ? '（' + c.credUser + '）' : ''));
+      tag.title = '这条链的上游需要认证，凭据加过密存在 secrets.dat 里。\n' +
+        '要看/改真实地址（含账号口令）：点「编辑」，里面是明文。';
+      upCell.appendChild(tag);
+    } else {
+      const tag = el('span', 'cred-tag', '  无凭据');
+      tag.title = '这条链的上游不需要认证（地址里没有账号口令）';
       upCell.appendChild(tag);
     }
     row.appendChild(upCell);
@@ -625,26 +628,36 @@ function btn(text, cls, fn) {
 }
 
 /* 链路编辑表单 —— 也用于"从 bat 导入后回填" */
-function chainForm(index, preset) {
+async function chainForm(index, preset) {
   const isNew = index == null;
-  const src = preset || (isNew
+  let src = preset || (isNew
     ? { name: '', forwards: [''], strategy: 'failover', probe: '30s', note: '' }
     : chains[index]);
+
+  // 已有链：去后端取**真实地址**（含凭据明文）——编辑页就是拿来改凭据的，
+  // 藏起来除了多造麻烦没任何意义（列表那边只标“带不带凭据”就够了）。
+  if (!isNew && !preset) {
+    try {
+      const plain = await call('ChainForwardPlain', src.name);
+      if (plain && plain.length) src = Object.assign({}, src, { forwards: plain });
+    } catch (e) {
+      toast('取真实上游地址失败', String((e && e.message) || e) + '　（下面显示的是简化地址，保存前请自己核对）', 'warn');
+    }
+  }
 
   const name = input('text', src.name, '例如 proxy-a（规则里用这个名字引用它）');
   const ups = (src.forwards && src.forwards.length) ? src.forwards : [src.forward || ''];
   const forwards = textarea(ups.join('\n'),
     '一行一个上游。填多个就是故障转移/负载转移：\nsocks5+tls://host-a:10080?auth=…\nsocks5+tls://host-b:10080?auth=…', 3);
   forwards.classList.add('mono');
-  // 口令封存后，这里的 URL 是**不含凭据**的（因为口令在 secrets.dat）——
-  // 必须在表单里说清楚，否则会让人以为“我的 auth= 被谁删了”。
+  // 这里显示的是明文（含账号口令）—— 要让人一眼看到自己到底配的是什么
   const credNote = el('div', 'hint');
-  if (src.secret) {
+  if (src.auth) {
     credNote.className = 'export-warn';
-    credNote.textContent = '⚠ 这条链的口令已加密保存在 secrets.dat（账号 ' + (src.credUser || '—') +
-      '）。上面地址里看不到 auth= 是正常的；保持原样点保存，口令不会丢。要换账号就把完整 URL（含 user:pass@）填进去。';
+    credNote.textContent = '⚠ 上面是**明文**（含账号口令）。保存时会加密存进 secrets.dat，' +
+      'config.yaml 里只留一个引用（账号 ' + (src.credUser || '—') + '）。';
   } else {
-    credNote.textContent = '上游 URL 里带 user:pass@ 或 ?auth=base64(user:pass) 都可以；保存时会被加密存进 secrets.dat（设置页可关）。';
+    credNote.textContent = '上游 URL 里带 user:pass@ 或 ?auth=base64(user:pass) 都可以；保存时会加密存进 secrets.dat（设置页可关）。';
   }
 
   const strategy = el('select', 'input');
@@ -671,7 +684,7 @@ function chainForm(index, preset) {
     } catch (e) { modal.error(fail(e)); }
   });
 
-  const warn = el('p', 'hint', '凭据会明文保存在 config.yaml，别外传。');
+  const warn = el('p', 'hint', '凭据保存进 secrets.dat（加密），config.yaml 里只留引用；导出配置时可以选“含凭据”。');
   const nodes = [
     field('链名', name),
     field('上游', forwards, '支持 socks5 / socks5+tls / socks4 / http / https；旧 gost 脚本可直接导入'),
@@ -770,7 +783,9 @@ async function loadRoutes() {
   t.replaceChildren();
 
   const head = el('div', 'trow thead rule-grid');
-  ['开', '#', '规则名', '目标 IP / CIDR', '走哪条链 / 直连', '说明（该链备注）', ''].forEach(h =>
+  // 第一列是开关，表头也跟着居中，否则“开”字会和开关错开一格
+  head.appendChild(el('div', 'cell center', '开'));
+  ['#', '规则名', '目标 IP / CIDR', '走哪条链 / 直连', '说明（该链备注）', ''].forEach(h =>
     head.appendChild(el('div', 'cell', h)));
   t.appendChild(head);
 

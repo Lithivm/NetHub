@@ -810,3 +810,43 @@ func TestSortPutsLoopbackLast(t *testing.T) {
 		t.Error("已经排好时不该报有改动（否则按钮每次都说“整理过了”）")
 	}
 }
+
+// 自动排序：本机/兜底类（环回，以及"直连 + 全私网"）都排最后 —— 不再夹在业务网段中间。
+func TestSortPutsLocalDirectLast(t *testing.T) {
+	c := Default()
+	c.Chains = []Chain{{Name: "tun", Forward: "socks5://127.0.0.1:1080"}}
+	c.Routes = []Route{
+		{Name: "环回直连", Targets: []string{"127.0.0.1/32"}, Chain: DirectChain},
+		{Name: "本地直连", Targets: []string{"172.22.224.0/20", "192.168.199.0/24"}, Chain: DirectChain},
+		{Name: "bs 环境", Targets: []string{"10.24.67.0/24", "10.24.68.0/24"}, Chain: "tun"},
+		{Name: "窄段业务", Targets: []string{"172.16.20.172/32"}, Chain: "tun"},
+	}
+	if !c.SortRoutesBySpecificity() {
+		t.Fatal("应该需要重排")
+	}
+	var got []string
+	for _, r := range c.Routes {
+		got = append(got, r.Name)
+	}
+	want := []string{"窄段业务", "bs 环境", "环回直连", "本地直连"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("排序结果 = %v，期望 %v（兜底类都要在最后）", got, want)
+		}
+	}
+	// 再点一次不该有改动
+	if c.SortRoutesBySpecificity() {
+		t.Error("已经排好时不该报有改动")
+	}
+	// 走链的私网规则不算兜底（bs 是链，排在直连类前面）
+	if selfRule(Route{Targets: []string{"10.24.67.0/24"}, Chain: "tun"}) {
+		t.Error("走链的私网规则不该被当成兜底类")
+	}
+	if !selfRule(Route{Targets: []string{"192.168.199.0/24"}, Chain: DirectChain}) {
+		t.Error("直连的私网规则应算兜底类")
+	}
+	// 直连但目标是公网 → 不算兜底（那是“这些公网地址不走代理”的具体决定）
+	if selfRule(Route{Targets: []string{"39.103.146.155/32"}, Chain: DirectChain}) {
+		t.Error("直连的公网目标不该算兜底类")
+	}
+}
