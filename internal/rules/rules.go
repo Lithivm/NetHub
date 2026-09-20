@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"nethub/internal/dnsmap"
+	"nethub/internal/netx"
 	"sort"
 	"strconv"
 	"strings"
@@ -558,6 +559,15 @@ func parsePortRange(s string) (portRange, error) {
 
 // parseTarget 接受 "10.0.1.0/24" 或裸 IP "10.0.1.10"。
 func parseTarget(t string) (*net.IPNet, error) {
+	// IP 通配（10.100.100.*）在这里也认 —— 配置层会归一化，但规则层不该依赖
+	// “上游一定规整过”；手写/脚本组出来的规则同样能进来。
+	if netx.IsWildcardIP(t) {
+		c, err := netx.WildcardToCIDR(t)
+		if err != nil {
+			return nil, err
+		}
+		t = c
+	}
 	if strings.Contains(t, "/") {
 		_, n, err := net.ParseCIDR(t)
 		if err != nil {

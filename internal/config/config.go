@@ -4,6 +4,8 @@ package config
 import (
 	"fmt"
 	"net"
+
+	"nethub/internal/netx"
 	"os"
 	"path/filepath"
 	"sort"
@@ -555,24 +557,8 @@ func validHostname(s string) bool {
 // 为什么单独支持它：这是 Proxifier 的写法（从它那儿搬过来的规则与工单里到处都是），
 // 语义就是“最后一段随便填”= 一整段网段。不展开的话用户会以为我们连“通配”都不支持。
 // 只允许**末尾一段**是 *（10.100.100.* ✓）；中间带 * 的（10.*.100.5）猜不出范围，不要猜。
-func ipWildcardToCIDR(s string) (string, error) {
-	parts := strings.Split(s, ".")
-	if len(parts) != 4 || parts[3] != "*" {
-		return "", fmt.Errorf("这种写法猜不出范围 —— 末尾一段才能用 *（如 10.100.100.*）；" +
-			"其他情况请写 CIDR（如 10.100.0.0/16）")
-	}
-	for _, p := range parts[:3] {
-		if p == "" || len(p) > 3 {
-			return "", fmt.Errorf("%q 不是合法的 IP 段", s)
-		}
-		for _, c := range p {
-			if c < '0' || c > '9' {
-				return "", fmt.Errorf("%q 不是合法的 IP 段（* 只能出现在最后一段）", s)
-			}
-		}
-	}
-	return strings.Join(parts[:3], ".") + ".0/24", nil
-}
+// ipWildcardToCIDR 已挪到 internal/netx（规则包也要用，避免两份实现）。
+func ipWildcardToCIDR(s string) (string, error) { return netx.WildcardToCIDR(s) }
 
 // targetSep 判断多目标输入里的分隔符：换行、Tab、空格等所有空白，
 // 外加中英文逗号、分号、顿号。用户从工单/表格里粘一串 IP 是最常见的用法。

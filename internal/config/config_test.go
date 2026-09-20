@@ -978,3 +978,41 @@ func TestFlattenLegacySecrets(t *testing.T) {
 		t.Errorf("摊平后不该再有 secret: 引用：\n%s", s)
 	}
 }
+
+// 手写进 config.yaml 的 IP 通配，也要能正常生效（不能只在界面保存那条路上才展开）。
+func TestWildcardFromYAML(t *testing.T) {
+	y := `version: 1
+chains:
+  - name: etyy
+    forward: socks5://u:p@1.2.3.4:1080
+routes:
+  - targets: ["10.100.100.*"]
+    chain: etyy
+    enabled: true
+`
+	// 走真实的加载路径（写文件 → Load → Normalize → Rules）
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(y), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("加载失败: %v", err)
+	}
+	// 配置层的契约：手写的通配在 Load 时就被展开成 CIDR（引擎/规则/过滤器只认 CIDR）。
+	if len(c.Routes) != 1 {
+		t.Fatalf("应有 1 条规则，实际 %d", len(c.Routes))
+	}
+	got := c.Routes[0].Targets
+	if len(got) != 1 || got[0] != "10.100.100.0/24" {
+		t.Fatalf("通配应被展开成 10.100.100.0/24，实际 %v", got)
+	}
+	// 落盘时也应该是展开后的写法（下次打开不再依赖展开逻辑）
+	if err := c.Save(); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(path)
+	if !strings.Contains(string(b), "10.100.100.0/24") || strings.Contains(string(b), "10.100.100.*") {
+		t.Errorf("保存的配置里应该是 CIDR：\n%s", b)
+	}
+}

@@ -282,3 +282,42 @@ func TestHostnameTarget(t *testing.T) {
 		t.Error("通配域名暂时应被拒绝")
 	}
 }
+
+// IP 通配（Proxifier 写法）在规则层也要能生效：整段命中、段外不命中、
+// 并且进内核过滤器的区间覆盖整个 /24（否则包根本到不了用户态）。
+func TestRouteIPWildcard(t *testing.T) {
+	rs := New()
+	if err := rs.Load([]Route{
+		{Name: "通配", Targets: []string{"10.100.100.*"}, Chain: "tun"},
+	}); err != nil {
+		t.Fatalf("载入规则失败: %v（通配写法在规则层也该认）", err)
+	}
+	for _, ip := range []string{"10.100.100.1", "10.100.100.99", "10.100.100.254"} {
+		if _, _, ok := rs.Match(net.ParseIP(ip).To4(), 80); !ok {
+			t.Errorf("%s 应该命中通配规则", ip)
+		}
+	}
+	for _, ip := range []string{"10.100.101.1", "10.100.99.254", "10.100.100.0"} {
+		_, _, ok := rs.Match(net.ParseIP(ip).To4(), 80)
+		if ip == "10.100.100.0" {
+			// .0 属于该网段（是否真的用得上无所谓，匹配语义要一致）
+			if !ok {
+				t.Errorf("%s 在 10.100.100.0/24 内，应该命中", ip)
+			}
+			continue
+		}
+		if ok {
+			t.Errorf("%s 不在网段内，不该命中", ip)
+		}
+	}
+	// 过滤器：必须把整个 /24 拦进来
+	var found bool
+	for _, r := range rs.FilterRanges(false) {
+		if r.First == IP2U(net.ParseIP("10.100.100.0").To4()) && r.Last == IP2U(net.ParseIP("10.100.100.255").To4()) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("过滤器应覆盖 10.100.100.0/24，实际 %+v", rs.FilterRanges(false))
+	}
+}
