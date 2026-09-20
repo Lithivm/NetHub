@@ -29,7 +29,19 @@ type Bus struct {
 	subs     []chan Line
 	file     *os.File
 	filePath string
+	fileSize int64 // 当前文件已写字节数（用于轮转）
+	maxBytes int64 // 单文件上限，超过就轮转
+	keep     int   // 保留几个历史文件（nethub.log.1 … .keep）
 }
+
+// 日志文件默认策略：单文件 8 MB、保留 2 份历史 → 磁盘占用最多约 24 MB。
+//
+// 为什么要限：客户机会连跑几个月，出问题时（比如“每 36 秒重试一次”那种坏法）
+// 一天就能写出几百 MB；而日志又没人看没人删，不能任它涨。
+const (
+	DefaultMaxBytes = 8 << 20
+	DefaultKeep     = 2
+)
 
 func New(max int) *Bus {
 	if max <= 0 {
@@ -40,20 +52,60 @@ func New(max int) *Bus {
 
 // SetFile 额外把日志写到文件（失败不致命，只报告一次）。
 func (b *Bus) SetFile(path string) error {
+	return b.SetFileLimit(path, DefaultMaxBytes, DefaultKeep)
+}
+
+// SetFileLimit 同 SetFile，但可指定单文件上限与保留份数（测试用小数）。
+func (b *Bus) SetFileLimit(path string, maxBytes int64, keep int) error {
 	// 目录不存在就建（日志默认落在 <程序目录>\logs\）
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
 		}
 	}
+	if maxBytes <= 0 {
+		maxBytes = DefaultMaxBytes
+	}
+	if keep < 0 {
+		keep = 0
+	}
+	// 已经超过上限（旧版本留下的、或轮转前被强杀） → 先轮转一次再接着写
+	var size int64
+	if st, err := os.Stat(path); err == nil && st.Size() >= maxBytes {
+		rotate(path, keep)
+	} else if err == nil {
+		size = st.Size()
+	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return err
 	}
 	b.mu.Lock()
-	b.file, b.filePath = f, path
+	if b.file != nil {
+		b.file.Close()
+	}
+	b.file, b.filePath, b.fileSize = f, path, size
+	b.maxBytes, b.keep = maxBytes, keep
 	b.mu.Unlock()
 	return nil
+}
+
+// rotate 把 log 滚成 log.1（旧的依次后移，超出 keep 份的丢掉）。
+// Windows 上 os.Rename 不接受目标已存在，所以先删目标。
+func rotate(path string, keep int) {
+	if keep > 0 {
+		for i := keep; i >= 1; i-- {
+			src, dst := path, path+".1"
+			if i > 1 {
+				src = fmt.Sprintf("%s.%d", path, i-1)
+				dst = fmt.Sprintf("%s.%d", path, i)
+			}
+			_ = os.Remove(dst)
+			_ = os.Rename(src, dst)
+		}
+		return
+	}
+	_ = os.Remove(path)
 }
 
 // FilePath 返回当前日志文件路径（未设置时为空）。
@@ -106,7 +158,7 @@ func (b *Bus) log(level, format string, args ...any) {
 	b.mu.Unlock()
 
 	if f != nil {
-		fmt.Fprintln(f, l.String())
+		b.writeFile(l)
 	}
 	for _, s := range subs {
 		select {
@@ -119,6 +171,46 @@ func (b *Bus) log(level, format string, args ...any) {
 func (b *Bus) Info(format string, a ...any)  { b.log("INFO", format, a...) }
 func (b *Bus) Warn(format string, a ...any)  { b.log("WARN", format, a...) }
 func (b *Bus) Error(format string, a ...any) { b.log("ERROR", format, a...) }
+
+// writeFile 写一行到日志文件，超上限就轮转。
+// 单独成函数是为了让轮转逻辑只在一处、并且拿到自己那把锁。
+func (b *Bus) writeFile(l Line) {
+	line := l.String() + "\n"
+
+	b.mu.Lock()
+	f := b.file
+	if f == nil {
+		b.mu.Unlock()
+		return
+	}
+	if b.maxBytes > 0 && b.fileSize+int64(len(line)) > b.maxBytes {
+		path, keep := b.filePath, b.keep
+		f.Close()
+		rotate(path, keep)
+		if nf, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+			b.file, b.fileSize = nf, 0
+			f = nf
+			// 轮转这件事本身要留个痕：现场看到上下文断了会以为是程序重启
+			sizeText := fmt.Sprintf("%d KB", b.maxBytes>>10)
+			if b.maxBytes >= 1<<20 {
+				sizeText = fmt.Sprintf("%d MB", b.maxBytes>>20)
+			}
+			notice := fmt.Sprintf("%s [INFO] 日志已轮转：%s → %s.1（单文件上限 %s，保留 %d 份）\n",
+				time.Now().Format("15:04:05.000"), filepath.Base(path), filepath.Base(path), sizeText, keep)
+			if _, err := f.WriteString(notice); err == nil {
+				b.fileSize += int64(len(notice))
+			}
+		} else {
+			b.file = nil // 轮转后开不回来就别再往里写了
+			b.mu.Unlock()
+			return
+		}
+	}
+	if n, err := f.WriteString(line); err == nil {
+		b.fileSize += int64(n)
+	}
+	b.mu.Unlock()
+}
 
 // Close 关闭文件。
 func (b *Bus) Close() {

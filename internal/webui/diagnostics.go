@@ -39,11 +39,19 @@ func (b *Backend) ExportDiagnostics() (string, error) {
 	if raw, err := os.ReadFile(b.a.Cfg.Path()); err == nil {
 		_ = addZip(zw, "config.脱敏.yaml", []byte(redactConfig(string(raw))))
 	}
-	// 3) 日志
+	// 3) 日志（连轮转出去的历史一起带，否则“出问题之前发生了什么”就断了）
 	if lp := b.a.Bus.FilePath(); lp != "" {
 		if raw, err := os.ReadFile(lp); err == nil {
 			// 只带最后 2000 行，避免几个月的日志把包撑爆
 			_ = addZip(zw, "nethub.log", []byte(tailLines(string(raw), 2000)))
+		}
+		for i := 1; i <= 3; i++ {
+			name := fmt.Sprintf("%s.%d", lp, i)
+			raw, err := os.ReadFile(name)
+			if err != nil {
+				break
+			}
+			_ = addZip(zw, fmt.Sprintf("nethub.log.%d", i), []byte(tailLines(string(raw), 2000)))
 		}
 	}
 	// 4) 说明
@@ -51,6 +59,7 @@ func (b *Backend) ExportDiagnostics() (string, error) {
   报告.txt          —— 版本、系统、规则、链路上游、健康与巡检结果、hosts 与 Clash 共存状态
   config.脱敏.yaml  —— 你的配置，上游凭据已抹掉（auth= 与 user:pass 都替换成 ***）
   nethub.log        —— 最近的日志（最后 2000 行）
+  nethub.log.1/.2   —— 轮转出去的历史（日志单文件 8 MB 上限，最多 3 个文件）
 
 可以直接发给维护者。里面不含任何上游口令。
 `))

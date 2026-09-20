@@ -4,6 +4,7 @@ package app
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"nethub/internal/config"
 	"nethub/internal/engine"
@@ -31,9 +32,55 @@ type App struct {
 	// Notify 由 GUI 注入：把状态变化变成系统托盘通知。
 	Notify func(title, text string, kind NotifyKind)
 
-	mu      sync.Mutex
-	running bool
-	lastErr string // 最近一次失败的原因（启动失败 / 拦截中断）；成功启动后清空
+	mu        sync.Mutex
+	running   bool
+	lastErr   string        // 最近一次失败的原因（启动失败 / 拦截中断）；成功启动后清空
+	hostsStop chan struct{} // 停 hosts 定期自检
+}
+
+// startHostsWatch 定期检查 hosts 是否还是我们要的样子。
+//
+// 现场实例：hosts 里有别的程序写的同名记录（它们写在我们块的上面），而 Windows 取**第一条**
+// 匹配 —— 我们写的那些等于没用；又或者别的程序干脆把整个文件重写一遍。
+// 这种“静默失效”没地方看，所以：不一致就改回来，并把原因和条数报出来。
+func (a *App) startHostsWatch() {
+	a.mu.Lock()
+	if a.hostsStop != nil { // 已经有人在看了（重启时）
+		a.mu.Unlock()
+		return
+	}
+	stop := make(chan struct{})
+	a.hostsStop = stop
+	a.mu.Unlock()
+
+	go func() {
+		tk := time.NewTicker(60 * time.Second)
+		defer tk.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-tk.C:
+			}
+			if !a.Running() || !a.Cfg.Hosts.Manage || len(a.Cfg.Hosts.Entries) == 0 {
+				continue
+			}
+			ok, why := hostsmgr.Verify(a.Cfg.Hosts.Entries)
+			if ok {
+				continue
+			}
+			res, err := hostsmgr.Apply(a.Cfg.Hosts.Entries)
+			if err != nil {
+				a.Bus.Error("hosts 被改动了（%s），且自动恢复失败: %v", why, err)
+				a.notify("hosts 被改动且恢复失败", err.Error(), NotifyError)
+				continue
+			}
+			a.Bus.Warn("hosts 被其他程序改动了（%s）→ 已自动恢复 %d 条（已刷 DNS 缓存）", why, res.Written)
+			for _, t := range res.TakenOver {
+				a.Bus.Warn("  ├ 接管同名记录: %s", t)
+			}
+		}
+	}()
 }
 
 // LastError 最近一次异常：启动失败或拦截中断（空 = 没有）。
@@ -141,12 +188,20 @@ func (a *App) Start() error {
 
 	// 1) hosts（可选）
 	if a.Cfg.Hosts.Manage {
-		if err := hostsmgr.Apply(a.Cfg.Hosts.Entries); err != nil {
+		if res, err := hostsmgr.Apply(a.Cfg.Hosts.Entries); err != nil {
 			a.Bus.Warn("hosts 写入失败（不影响拦截）: %v", err)
 			a.notify("hosts 未写入", err.Error(), NotifyWarn)
 		} else {
-			a.Bus.Info("hosts 已更新（%d 条）", len(a.Cfg.Hosts.Entries))
+			a.Bus.Info("hosts 已更新（%d 条，已刷 DNS 缓存）", res.Written)
+			// 块外原本有同名记录时，Windows 会先用那条（第一条匹配）→ 必须说一声
+			for _, t := range res.TakenOver {
+				a.Bus.Warn("hosts 里原有同名记录，已被 NetHub 接管（否则写进去也不生效）: %s", t)
+			}
+			if res.FlushError != nil {
+				a.Bus.Warn("刷 DNS 缓存失败（解析可能要等缓存过期才生效）: %v", res.FlushError)
+			}
 		}
+		a.startHostsWatch()
 	}
 
 	a.Bus.Info("上游为原生实现（无需 gost 子进程）")
@@ -175,7 +230,12 @@ func (a *App) Stop() {
 	a.mu.Lock()
 	was := a.running
 	a.running = false
+	stop := a.hostsStop
+	a.hostsStop = nil
 	a.mu.Unlock()
+	if stop != nil {
+		close(stop)
+	}
 	if !was {
 		return
 	}

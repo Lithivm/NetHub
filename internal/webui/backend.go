@@ -1169,7 +1169,8 @@ func (b *Backend) ApplyHosts(entries []string) error {
 	if len(clean) == 0 {
 		return fmt.Errorf("条目是空的，没什么可写的")
 	}
-	if err := hostsmgr.Apply(clean); err != nil {
+	res, err := hostsmgr.Apply(clean)
+	if err != nil {
 		return err
 	}
 	b.a.Cfg.Hosts.Entries = clean
@@ -1177,7 +1178,13 @@ func (b *Backend) ApplyHosts(entries []string) error {
 	if err := b.a.SaveConfig(); err != nil {
 		return err
 	}
-	b.a.Bus.Info("hosts 已写入 %d 条内网域名映射", len(clean))
+	b.a.Bus.Info("hosts 已写入 %d 条内网域名映射（已刷 DNS 缓存）", res.Written)
+	for _, t := range res.TakenOver {
+		b.a.Bus.Warn("hosts 里原有同名记录，已被 NetHub 接管（否则写进去也不生效）: %s", t)
+	}
+	if res.FlushError != nil {
+		b.a.Bus.Warn("刷 DNS 缓存失败（解析可能要等缓存过期才生效）: %v", res.FlushError)
+	}
 	return nil
 }
 
