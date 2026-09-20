@@ -197,8 +197,32 @@ code, .mono { font-family: var(--font-mono); }
   box-shadow: 0 0 0 3px transparent;
   transition: background var(--ease), box-shadow var(--ease);
 }
-.runstate.is-on .dot { background: var(--success); box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 22%, transparent); }
+.runstate.is-on .dot { background: var(--success); color: var(--success); box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 22%, transparent); }
 .runstate.is-busy .dot { background: var(--warning); }
+
+/* 指示灯呼吸：ready 绿、出错红。做两层——底色淡入淡出 + 一圈向外扩散的光晕，
+   比单纯改透明度更容易在余光里看见（余光对“闪”敏感，对“淡”不敏感）。 */
+.runstate.is-on .dot,
+.runstate.is-bad .dot {
+  animation: dot-breathe 2s ease-in-out infinite;
+}
+.runstate.is-bad .dot { background: var(--error); color: var(--error); }
+@keyframes dot-breathe {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+    box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 45%, transparent);
+  }
+  50% {
+    opacity: .55;
+    transform: scale(.82);
+    box-shadow: 0 0 0 5px color-mix(in srgb, currentColor 0%, transparent);
+  }
+}
+/* 系统里开了“减少动态效果”就别动（无障碍） */
+@media (prefers-reduced-motion: reduce) {
+  .runstate.is-on .dot, .runstate.is-bad .dot { animation: none; opacity: 1; }
+}
 .sep { width: 1px; height: 16px; background: var(--hairline); }
 .kv { font-size: var(--fs-sm); color: var(--muted); }
 .kv b { color: var(--body); font-weight: 600; font-family: var(--font-mono); font-size: var(--fs-xs); }

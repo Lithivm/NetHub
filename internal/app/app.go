@@ -33,6 +33,40 @@ type App struct {
 
 	mu      sync.Mutex
 	running bool
+	lastErr string // 最近一次失败的原因（启动失败 / 拦截中断）；成功启动后清空
+}
+
+// LastError 最近一次异常：启动失败或拦截中断（空 = 没有）。
+func (a *App) LastError() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.lastErr
+}
+
+// setLastError 记下（或清空）最近一次异常。
+func (a *App) setLastError(s string) {
+	a.mu.Lock()
+	a.lastErr = s
+	a.mu.Unlock()
+}
+
+// Status 给界面用的三态：运行中 / 已停止 / 出错。
+// 出错优先：拦截中断后（驱动卸载、被别的程序抢了句柄）不能再显示绿点，
+// 否则界面说"运行中"、实际一个包都没拦 —— 那种静默失败最坑人。
+//
+//	running = true 且无错 → Ready
+//	running = false 但有错 → Error（红）
+//	running = false 无错   → 已停止（灰，手动停的不算错）
+func (a *App) Status() (running bool, errText string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if e := a.Engine.Fatal(); e != nil {
+		return false, e.Error()
+	}
+	if a.lastErr != "" {
+		return false, a.lastErr
+	}
+	return a.running, ""
 }
 
 func New(cfg *config.Config, bus *logbus.Bus) *App {
@@ -78,6 +112,7 @@ func (a *App) Running() bool {
 
 // Start 按顺序拉起：写 hosts → 起 gost → 等端口就绪 → 开拦截。
 func (a *App) Start() error {
+	a.setLastError("") // 重新启动就清掉上次的错
 	a.mu.Lock()
 	if a.running {
 		a.mu.Unlock()
@@ -87,11 +122,13 @@ func (a *App) Start() error {
 
 	if err := a.Cfg.Validate(); err != nil {
 		a.Bus.Error("配置不合法: %v", err)
+		a.setLastError("配置不合法：" + err.Error())
 		a.notify("启动失败", err.Error(), NotifyError)
 		return err
 	}
 	if err := a.Rules.Load(toRules(a.Cfg.Routes)); err != nil {
 		a.Bus.Error("规则载入失败: %v", err)
+		a.setLastError("规则载入失败：" + err.Error())
 		a.notify("启动失败", err.Error(), NotifyError)
 		return err
 	}
@@ -111,6 +148,7 @@ func (a *App) Start() error {
 	// 2) 拦截
 	if err := a.Engine.Start(); err != nil {
 		a.Bus.Error("%v", err)
+		a.setLastError("拦截启动失败：" + err.Error())
 		a.notify("拦截启动失败", err.Error(), NotifyError)
 		return err
 	}

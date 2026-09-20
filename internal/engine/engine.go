@@ -197,8 +197,12 @@ type Engine struct {
 	statPerRule map[string]uint64
 
 	stopOnce sync.Once
-	done     chan struct{}
-	wg       sync.WaitGroup
+
+	// fatalMu/fatal 记下“拦截已中断”的原因（驱动被卸载、句柄被抢等）
+	fatalMu sync.Mutex
+	fatal   error
+	done    chan struct{}
+	wg      sync.WaitGroup
 
 	// Notify 由上层（App）注入：把"状态变化"变成应用内提示。
 	// 第二个参数为 true 表示是不好的消息。
@@ -237,6 +241,7 @@ func (e *Engine) Stats() (uint64, int) {
 
 // Start 启动拦截。返回后即处于运行状态。
 func (e *Engine) Start() error {
+	e.setFatal(nil) // 重新启动就清掉“已中断”状态
 	e.mu.Lock()
 	if e.run {
 		e.mu.Unlock()
@@ -298,6 +303,21 @@ func (e *Engine) Start() error {
 }
 
 // Stop 停止拦截并回收资源。
+// setFatal 记下“拦截已中断”的原因（nil = 正常）。
+func (e *Engine) setFatal(err error) {
+	e.fatalMu.Lock()
+	e.fatal = err
+	e.fatalMu.Unlock()
+}
+
+// Fatal 拦截是否已意外中断；中断后界面不该再显示“运行中”。
+func (e *Engine) Fatal() error {
+	e.fatalMu.Lock()
+	defer e.fatalMu.Unlock()
+	return e.fatal
+}
+
+// Stop 停止拦截：关句柄（让 packetLoop 的 Recv 立刻返回）、关 relay、等协程退完。
 func (e *Engine) Stop() {
 	e.stopOnce.Do(func() {
 		close(e.done)
@@ -486,6 +506,10 @@ func (e *Engine) packetLoop() {
 				return
 			default:
 				e.bus.Error("WinDivert Recv 失败，拦截已中断: %v", err)
+				e.setFatal(err) // 让界面变红「Error」—— 否则状态还说“运行中”，其实一个包都没拦
+				if e.Notify != nil {
+					e.Notify("拦截已中断", err.Error()+"（请重启服务）", true)
+				}
 				return
 			}
 		}

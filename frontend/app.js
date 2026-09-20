@@ -478,13 +478,19 @@ async function refreshState() {
   state = Object.assign(state, s);
 
   const on = !!s.running;
+  const bad = !on && !!(s.error);
   const rs = document.getElementById('runState');
   rs.classList.toggle('is-on', on);
-  document.getElementById('runStateText').textContent = on ? '运行中' : '未启动';
+  rs.classList.toggle('is-bad', bad);
+  // 三态：Ready（绿，呼吸）/ Error（红，呼吸）/ 已停止（灰，静止）
+  document.getElementById('runStateText').textContent = on ? 'Ready' : (bad ? 'Error' : '已停止');
+  // 出错原因平时不占位置，悬停能看；内部中转端口同样只在悬停里出现
+  rs.title = bad
+    ? s.error
+    : ('内部中转端口 ' + (s.relay || '—') + '（实现细节，无需配置）');
   document.getElementById('btnToggle').textContent = on ? '停止服务' : '启动服务';
   document.getElementById('btnToggle').className = on ? 'btn' : 'btn btn-primary';
 
-  document.getElementById('stRelay').textContent = s.relay || '-';
   document.getElementById('stTotal').textContent = s.totalConns;
   document.getElementById('stActive').textContent = s.activeConns;
 

@@ -125,7 +125,9 @@ func (b *Backend) emit(name string, data any) {
 
 type StateView struct {
 	Running bool   `json:"running"`
-	Relay   string `json:"relay"`
+	Relay   string `json:"relay"` // 内部中转端口（界面上不再直接显示，只作悬停提示）
+	// Error 非空表示当前处于出错态（启动失败 / 拦截中断）。前端用它决定红/绿。
+	Error string `json:"error"`
 	// GostPIDs 已移除：上游为原生实现，不再有子进程。
 	TotalConns  uint64 `json:"totalConns"`
 	ActiveConns int    `json:"activeConns"`
@@ -222,9 +224,11 @@ func logView(l logbus.Line) LogView {
 func (b *Backend) GetState() StateView {
 	total, active := b.a.Engine.Stats()
 	relay := b.a.Engine.RelayAddr()
+	running, errText := b.a.Status()
 	_, hostsInFile, _, _ := hostsmgr.Read()
 	return StateView{
-		Running:     b.a.Running(),
+		Running:     running,
+		Error:       errText,
 		Relay:       relay,
 		TotalConns:  total,
 		ActiveConns: active,
