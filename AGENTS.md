@@ -64,6 +64,7 @@ pwsh -NoProfile -File ./local/restart.ps1                   # 优雅重启 + 复
 ## 本机踩过的坑（别重犯）
 
 - **“做了 A、期望 B”的地方必须能观测 B**：曾经拦截改写后没有任何日志、报错代码全在“relay 收到连接之后”，于是“包根本没到 relay”在日志里与“一切正常”长得一模一样（客户端靠 SYN 重传耗到 30s 才重试）。现在有 `relayWatch` 看门狗 + 连接行状态“未送达中转”。
+- **按钮里的圆点/圆角控件别用 `top:1px` 这种算好的偏移**：`button` 的 `box-sizing` 默认是 content-box，`height` 不含边框 → 圆点会偏上（真实反馈"圆点没上下居中"）。用 `top:50% + translateY(-50%)`。
 - **拿猜出来的参数做检查，失败只能报 WARN**：链路自检会用“常见端口”猜，猜错不代表链路坏；一旦把它计入“有问题”，新增环境后自检就永久红着，用户很快学会忽略所有红字。
 - **中文 `.ps1` 必须带 UTF-8 BOM**（`powershell 5.1` 会把无 BOM 的 UTF-8 当 ANSI 解码并吞行）。
   改完跑 `pwsh -File local/fix-ps1-encoding.ps1 -Check`；用 `pwsh` 7，别用 `powershell` 5.1。

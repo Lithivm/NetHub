@@ -673,9 +673,14 @@ code, .mono { font-family: var(--font-mono); }
 .pick-row .dim { margin-left: auto; font-size: var(--fs-xs); }
 
 /* 规则开关（点一下即存）：只表示"这条规则现在生效吗"，不抢主操作的视觉重量 */
-.rule-switch { display: block; margin: 0 auto; width: 30px; height: 16px; border-radius: 9px; border: 1px solid var(--line);
+.rule-switch { display: block; margin: 0 auto; width: 30px; height: 16px; box-sizing: border-box;
+  border-radius: 9px; border: 1px solid var(--line);
   background: var(--muted-soft); position: relative; cursor: pointer; padding: 0; }
-.rule-switch::after { content: ''; position: absolute; top: 1px; left: 1px; width: 12px; height: 12px;
+/* 圆点用 50% + translateY 居中 —— 不要用 top:1px 这种算法：
+   button 的 box-sizing 默认是 content-box，height 不含边框，
+   top:1px 会落成“圆点偏上”（用户实际看到的错位）。 */
+.rule-switch::after { content: ''; position: absolute; top: 50%; left: 1px; transform: translateY(-50%);
+  width: 12px; height: 12px;
   border-radius: 50%; background: #fff; transition: left .12s ease; }
 .rule-switch.is-on { background: var(--primary); border-color: var(--primary); }
 .rule-switch.is-on::after { left: 15px; }
