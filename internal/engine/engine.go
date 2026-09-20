@@ -1455,8 +1455,14 @@ func (e *Engine) resolveHostTargets(warnChange bool) {
 		}
 	}
 	e.rules.SetHostIPs(byHost)
-	if warnChange && len(unresolved) > 0 {
-		e.bus.Warn("这些域名规则暂时解析不到，暂时不匹配任何流量：%v", unresolved)
+	if len(unresolved) > 0 {
+		// 解析不到的域名规则 = **一条也不拦**（不猜、也不退化成拦全部）。
+		// 启动时也必须说一声，否则“规则配了、什么都没拦、日志也不说”就是静默失效。
+		if warnChange {
+			e.bus.Warn("这些域名规则暂时解析不到，暂时不匹配任何流量：%v", unresolved)
+		} else {
+			e.bus.Warn("域名规则解析不到，这条规则目前不匹配任何流量：%v（本机 DNS 或 hosts 里没有这些名字？）", unresolved)
+		}
 	}
 }
 

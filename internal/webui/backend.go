@@ -185,6 +185,8 @@ type RouteView struct {
 	Inactive  bool     `json:"inactive"`
 	// A20：进程条件（空 = 不看进程）
 	Apps []string `json:"apps"`
+	// 域名目标：解析到哪、什么时候解析的、解析不到的原因（规则页直接显示）
+	HostResolves []engine.HostResolveView `json:"hostResolves"`
 	// 规则开关（默认开）；停用的规则不进匹配、不占目标
 	Enabled bool `json:"enabled"`
 }
@@ -431,14 +433,25 @@ func (b *Backend) GetRoutes() []RouteView {
 		case r.IsBlock():
 			note = "直接丢弃：应用会看到连接被拒"
 		}
+		resolves := map[string]engine.HostResolveView{}
+		for _, hr := range b.a.Engine.HostResolves() {
+			resolves[strings.ToLower(hr.Host)] = hr
+		}
+		var mine []engine.HostResolveView
+		for _, t := range r.Targets {
+			if hr, ok := resolves[strings.ToLower(strings.TrimSpace(t))]; ok {
+				mine = append(mine, hr)
+			}
+		}
 		out = append(out, RouteView{
 			Index: i, Name: r.Name, Targets: r.Targets, Ports: r.Ports,
 			Chain: r.Chain, Direct: r.IsDirect(), Block: r.IsBlock(), Note: note,
-			Shadowed:  b.a.Cfg.ShadowedTargets(i),
-			LocalNets: r.LocalNets,
-			Inactive:  !localNetsMatch(r.LocalNets, localIPv4s()),
-			Apps:      r.Apps,
-			Enabled:   r.IsEnabled(),
+			Shadowed:     b.a.Cfg.ShadowedTargets(i),
+			LocalNets:    r.LocalNets,
+			Inactive:     !localNetsMatch(r.LocalNets, localIPv4s()),
+			Apps:         r.Apps,
+			Enabled:      r.IsEnabled(),
+			HostResolves: mine,
 		})
 	}
 	return out

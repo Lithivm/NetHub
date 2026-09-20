@@ -13,7 +13,6 @@
   <div class="titlebar-brand">
     <img class="logo" src="logo.png" alt="" draggable="false">
     <span class="title">NetHub</span>
-    <span class="subtitle">内网隧道代理</span>
   </div>
   <div class="titlebar-spacer"></div>
   <div class="winbtns">
@@ -214,10 +213,6 @@
         </div>
         <div class="card-body form">
           <pre class="explain-out" id="precheckOut">正在体检…</pre>
-          <div class="hint">
-            这份报告只看你现在这份配置；要发给别人排查时用「运行日志」卡上的
-            <b>导出诊断包</b>（脱敏配置 + 最近 2000 行日志 + 体检结论打成一个 zip）。
-          </div>
         </div>
       </div>
 
@@ -260,6 +255,7 @@
       <div class="card">
         <div class="card-head">
           <h2>上游拨号</h2>
+          <button class="info-btn" id="btnHelpDial" title="每个数字都是什么意思">i</button>
           <span class="hint">一条上游不响应时，等多久换下一条</span>
         </div>
         <div class="card-body form">
@@ -267,7 +263,7 @@
             <label>单次超时<span class="unit-wrap"><input type="number" min="1" max="30" step="1" class="input input-sm" id="setDialTimeout"><span class="unit">秒</span></span></label>
             <label>总预算<span class="unit-wrap"><input type="number" min="1" max="60" step="1" class="input input-sm" id="setDialBudget"><span class="unit">秒</span></span></label>
             <label>竞速起跑<span class="unit-wrap"><input type="number" min="0" max="2000" step="50" class="input input-sm" id="setRaceAfter"><span class="unit">毫秒</span></span></label>
-            <label>预热会话<span class="unit-wrap"><input type="number" min="0" max="8" step="1" class="input input-sm" id="setWarm"></span></label>
+            <label>预热会话<span class="unit-wrap"><input type="number" min="0" max="8" step="1" class="input input-sm" id="setWarm"><span class="unit">条</span></span></label>
             <button class="btn btn-sm" id="btnDialReset">重置为默认</button>
           </div>
           <div class="hint" id="dialHint"></div>        </div>
@@ -276,16 +272,13 @@
       <div class="card">
         <div class="card-head">
           <h2>headless 模式</h2>
+          <button class="info-btn" id="btnHelpService" title="服务的细节">i</button>
           <span class="hint">把引擎装成 Windows 服务：<b>无人登录也会跑</b>（对齐 Proxifier 的 Service Mode）</span>
           <div class="spacer"></div>
           <span class="hint" id="svcInfo">—</span>
         </div>
         <div class="card-body form">
-          <div class="hint">
-            装成服务后：<b>开机即启</b>（不等登录）、以 LocalSystem 跑、<b>没有界面</b>（纯引擎）；
-            配置与日志跟界面版完全共用（都在程序目录）。安装/卸载需要管理员权限 —— 本程序本来就是以管理员跑的，点就行。
-            开机自启建议<b>二选一</b>：计划任务（登录后静默启动）或本服务。
-          </div>
+          <div class="hint">以 LocalSystem 跑、没有界面；配置与日志与界面版共用（都在程序目录）。开机自启建议<b>二选一</b>：计划任务或本服务。</div>
           <div class="input-row">
             <button class="btn btn-sm btn-primary" id="btnSvcInstall">安装服务</button>
             <button class="btn btn-sm" id="btnSvcStart">启动</button>

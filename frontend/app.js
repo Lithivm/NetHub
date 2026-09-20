@@ -843,7 +843,7 @@ async function loadRoutes() {
     idxCell.appendChild(el('span', 'idx', String(r.index + 1)));
     row.appendChild(idxCell);
     row.appendChild(el('div', 'cell' + (r.name ? ' strong' : ' dim'), r.name || '（未命名）'));
-    row.appendChild(targetsCell(r.targets || [], r.ports || [], r.shadowed || [], r.localNets || [], r.inactive, r.apps || []));
+    row.appendChild(targetsCell(r.targets || [], r.ports || [], r.shadowed || [], r.localNets || [], r.inactive, r.apps || [], r.hostResolves || []));
     row.appendChild(el('div', 'cell' + (r.direct || r.block ? ' dim' : ''), actionLabel(r)));
     row.appendChild(el('div', 'cell dim', r.note || ''));
 
@@ -859,11 +859,24 @@ async function loadRoutes() {
 
 /* 目标列：一条规则可以挂十几个目标，列表里只给摘要，全量放 title，悬停能看全。
    带端口条件时在末尾追一个暗淡的“· 端口 …”标签。 */
-function targetsCell(list, ports, shadowed, localNets, inactive, apps) {
+function targetsCell(list, ports, shadowed, localNets, inactive, apps, resolves) {
   const cap = 3;
   const c = el('div', 'cell mono');
   c.textContent = list.slice(0, cap).join(' ') +
     (list.length > cap ? '  +' + (list.length - cap) + ' 个' : '');
+  // 域名目标：把解析结果直接摆出来（悬停看全部；解析不到就是**这条规则什么都没拦**）
+  for (const hr of (resolves || [])) {
+    const s = hr.failed
+      ? el('span', 'resolve-bad', '  ⚠ ' + hr.host + ' 解析不到')
+      : el('span', 'dim', '  → ' + (hr.ips || []).join(','));
+    s.title = hr.failed
+      ? hr.host + ' 现在解析不到，这条规则暂不匹配任何流量。\n原因：' + (hr.lastErr || '未知') +
+        '\n修法：确认本机 DNS 能解析这个名字（内网域名通常只有客户网内的 DNS 才解得开），' +
+        '或者在「设置 → 系统 hosts 接管」里写一条 IP 域名映射。'
+      : hr.host + ' 解析到 ' + (hr.ips || []).join(', ') +
+        (hr.age ? '（' + hr.age + ' 前解析' + (hr.stale ? '，已过期，正在刷新' : '') + '）' : '');
+    c.appendChild(s);
+  }
   ports = ports || [];
   if (ports.length) c.appendChild(el('span', 'dim', '  · 端口 ' + ports.join(',')));
   // A20：进程条件 —— 只按进程的规则（无目标）这里会先说清楚“谁”
@@ -1244,13 +1257,44 @@ async function loadSettings() {
   setValue('setWarm', s.warmSessions === 0 ? 0 : (s.warmSessions || 2));
   const dh = document.getElementById('dialHint');
   if (dh) {
-    dh.textContent = '默认：单次 5s / 总预算 10s / 竞速起跑 300ms / 预热 2 条。'
-      + '「单次超时」= 一条上游最多等多久（实测现网握手 0.1～0.8s，5s 余量充足；调小切得更快但可能误杀慢链路）；'
-      + '「总预算」= 一整次连接最多花多久；'
-      + '「竞速起跑」= 第一条超过这个时间还没连上，就并发试其他上游、取先到的（0 = 关闭）。实测某条链的 CONNECT 要 620ms、另一条只要 75ms，'
-      + '竞速直接把业务拉到快链路；但太激进会让健康上游也每条都多拨一次，所以默认 300ms 而不是更小；'
-      + '「预热会话」= 每条上游提前养几条“已握手、只差 CONNECT”的会话，业务来了不用等握手（0 = 关闭）。改完点「保存并重启」生效。';
+    // 这里只留**当前值**一行；每个数字的完整解释在旁边的“i”弹窗里
+    dh.textContent = '当前：单次 ' + (s.dialTimeout || 5) + ' 秒 / 总预算 ' + (s.dialBudget || 10) +
+      ' 秒 / 竞速 ' + (s.raceAfter === 0 ? 0 : (s.raceAfter || 300)) +
+      ' 毫秒 / 预热 ' + (s.warmSessions === 0 ? 0 : (s.warmSessions || 2)) + ' 条。改完点「保存并重启」生效。';
   }
+}
+
+// 长说明统一放这里；界面上的小字只留一句概括 + 一个“i”按钮。
+const HELP = {
+  dial: {
+    title: '上游拨号：这几个数字是什么意思',
+    paras: [
+      '「单次超时」= 一条上游最多等多久。实测现网握手 0.1～0.8 秒，5 秒余量充足；调小切得更快，但可能误杀慢链路。',
+      '「总预算」= 一整次连接最多花多久（所有上游加起来）。超过就失败，不再干等。',
+      '「竞速起跑」= 第一条超过这个时间还没连上，就并发试其他上游、取先到的；0 = 关闭竞速。',
+      '实测某条链的 CONNECT 要 620ms、另一条只要 75ms，竞速能直接把业务拉到快链路；',
+      '但太激进会让健康上游也每条都多拨一次，所以默认 300ms 而不是更小。',
+      '「预热会话」= 每条上游提前养几条“已握手、只差 CONNECT”的会话，业务来了不用等握手；0 = 关闭（不预热）。',
+      '单位：前两个是秒，第三个是毫秒，最后一个是个数。改完点「保存并重启」生效。',
+    ],
+  },
+  service: {
+    title: 'headless 模式（Windows 服务）',
+    paras: [
+      '装成服务后：开机即启（不等登录）、以 LocalSystem 跑、没有界面（纯引擎）。',
+      '配置与日志跟界面版完全共用（都在程序目录），所以两边看到的是同一份东西。',
+      '安装 / 卸载需要管理员权限 —— 本程序本来就是以管理员跑的，点就行。',
+      '开机自启建议二选一：计划任务（登录后静默启动，能看托盘）或本服务（无人登录也能跑）；两个都开反而会有两份。',
+    ],
+  },
+};
+
+function showHelp(key) {
+  const h = HELP[key];
+  if (!h) return;
+  const box = el('div', 'help-body');
+  for (const p of h.paras) box.appendChild(el('p', 'help-p', p));
+  modal.open(h.title, [box], null);
 }
 
 // 安全地取元素：元素不存在时返回 null 而不是报错，
@@ -1343,6 +1387,9 @@ function wire() {
     try { await navigator.clipboard.writeText(out.dataset.report); toast('已复制', '自检结果已复制到剪贴板', 'success'); }
     catch { toast('复制失败', '请手动选中复制', 'warn'); }
   };
+  const bind = (id, key) => { const b = document.getElementById(id); if (b) b.onclick = () => showHelp(key); };
+  bind('btnHelpDial', 'dial');
+  bind('btnHelpService', 'service');
 
   // 连接页
   document.getElementById('btnConnRefresh').onclick = () => loadConns();

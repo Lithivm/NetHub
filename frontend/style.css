@@ -737,3 +737,19 @@ body.theme-dark .noticebar.is-warn  { background: #3a3320; color: #e8d9a8; borde
   font-size: var(--fs-xs); color: var(--muted);
   pointer-events: none;   /* 别挡住点输入框 */
 }
+
+/* 长说明收进“i”弹窗：界面上只留一句概括 */
+.info-btn {
+  width: 16px; height: 16px; flex: 0 0 auto;
+  border-radius: 50%; border: 1px solid var(--line-strong, var(--line));
+  background: transparent; color: var(--muted);
+  font: italic 600 11px/1 Georgia, serif;
+  cursor: pointer; padding: 0; margin-left: var(--s2);
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.info-btn:hover { color: var(--primary); border-color: var(--primary); }
+.help-body { max-width: 62ch; }
+.help-p { margin: 0 0 10px; line-height: 1.65; color: var(--ink-soft, var(--ink)); white-space: pre-wrap; }
+.help-p:last-child { margin-bottom: 0; }
+/* 域名规则解析不到 = 这条规则什么都没拦，得看得见 */
+.resolve-bad { color: var(--error); }
