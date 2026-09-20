@@ -283,6 +283,22 @@ async function savePatrol() {
 
 /* ═══════════════ 配置体检 / 备份 / 诊断包 ═══════════════ */
 
+/* 复制体检结果：方便贴到聊天/工单里（比让人去截图快，也比打包一个 zip 轻）。 */
+async function copyPrecheck() {
+  const out = document.getElementById('precheckOut');
+  const txt = ((out && out.textContent) || '').trim();
+  if (!txt || txt === '正在体检…') {
+    toast('还没有体检结果', '点一下「重新体检」', 'info');
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(txt);
+    toast('已复制体检结果', txt.split('\n').length + ' 行，直接粘给对方即可', 'success');
+  } catch (e) {
+    toast('复制失败', '手动选中上面的文本复制即可', 'warn');
+  }
+}
+
 async function precheckConfig(quiet) {
   const out = document.getElementById('precheckOut');
   if (!out) return;
@@ -1345,7 +1361,8 @@ function wire() {
 
   // 设置页：体检 / 诊断包 / Windows 服务
   document.getElementById('btnPrecheck').onclick = () => precheckConfig(false);
-  document.getElementById('btnDiag').onclick = exportDiagnostics;
+  document.getElementById("btnDiag").onclick = exportDiagnostics;
+  document.getElementById("btnCopyPrecheck").onclick = copyPrecheck;
   document.getElementById('btnSvcInstall').onclick = async () => {
     if (!await confirmBox('安装为 Windows 服务',
         '装成服务后会随开机自动启动（无人登录也跑，无界面）。确定吗？', false, '安装')) return;
