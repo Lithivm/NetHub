@@ -297,13 +297,18 @@ type PortRange struct {
 //
 // CIDR 展成 {first,last} 整数区间后合并相邻/重叠的区间（仅端口条件一致时），
 // 以缩短过滤器长度。
-func (s *Set) FilterRanges() []Range {
+// FilterRanges 需要装进内核过滤器的网段。
+//
+// 只装“要走链”与“要阻断”的：直连的流量**不进过滤器**（零开销、一个包也不碰）。
+// 例外：includeDirect=true 时也把直连网段装进去 —— 这时我们不修改它、只统计双向字节
+// （界面上的「统计直连流量」开关，默认关）。
+func (s *Set) FilterRanges(includeDirect bool) []Range {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	var rs []Range
 	for _, r := range s.routes {
-		if r.Action == ActionDirect {
+		if r.Action == ActionDirect && !includeDirect {
 			continue
 		}
 		var ports []PortRange

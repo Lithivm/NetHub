@@ -34,7 +34,7 @@ func TestPortMatch(t *testing.T) {
 	}
 
 	// 过滤器里只应该有隧道那条（带端口条件）；直连那条不进过滤器
-	rs := s.FilterRanges()
+	rs := s.FilterRanges(false)
 	if len(rs) != 1 {
 		t.Fatalf("期望只合并出 1 段隧道区间，得到 %+v", rs)
 	}
@@ -72,5 +72,22 @@ func TestPortRangeParse(t *testing.T) {
 		if err != nil || got.first != tc.first || got.last != tc.last {
 			t.Errorf("parsePortRange(%q) = %+v, %v", tc.in, got, err)
 		}
+	}
+}
+
+// A15：只有 includeDirect=true 时才把直连网段装进过滤器（默认不装 = 零开销）。
+func TestFilterRangesIncludeDirect(t *testing.T) {
+	s := New()
+	if err := s.Load([]Route{
+		{Name: "隧道", Targets: []string{"10.1.0.0/24"}, Chain: "a"},
+		{Name: "直连", Targets: []string{"192.168.0.0/24"}, Chain: "direct", Action: ActionDirect},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if rs := s.FilterRanges(false); len(rs) != 1 {
+		t.Errorf("默认不该把直连网段装进过滤器：%v", rs)
+	}
+	if rs := s.FilterRanges(true); len(rs) != 2 {
+		t.Errorf("开了直连统计后应装进去：%v", rs)
 	}
 }

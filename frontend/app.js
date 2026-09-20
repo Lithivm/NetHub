@@ -109,7 +109,7 @@ function showPage(name) {
     t.classList.toggle('is-active', t.dataset.page === name));
   document.querySelectorAll('.page').forEach(p => p.classList.toggle('is-active', p.id === 'page-' + name));
   if (name === 'log') scrollLogToEnd();
-  if (name === 'conn') loadConns();
+  if (name === 'conn') { loadConns(); loadCountDirect(); }
   if (name === 'diag') { precheckConfig(true); loadTargetHealth(); loadPatrol(); }
 }
 
@@ -1118,6 +1118,13 @@ function wire() {
 
   // 连接页
   document.getElementById('btnConnRefresh').onclick = () => loadConns();
+  document.getElementById('setCountDirect').onchange = async (ev) => {
+    try {
+      await call('SetCountDirect', ev.target.checked);
+      toast('已保存', ev.target.checked ? '直连流量从现在起也会被统计（服务已重启）' : '直连流量不再经过我们（零开销）', 'success');
+      await loadCountDirect();
+    } catch (e) { fail(e); ev.target.checked = !ev.target.checked; }
+  };
 
   // 规则页
   document.getElementById('btnRuleSort').onclick = sortRoutes;
@@ -1317,3 +1324,19 @@ async function boot() {
 }
 
 window.addEventListener('DOMContentLoaded', () => boot().catch(e => toast('初始化失败', String(e), 'error')));
+
+/* 直连统计开关（A15） */
+async function loadCountDirect() {
+  const cb = document.getElementById('setCountDirect');
+  if (!cb) return;
+  let v = null;
+  try { v = await call('GetCountDirect'); } catch (e) { return; }
+  if (!v) return;
+  cb.checked = !!v.on;
+  const info = document.getElementById('countDirectInfo');
+  if (info) {
+    info.textContent = v.on
+      ? '当前：开。直连流量的 ↑↓ 都会有数字（每包多一点开销）。'
+      : '当前：关。直连的字节数只有出方向的一点点（过滤器不碰直连流量，这是默认的零开销姿势）。';
+  }
+}

@@ -1233,3 +1233,27 @@ func (b *Backend) GetLoopInfo() LoopInfo {
 	n, last, at := b.a.Engine.LoopAlerts()
 	return LoopInfo{Alerts: n, Last: last, At: at}
 }
+
+// CountDirectView 直连统计开关（「连接」页上的一个勾）。
+type CountDirectView struct {
+	On bool `json:"on"`
+}
+
+// GetCountDirect 当前是否统计直连流量。
+func (b *Backend) GetCountDirect() CountDirectView {
+	return CountDirectView{On: b.a.Cfg.CountDirectEnabled()}
+}
+
+// SetCountDirect 开关直连统计。改完要重启（过滤器在启动时装配），所以顺手重启一下。
+func (b *Backend) SetCountDirect(on bool) error {
+	b.a.Cfg.Tuning.CountDirect = on
+	if err := b.a.SaveConfig(); err != nil {
+		return err
+	}
+	if on {
+		b.a.Bus.Info("已开启直连流量统计（直连网段会进内核过滤器，每包有一点开销）")
+	} else {
+		b.a.Bus.Info("已关闭直连流量统计（直连流量不再经过我们，回到零开销）")
+	}
+	return b.a.Restart()
+}

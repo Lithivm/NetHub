@@ -36,7 +36,7 @@ func TestDirectRoute(t *testing.T) {
 	}
 
 	// 过滤器只装需要接管的网段：本机网段不进去（零成本放行），隧道网段要在
-	rs := s.FilterRanges()
+	rs := s.FilterRanges(false)
 	has := func(ip string) bool {
 		u := IP2U(net.ParseIP(ip))
 		for _, r := range rs {
@@ -72,7 +72,7 @@ func TestBlockRoute(t *testing.T) {
 	}
 	u := IP2U(net.ParseIP("10.9.9.9"))
 	found := false
-	for _, r := range s.FilterRanges() {
+	for _, r := range s.FilterRanges(false) {
 		if u >= r.First && u <= r.Last {
 			found = true
 		}
@@ -100,7 +100,7 @@ func TestDirectBeforeTunnel(t *testing.T) {
 	}
 	// 10.0.0.102 被直连规则先命中，但 10.0.0.0/24 整体仍在过滤器里
 	//（过滤器是"可能被接管"的粗筛，精确顺序由引擎判定）
-	if rs := s.FilterRanges(); len(rs) != 1 {
+	if rs := s.FilterRanges(false); len(rs) != 1 {
 		t.Errorf("期望只合并出一段，得到 %+v", rs)
 	}
 }
@@ -113,7 +113,7 @@ func TestOnlyDirectRoutes(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if rs := s.FilterRanges(); len(rs) != 0 {
+	if rs := s.FilterRanges(false); len(rs) != 0 {
 		t.Errorf("只有直连规则时过滤器应为空，得到 %+v", rs)
 	}
 }

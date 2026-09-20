@@ -269,7 +269,7 @@ func (e *Engine) Start() error {
 	port := uint16(ln.Addr().(*net.TCPAddr).Port)
 
 	// 2) 用规则区间拼内核过滤器（直连规则的目标不进过滤器，见 rules.FilterRanges）
-	rs := e.rules.FilterRanges()
+	rs := e.rules.FilterRanges(e.cfg.CountDirectEnabled())
 	if len(rs) == 0 {
 		ln.Close()
 		return fmt.Errorf("没有需要拦截的规则（只填了直连规则时无事可做）")
@@ -701,6 +701,13 @@ func (e *Engine) packetLoop() {
 			e.rewriteInbound(h, pkt, addr, t, dport)
 			continue
 		}
+		// 直连流量（仅当开了“统计直连流量”才会被拦到这里）：
+		// 回来的包也要数上，否则界面上永远只有出方向（A15）。
+		if st := e.flow(dport); st != nil && st.action == rules.ActionDirect {
+			st.touch()
+			st.packets.Add(1)
+			st.down.Add(uint64(len(pkt)))
+		}
 		if _, err := h.Send(pkt, addr); err != nil {
 			e.bus.Warn("注入失败: %v", err)
 		}
@@ -828,7 +835,7 @@ func (e *Engine) passThrough(h *divert.Handle, pkt []byte, addr *divert.Address,
 		st.touch()
 		st.packets.Add(1)
 		if act == rules.ActionDirect {
-			st.up.Add(uint64(len(pkt))) // 回来的方向不经内核过滤器，只能统计出方向
+			st.up.Add(uint64(len(pkt)))
 		}
 		if flags&0x05 != 0 { // FIN 或 RST：连接收了
 			e.finish(st)

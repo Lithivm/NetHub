@@ -642,6 +642,8 @@ type Tuning struct {
 	// RaceAfter 首跳等多久还没连上就并发试其他候选（默认 150ms；0 = 关）。
 	// 竞速会成倍放大连接数，所以只在“第一条明显慢”时才值得。
 	RaceAfter string `yaml:"race_after,omitempty"`
+	// CountDirect 是否把直连流量也纳入统计（默认 false：直连不进内核过滤器，完全零开销）。
+	CountDirect bool `yaml:"count_direct,omitempty"`
 	// WarmSessions 每条上游预热几条"已握手、只差 CONNECT"的会话（默认 2；0 = 关）。
 	// 实测每条能省 193～258ms 的等待（TCP+TLS+招呼那三段）。
 	WarmSessions string `yaml:"warm_sessions,omitempty"`
@@ -1349,3 +1351,10 @@ func (c *Config) SaveAsRedacted(path string) error {
 
 // BackupNow 立刻备份当前配置（导入/回滚前用）。
 func (c *Config) BackupNow() error { return c.backupLocked() }
+
+// CountDirectEnabled 是否把直连流量也纳入统计（默认关）。
+//
+// 关（默认）：直连网段不进内核过滤器 —— 一个包都不碰，统计里只看到它的 SYN。
+// 开：直连网段也装进过滤器，我们不改包、只数双向字节（换来一点每包开销）。
+// 需要在「连接」页勾选，改完要重启服务（过滤器在启动时装配）。
+func (c *Config) CountDirectEnabled() bool { return c.Tuning.CountDirect }

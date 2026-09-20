@@ -118,6 +118,18 @@
         </div>
         <div class="table" id="connTable"></div>
       </div>
+
+      <div class="card">
+        <div class="card-head"><h2>直连流量统计</h2></div>
+        <div class="card-body form">
+          <label class="check">
+            <input type="checkbox" id="setCountDirect">
+            <span>也统计直连流量的双向字节<em>默认关：直连流量不进内核过滤器，一个包都不碰（零开销）。
+              打开后直连网段会被拦下来数一次字节再原样放行 —— 代价是每包多两次内核交互，能回答“到底省了多少流量”。改完自动重启生效。</em></span>
+          </label>
+          <div class="hint" id="countDirectInfo">—</div>
+        </div>
+      </div>
     </div>
   </section>
 
