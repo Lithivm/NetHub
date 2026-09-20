@@ -205,11 +205,22 @@
     <div class="settings-scroll">
 
       <div class="card">
+        <div class="card-head"><h2>开机自启</h2></div>
+        <div class="card-body form">
+          <label class="check">
+            <input type="checkbox" id="setAutostart">
+            <span>开机自动启动<em>用计划任务 + 最高权限：登录后静默启动，不弹 UAC</em></span>
+          </label>
+          <div class="hint" id="autoInfo"></div>
+        </div>
+      </div>
+
+      <div class="card">
         <div class="card-head"><h2>系统 hosts 接管</h2></div>
         <div class="card-body form">
           <label class="check">
             <input type="checkbox" id="setHostsManage">
-            <span>由本程序维护 hosts 里的内网域名映射<em>写入标记区块，你的手写内容不受影响</em></span>
+            <span>由本程序维护 hosts 里的内网域名映射<em>默认关闭；打开后写入标记区块，你的手写内容不受影响</em></span>
           </label>
           <div class="field">
             <label>映射条目<em>每行一条：IP 域名</em></label>
@@ -241,17 +252,6 @@
       </div>
 
       <div class="card">
-        <div class="card-head"><h2>开机自启</h2></div>
-        <div class="card-body form">
-          <label class="check">
-            <input type="checkbox" id="setAutostart">
-            <span>开机自动启动<em>用计划任务 + 最高权限：登录后静默启动，不弹 UAC</em></span>
-          </label>
-          <div class="hint" id="autoInfo"></div>
-        </div>
-      </div>
-
-      <div class="card">
         <div class="card-head">
           <h2>headless 模式</h2>
           <span class="hint">把引擎装成 Windows 服务：<b>无人登录也会跑</b>（对齐 Proxifier 的 Service Mode）</span>
@@ -275,21 +275,23 @@
       </div>
 
       <div class="card">
-        <div class="card-head"><h2>配置：导出与回滚</h2>
-          <span class="hint">导出是给别人的一份；回滚是改坏了自己退回上一版</span>
+        <div class="card-head"><h2>配置：导出与导入</h2>
+          <span class="hint">一个文件就够：拷给别人、或者换个机器一键导入</span>
         </div>
         <div class="card-body form">
           <div class="input-row">
-            <button class="btn btn-sm btn-primary" id="btnExportPkg">导出客户装机包</button>
-            <button class="btn btn-sm" id="btnExportCfg">导出配置（含凭据）</button>
-            <button class="btn btn-sm" id="btnExportDoc">导出配置说明（无凭据）</button>
+            <button class="btn btn-sm btn-primary" id="btnExportCfg">导出配置（含凭据）</button>
+            <button class="btn btn-sm" id="btnExportDoc">导出配置（无凭据）</button>
+            <button class="btn btn-sm" id="btnImportCfg">导入配置</button>
           </div>
-          <div class="hint">装机包 = 程序 + 驱动 + 当前配置 + 启动脚本 + 装机说明 + 校验值（一个 zip，上门直接拷过去）。不含日志/备份/连接历史；含明文凭据，只发给客户本人。</div>
           <div class="hint">
-            <b>导出配置</b>：完整的配置文件（链路、上游、规则、设置），同事放到程序目录就能用。<br>
-            <span class="clash-no">⚠ 这个文件里含上游登录口令，别发到群里或公共仓库，请私发。</span><br><br>
-            <b>导出配置说明</b>：一份纯文本，上游地址已打码、没有口令。
-            适合先发出去让人看懂配置，末尾会自动附上对方拿到真配置后的使用步骤。
+            <b>导出配置（含凭据）</b>：完整的 config.yaml（链路、上游、规则、设置）。
+            装好程序的新机器上点「导入配置」选它 —— 一键开箱即用。<br>
+            <span class="clash-no">⚠ 这个文件含上游登录口令，别发到群里或公共仓库，请私发。</span><br><br>
+            <b>导出配置（无凭据）</b>：同样能导入，但上游地址里的用户名/口令已剔除（导入后补上即可）。
+            适合先发给别人看配置、或存进仓库做版本记录。<br><br>
+            <b>导入配置</b>：选一个配置 .yaml（也可以选 zip 包里的）→ 先校验，再自动备份当前配置，然后直接生效。
+            校验不过就不动任何东西。回滚同理：选 backups 目录里的旧文件导入回去即可。
           </div>
           <div class="input-row"><span class="hint">—— 自动备份（每次保存前备一份，最多留 20 份）——</span></div>
           <div id="backupList" class="hint">—</div>

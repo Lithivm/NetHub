@@ -300,12 +300,13 @@ func (e *Engine) Start() error {
 			ch.Name, len(ch.Upstreams()), ch.StrategyName(), ch.ProbeInterval())
 	}
 
-	e.wg.Add(5)
+	e.wg.Add(6)
 	go e.acceptLoop()
 	go e.packetLoop()
 	go e.janitor()
 	go e.healthLoop()
 	go e.targetLoop()
+	go e.localNetLoop()
 	return nil
 }
 
@@ -689,7 +690,16 @@ func (e *Engine) packetLoop() {
 			}
 			continue
 		}
-		e.rewriteInbound(h, pkt, addr, t, dport)
+		// 没命中任何规则：要么是 relay 回来的包（源端口 = relay 端口），
+		// 要么是“带本机网段条件的规则”**当前不生效**（A16）——
+		// 后者必须原样放回内核，绝不能当入站包改写（会把用户的包改坏）。
+		if sport == relayPort {
+			e.rewriteInbound(h, pkt, addr, t, dport)
+			continue
+		}
+		if _, err := h.Send(pkt, addr); err != nil {
+			e.bus.Warn("注入失败: %v", err)
+		}
 	}
 }
 
@@ -1062,4 +1072,69 @@ func portOf(hostport string) uint16 {
 	var v uint16
 	fmt.Sscanf(p, "%d", &v)
 	return v
+}
+
+// ───────── 本机网络变化（A16：带 LocalNets 条件的规则靠它生效/失效）─────────
+
+// localNetLoop 定期把本机地址告诉规则层。
+// 为什么需要循环而不是只做一次：笔记本会在“公司网/家里/热点”之间切换，
+// 插拔网线或用 WLAN 都会变地址；规则要跟着变（否则该走隧道的流量会直连）。
+func (e *Engine) localNetLoop() {
+	defer e.wg.Done()
+	last := ""
+	tick := time.NewTicker(10 * time.Second)
+	defer tick.Stop()
+	for {
+		ips := localIPv4s()
+		sig := ipsKey(ips)
+		if sig != last {
+			e.rules.SetLocalIPs(ips)
+			if last != "" {
+				// 只在真的变了的时候说一句，别刷日志
+				e.bus.Info("本机网络变化：现在 %s（带本机网段条件的规则会据此生效/失效）", sig)
+			}
+			last = sig
+		}
+		select {
+		case <-e.done:
+			return
+		case <-tick.C:
+		}
+	}
+}
+
+// localIPv4s 本机当前的非回环 IPv4（只取已启用且有地址的网卡）。
+func localIPv4s() []net.IP {
+	ifs, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	var out []net.IP
+	for _, it := range ifs {
+		if it.Flags&net.FlagUp == 0 || it.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := it.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			if ipnet, ok := a.(*net.IPNet); ok {
+				if v4 := ipnet.IP.To4(); v4 != nil {
+					out = append(out, v4)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// ipsKey 给一组地址排个序拼成短字符串（用于“有没有变化”的比较与日志）。
+func ipsKey(ips []net.IP) string {
+	ss := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		ss = append(ss, ip.String())
+	}
+	sort.Strings(ss)
+	return strings.Join(ss, ", ")
 }

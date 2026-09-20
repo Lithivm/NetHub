@@ -34,7 +34,7 @@ func newRoutesBackend(t *testing.T) (*Backend, *config.Config) {
 func TestAddRouteMultiTarget(t *testing.T) {
 	b, cfg := newRoutesBackend(t)
 
-	if err := b.AddRoute("内网主体链路", "10.1.1.1, 10.1.1.2\n10.2.0.0/24\n10.0.0.0/24", "proxy-a", ""); err != nil {
+	if err := b.AddRoute("内网主体链路", "10.1.1.1, 10.1.1.2\n10.2.0.0/24\n10.0.0.0/24", "proxy-a", "", ""); err != nil {
 		t.Fatalf("AddRoute 失败: %v", err)
 	}
 	if len(cfg.Routes) != 1 {
@@ -71,10 +71,10 @@ func TestAddRouteMultiTarget(t *testing.T) {
 // 编辑规则同样是"改这一组目标"。
 func TestUpdateRouteMultiTarget(t *testing.T) {
 	b, cfg := newRoutesBackend(t)
-	if err := b.AddRoute("", "10.1.1.1", "proxy-a", ""); err != nil {
+	if err := b.AddRoute("", "10.1.1.1", "proxy-a", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.UpdateRoute(0, "改过名", "10.1.1.1\n10.1.1.2\n10.9.9.0/24", "proxy-b", ""); err != nil {
+	if err := b.UpdateRoute(0, "改过名", "10.1.1.1\n10.1.1.2\n10.9.9.0/24", "proxy-b", "", ""); err != nil {
 		t.Fatalf("UpdateRoute 失败: %v", err)
 	}
 	r := cfg.Routes[0]
@@ -89,7 +89,7 @@ func TestUpdateRouteMultiTarget(t *testing.T) {
 // 空目标 / 非法目标 / 跨规则重复：都要报错，且配置一点都不能变。
 func TestAddRouteRejects(t *testing.T) {
 	b, cfg := newRoutesBackend(t)
-	if err := b.AddRoute("已存在", "10.9.9.9", "proxy-a", ""); err != nil {
+	if err := b.AddRoute("已存在", "10.9.9.9", "proxy-a", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	before := len(cfg.Routes)
@@ -104,7 +104,7 @@ func TestAddRouteRejects(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := b.AddRoute("", c.targets, c.chain, "")
+			err := b.AddRoute("", c.targets, c.chain, "", "")
 			if err == nil {
 				t.Fatalf("应该报错（含 %q）", c.want)
 			}
@@ -121,7 +121,7 @@ func TestAddRouteRejects(t *testing.T) {
 // 目标列/回执里的摘要：目标多了要能看出还有几个。
 func TestTargetsSummary(t *testing.T) {
 	b, cfg := newRoutesBackend(t)
-	if err := b.AddRoute("业务系统", "10.1.1.1 10.1.1.2 10.1.1.3 10.1.1.4 10.1.1.5", "proxy-a", ""); err != nil {
+	if err := b.AddRoute("业务系统", "10.1.1.1 10.1.1.2 10.1.1.3 10.1.1.4 10.1.1.5", "proxy-a", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if len(cfg.Routes[0].Targets) != 5 {
@@ -136,7 +136,7 @@ func TestTargetsSummary(t *testing.T) {
 // 视图要带 direct 标记 + 一句说明，且不需要先建链。
 func TestAddDirectRoute(t *testing.T) {
 	b, cfg := newRoutesBackend(t)
-	if err := b.AddRoute("本机网段直连", "192.168.1.0/24 10.0.0.102", "direct", ""); err != nil {
+	if err := b.AddRoute("本机网段直连", "192.168.1.0/24 10.0.0.102", "direct", "", ""); err != nil {
 		t.Fatalf("加直连规则不该要求先建链: %v", err)
 	}
 	vs := b.GetRoutes()
@@ -151,7 +151,7 @@ func TestAddDirectRoute(t *testing.T) {
 	}
 
 	// 直连和隧道规则共存，互不影响
-	if err := b.AddRoute("HIS 主链路", "10.0.0.0/24", "proxy-a", ""); err != nil {
+	if err := b.AddRoute("HIS 主链路", "10.0.0.0/24", "proxy-a", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	vs = b.GetRoutes()

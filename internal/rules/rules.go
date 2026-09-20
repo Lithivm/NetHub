@@ -50,8 +50,15 @@ type Route struct {
 	Chain   string   `yaml:"chain" json:"chain"`
 	Action  Action   `yaml:"-" json:"-"`
 
+	// LocalNets 仅当**本机**的某块网卡地址落在这些网段里时，这条规则才生效（A16）。
+	// 空 = 总是生效（与以前一致）。
+	// 用途：笔记本在公司（10.0.0.0/8）走隧道、回家（192.168.1.0/24）直连，
+	// 不用手动改配置；也用于“只在客户内网环境下接管”这种安全阀。
+	LocalNets []string `yaml:"local_nets,omitempty" json:"localNets,omitempty"`
+
 	nets  []*net.IPNet // 解析缓存，与 Targets 一一对应
 	ports []portRange  // 解析缓存，与 Ports 一一对应；留空 = 任意端口
+	local []*net.IPNet // 解析缓存，与 LocalNets 一一对应
 }
 
 // Label 日志/报错里的简短指代。
@@ -111,6 +118,9 @@ func (s *Set) Explain(ip net.IP, port uint16, ignorePort bool) (matched int, sha
 	defer s.mu.RUnlock()
 	matched = -1
 	for i := range s.routes {
+		if !s.active(s.routes[i]) {
+			continue // 当前网络下不生效的规则不参与解释
+		}
 		hit := s.routes[i].Matches(v4, port)
 		if ignorePort {
 			hit = s.routes[i].MatchesTarget(v4)
@@ -141,6 +151,38 @@ func (r Route) matchesIP(ip net.IP) bool {
 type Set struct {
 	mu     sync.RWMutex
 	routes []Route
+	// localIPs 本机当前的非回环 IPv4（由引擎探测后写入）。
+	// 规则带 LocalNets 时用它判断“现在这台机器是不是在公司网里”。
+	localIPs []net.IP
+}
+
+// SetLocalIPs 更新本机地址（引擎在网络变化时调）。
+func (s *Set) SetLocalIPs(ips []net.IP) {
+	s.mu.Lock()
+	s.localIPs = ips
+	s.mu.Unlock()
+}
+
+// LocalIPs 当前已知的本机地址。
+func (s *Set) LocalIPs() []net.IP {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]net.IP(nil), s.localIPs...)
+}
+
+// active 这条规则在当前网络下是否生效（没有 LocalNets 就总是生效）。
+func (s *Set) active(r Route) bool {
+	if len(r.local) == 0 {
+		return true
+	}
+	for _, ip := range s.localIPs {
+		for _, n := range r.local {
+			if n.Contains(ip) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func New() *Set { return &Set{} }
@@ -177,7 +219,20 @@ func (s *Set) Load(routes []Route) error {
 			}
 			ports = append(ports, pr)
 		}
-		r.ports, r.nets = ports, nets
+		// A16：可选的“仅在某些本机网段下生效”
+		local := make([]*net.IPNet, 0, len(r.LocalNets))
+		for _, ln := range r.LocalNets {
+			ln = strings.TrimSpace(ln)
+			if ln == "" {
+				continue
+			}
+			ipnet, err := parseTarget(ln)
+			if err != nil {
+				return fmt.Errorf("第 %d 条规则%s: 本机网段 %s: %w", i+1, r.Label(), ln, err)
+			}
+			local = append(local, ipnet)
+		}
+		r.ports, r.nets, r.local = ports, nets, local
 		out = append(out, r)
 	}
 	s.mu.Lock()
@@ -197,6 +252,10 @@ func (s *Set) Match(ip net.IP, port uint16) (chain string, act Action, ok bool) 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for i := range s.routes {
+		// 带 LocalNets 的规则要“现在这台机器处于那个网络”才生效（A16）
+		if !s.active(s.routes[i]) {
+			continue
+		}
 		if s.routes[i].Matches(v4, port) {
 			return s.routes[i].Chain, s.routes[i].Action, true
 		}

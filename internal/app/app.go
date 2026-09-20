@@ -211,7 +211,8 @@ func toRules(rs []config.Route) []rules.Route {
 		case r.IsBlock():
 			act = rules.ActionBlock
 		}
-		out = append(out, rules.Route{Name: r.Name, Targets: r.Targets, Ports: r.Ports, Chain: r.Chain, Action: act})
+		out = append(out, rules.Route{Name: r.Name, Targets: r.Targets, Ports: r.Ports,
+			LocalNets: r.LocalNets, Chain: r.Chain, Action: act})
 	}
 	return out
 }

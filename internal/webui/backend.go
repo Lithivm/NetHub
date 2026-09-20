@@ -13,7 +13,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -38,9 +37,8 @@ import (
 
 // Backend 是绑定给前端的对象。
 type Backend struct {
-	a      *app.App
-	ctx    context.Context
-	exeDir string // 程序目录（装机包用；测试可注入，空则取 os.Executable 所在目录）
+	a   *app.App
+	ctx context.Context
 
 	mu       sync.Mutex
 	logCh    chan logbus.Line
@@ -163,6 +161,9 @@ type RouteView struct {
 	Block    bool     `json:"block"`
 	Note     string   `json:"note"`
 	Shadowed []string `json:"shadowed"` // 被前面的规则完全覆盖、永远不会生效的目标
+	// A16：仅在这些本机网段下生效；Inactive=当前本机网络下这条规则不生效
+	LocalNets []string `json:"localNets"`
+	Inactive  bool     `json:"inactive"`
 }
 
 type LogView struct {
@@ -327,8 +328,64 @@ func (b *Backend) GetRoutes() []RouteView {
 		out = append(out, RouteView{
 			Index: i, Name: r.Name, Targets: r.Targets, Ports: r.Ports,
 			Chain: r.Chain, Direct: r.IsDirect(), Block: r.IsBlock(), Note: note,
-			Shadowed: b.a.Cfg.ShadowedTargets(i),
+			Shadowed:  b.a.Cfg.ShadowedTargets(i),
+			LocalNets: r.LocalNets,
+			Inactive:  !localNetsMatch(r.LocalNets, localIPv4s()),
 		})
+	}
+	return out
+}
+
+// localNetsMatch 规则的本机网段条件在当前网络下是否满足（A16）。
+// 空条件 = 总是满足（与以前行为一致）。
+func localNetsMatch(conds []string, ips []net.IP) bool {
+	if len(conds) == 0 {
+		return true
+	}
+	for _, c := range conds {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			if ip := net.ParseIP(c); ip != nil {
+				n = &net.IPNet{IP: ip.To4(), Mask: net.CIDRMask(32, 32)}
+			} else {
+				continue
+			}
+		}
+		for _, ip := range ips {
+			if n.Contains(ip) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// localIPv4s 本机当前的非回环 IPv4（界面上判断“这条规则现在生不生效”用）。
+func localIPv4s() []net.IP {
+	ifs, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	var out []net.IP
+	for _, it := range ifs {
+		if it.Flags&net.FlagUp == 0 || it.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := it.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			if ipnet, ok := a.(*net.IPNet); ok {
+				if v4 := ipnet.IP.To4(); v4 != nil {
+					out = append(out, v4)
+				}
+			}
+		}
 	}
 	return out
 }
@@ -668,7 +725,7 @@ func (in ChainInput) toChain() config.Chain {
 
 // ruleFrom 把界面传来的"一条规则"整理成 config.Route：目标与端口文本都可以一次填多个
 // （换行/逗号/顿号/空格分隔），这里负责拆分 + 归一化。端口留空 = 任意端口。
-func ruleFrom(name, targets, chain, ports string) (config.Route, error) {
+func ruleFrom(name, targets, chain, ports, localNets string) (config.Route, error) {
 	ts, _, err := config.NormalizeTargets(targets)
 	if err != nil {
 		return config.Route{}, err
@@ -680,7 +737,25 @@ func ruleFrom(name, targets, chain, ports string) (config.Route, error) {
 	if err != nil {
 		return config.Route{}, err
 	}
-	return config.Route{Name: name, Targets: ts, Ports: ps, Chain: chain}, nil
+	// A16：可选的“仅在这些本机网段下生效”（逗号/分号/空白分隔都行）
+	var lns []string
+	for _, ln := range strings.FieldsFunc(localNets, func(r rune) bool {
+		switch r {
+		case ',', '，', ';', '；', ' ', '\t', '\n', '\r':
+			return true
+		}
+		return false
+	}) {
+		ln = strings.TrimSpace(ln)
+		if ln == "" {
+			continue
+		}
+		if _, _, err := net.ParseCIDR(ln); err != nil && net.ParseIP(ln) == nil {
+			return config.Route{}, fmt.Errorf("本机网段 %q 不是合法的 IP/网段", ln)
+		}
+		lns = append(lns, ln)
+	}
+	return config.Route{Name: name, Targets: ts, Ports: ps, Chain: chain, LocalNets: lns}, nil
 }
 
 // ruleSaved 保存成功后给日志/界面的回执文案。
@@ -693,8 +768,8 @@ func ruleSaved(verb string, rt config.Route) string {
 
 // AddRoute 添加一条规则。名字可留空；目标与端口都可以一次填多个 ——
 // 多个目标属于**同一条规则**（对齐 Proxifier：一个动作挂一组目标 + 一组端口）。
-func (b *Backend) AddRoute(name, targets, chain, ports string) error {
-	rt, err := ruleFrom(name, targets, chain, ports)
+func (b *Backend) AddRoute(name, targets, chain, ports, localNets string) error {
+	rt, err := ruleFrom(name, targets, chain, ports, localNets)
 	if err != nil {
 		return err
 	}
@@ -705,8 +780,8 @@ func (b *Backend) AddRoute(name, targets, chain, ports string) error {
 }
 
 // UpdateRoute 替换第 index 条规则（同样支持多目标 + 端口条件）。
-func (b *Backend) UpdateRoute(index int, name, targets, chain, ports string) error {
-	rt, err := ruleFrom(name, targets, chain, ports)
+func (b *Backend) UpdateRoute(index int, name, targets, chain, ports, localNets string) error {
+	rt, err := ruleFrom(name, targets, chain, ports, localNets)
 	if err != nil {
 		return err
 	}
@@ -1140,66 +1215,5 @@ func (b *Backend) ExportConfig() (string, error) {
 		return "", err
 	}
 	b.a.Bus.Info("设置已导出到 %s（含上游凭据，请通过安全渠道分发）", path)
-	return path, nil
-}
-
-// ExportSummary 导出一份**不含凭据**的纯文本说明：上游（遮蔽后）+ 规则 + 用法。
-// 适合贴在群里让人先看懂配置，需要真配置时再单独发 ExportConfig 的产物。
-func (b *Backend) ExportSummary() (string, error) {
-	name := "nethub-配置说明.txt"
-	path, err := wruntime.SaveFileDialog(b.ctx, wruntime.SaveDialogOptions{
-		Title:           "导出配置说明（不含凭据）",
-		DefaultFilename: name,
-		Filters: []wruntime.FileFilter{
-			{DisplayName: "文本文件 (*.txt)", Pattern: "*.txt"},
-		},
-	})
-	if err != nil {
-		return "", err
-	}
-	if path == "" {
-		return "", nil
-	}
-	if !strings.HasSuffix(strings.ToLower(path), ".txt") {
-		path += ".txt"
-	}
-
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "NetHub 配置说明（不含凭据）\n")
-	fmt.Fprintf(&sb, "生成时间：%s\n\n", time.Now().Format("2006-01-02 15:04:05"))
-
-	sb.WriteString("【链路 / 上游】\n")
-	for _, c := range b.a.Cfg.Chains {
-		fmt.Fprintf(&sb, "  %s\n    上游：%s\n", c.Name, gostbat.Redact(c.Forward))
-		if c.Note != "" {
-			fmt.Fprintf(&sb, "    说明：%s\n", c.Note)
-		}
-	}
-
-	sb.WriteString("\n【路由规则】（自上而下匹配，命中即止；一条规则可含多个目标）\n")
-	for i, r := range b.a.Cfg.Routes {
-		fmt.Fprintf(&sb, "  %d. %s  →  %s\n", i+1, r.Label(), r.Chain)
-	}
-
-	sb.WriteString("\n【其它设置】\n")
-	fmt.Fprintf(&sb, "  relay：%s\n", b.a.Cfg.Relay)
-	fmt.Fprintf(&sb, "  hosts 托管：%v（%d 条映射）\n", b.a.Cfg.Hosts.Manage, len(b.a.Cfg.Hosts.Entries))
-	fmt.Fprintf(&sb, "  界面主题：%s\n", b.a.Cfg.UI.Theme)
-
-	sb.WriteString("\n【同事怎么用】\n")
-	sb.WriteString("  1. 把 nethub.exe、WinDivert.dll、WinDivert64.sys、nethub.ico 和 config.yaml\n")
-	sb.WriteString("     放在同一个文件夹里\n")
-	sb.WriteString("  2. 双击 nethub.exe（会弹一次 UAC，因为要加载内核驱动）\n")
-	sb.WriteString("  3. 界面会显示「内网 N/N 全部走直连 …… 走向正确」就说明好了\n")
-	sb.WriteString("  4. 如需开机自启：界面「设置 → 开机自启」勾上（计划任务 + 最高权限，不弹 UAC）\n")
-	sb.WriteString("\n【注意】\n")
-	sb.WriteString("  · 本文件不含上游凭据；真正的 config.yaml 含凭据，请通过安全渠道分发\n")
-	sb.WriteString("  · 内网域名需要同事本机 hosts 里有映射（或让程序托管：设置 → hosts 接管）\n")
-	sb.WriteString("  · Clash 必须让内网走直连：设置 → 与 Clash 共存 会检测并给出要填的绕过地址\n")
-
-	if err := os.WriteFile(path, []byte(sb.String()), 0o644); err != nil {
-		return "", err
-	}
-	b.a.Bus.Info("配置说明已导出到 %s", path)
 	return path, nil
 }

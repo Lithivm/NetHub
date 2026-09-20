@@ -168,6 +168,10 @@ type Route struct {
 	Ports   []string `yaml:"ports,omitempty"` // 端口/区间，可多个；留空 = 任意端口
 	Chain   string   `yaml:"chain"`           // 动作：走哪条链，或 direct / block
 
+	// LocalNets 仅当本机的网卡地址落在这些网段里时，这条规则才生效（A16）。
+	// 空 = 总是生效。用于“公司网走隧道、家里直连”这类场景，不用手动改配置。
+	LocalNets []string `yaml:"local_nets,omitempty"`
+
 	// Target 是 v1 的旧写法（一条规则一个目标），只为读老 config.yaml 保留：
 	// 载入时由 Normalize 并进 Targets，保存时不再写出。
 	Target string `yaml:"target,omitempty"`
@@ -1278,3 +1282,65 @@ func (c *Config) WarmTarget() int {
 	}
 	return n
 }
+
+// ───────── 配置导出（无凭据版）─────────
+//
+// 与"打码"（gostbat.Redact 把口令换成 ***）不同：这里要的是**能导入**，
+// 所以是把用户名/口令**剔除**掉 —— 打码后的 auth= 不是合法 base64，导入会直接校验失败。
+
+// stripCreds 去掉上游 URL 里的凭据，保留协议与地址（结果仍可被 upstream.Parse 解析）。
+func stripCreds(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	up, err := upstream.Parse(raw)
+	if err != nil {
+		return raw // 解析不了就原样留着，让校验阶段给出更直白的报错
+	}
+	if up.Creds.User == "" && up.Creds.Pass == "" {
+		return raw
+	}
+	switch {
+	case up.Protocol == "http" && up.TLS:
+		return "https://" + up.Addr
+	case up.Protocol == "http":
+		return "http://" + up.Addr
+	case up.TLS:
+		return up.Protocol + "+tls://" + up.Addr
+	default:
+		return up.Protocol + "://" + up.Addr
+	}
+}
+
+// SaveAsRedacted 导出一份"无凭据但可导入"的配置。
+func (c *Config) SaveAsRedacted(path string) error {
+	cp := *c
+	cp.Chains = make([]Chain, len(c.Chains))
+	for i, ch := range c.Chains {
+		n := ch
+		n.Forward = stripCreds(ch.Forward)
+		if len(ch.Forwards) > 0 {
+			n.Forwards = make([]string, 0, len(ch.Forwards))
+			for _, f := range ch.Forwards {
+				n.Forwards = append(n.Forwards, stripCreds(f))
+			}
+		}
+		cp.Chains[i] = n
+	}
+	b, err := yaml.Marshal(&cp)
+	if err != nil {
+		return err
+	}
+	header := "# NetHub 配置（无凭据版）\n" +
+		"# 上游地址里的用户名/口令已剔除 —— 这个文件**可以直接导入**，导入后请补上口令。\n" +
+		"# 生成时间：" + time.Now().Format("2006-01-02 15:04:05") + "\n"
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append([]byte(header), b...), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// BackupNow 立刻备份当前配置（导入/回滚前用）。
+func (c *Config) BackupNow() error { return c.backupLocked() }

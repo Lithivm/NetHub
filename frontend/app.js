@@ -748,7 +748,7 @@ async function loadRoutes() {
     idxCell.appendChild(el('span', 'idx', String(r.index + 1)));
     row.appendChild(idxCell);
     row.appendChild(el('div', 'cell' + (r.name ? ' strong' : ' dim'), r.name || '（未命名）'));
-    row.appendChild(targetsCell(r.targets || [], r.ports || [], r.shadowed || []));
+    row.appendChild(targetsCell(r.targets || [], r.ports || [], r.shadowed || [], r.localNets || [], r.inactive));
     row.appendChild(el('div', 'cell' + (r.direct || r.block ? ' dim' : ''), actionLabel(r)));
     row.appendChild(el('div', 'cell dim', r.note || ''));
 
@@ -764,13 +764,21 @@ async function loadRoutes() {
 
 /* 目标列：一条规则可以挂十几个目标，列表里只给摘要，全量放 title，悬停能看全。
    带端口条件时在末尾追一个暗淡的“· 端口 …”标签。 */
-function targetsCell(list, ports, shadowed) {
+function targetsCell(list, ports, shadowed, localNets, inactive) {
   const cap = 3;
   const c = el('div', 'cell mono');
   c.textContent = list.slice(0, cap).join(' ') +
     (list.length > cap ? '  +' + (list.length - cap) + ' 个' : '');
   ports = ports || [];
   if (ports.length) c.appendChild(el('span', 'dim', '  · 端口 ' + ports.join(',')));
+  localNets = localNets || [];
+  if (localNets.length) {
+    // A16：这条规则只在某些本机网段下生效；当前不满足就标出来（别让人以为“配了却没生效”）
+    const s = el('span', inactive ? 'shadow-warn' : 'dim',
+      '  · 仅限本机在 ' + localNets.join(',') + (inactive ? '（当前网络不满足，暂时不生效）' : ''));
+    s.title = '本机地址落在 ' + localNets.join(',') + ' 里时这条规则才生效';
+    c.appendChild(s);
+  }
   shadowed = shadowed || [];
   if (shadowed.length) {
     const warn = el('span', 'shadow-warn', '  ⚠ ' + shadowed.length + ' 个目标被前面的规则覆盖');
@@ -837,6 +845,19 @@ function ruleForm(index) {
 
   const ports = input('text', (src.ports || []).join(', '), '留空 = 全部端口；也可 443, 8000-9000');
 
+  // A16：可选“仅在这些本机网段下生效”
+  const localNets = textarea((src.localNets || []).join('\n'),
+    '留空 = 总是生效。填了就要求“本机也有个地址在这些网段里”才生效，\n示例：10.0.0.0/8（在公司才走隧道，回家自动直连）', 3);
+  const lnBox = el('div', 'input-row top');
+  lnBox.appendChild(localNets);
+  lnBox.appendChild(btn('填本机网段', 'btn btn-xs', async () => {
+    try {
+      const subs = await call('LocalSubnets');
+      if (!subs || !subs.length) { toast('没读到本机网段', '接口上没有 IPv4 地址', 'warn'); return; }
+      localNets.value = splitTargets(localNets.value).concat(subs).join('\n');
+    } catch (e) { fail(e); }
+  }));
+
   const nodes = [
     field('规则名', name, '给这条规则起个名字（可留空）'),
     field('目标', targetsBox,
@@ -847,18 +868,22 @@ function ruleForm(index) {
     field('动作', sel,
       '「直连」= 不改写、不进隧道（本机网段、打印机、共享盘、同事机器用这个）；' +
       '「阻断」= 直接丢弃；规则自上而下匹配，命中即停'),
+    field('生效条件（可选）', lnBox,
+      '只在这台机器处于某个网络时才生效 —— 笔记本在公司走隧道、回家自动直连。' +
+      '当前不满足条件的规则会在列表里标灰，不会模棱两可地“好像没生效”'),
   ];
 
   modal.open(isNew ? '添加规则' : '编辑规则', nodes, async () => {
     try {
-      if (isNew) await call('AddRoute', name.value, targets.value, sel.value, ports.value);
-      else await call('UpdateRoute', index, name.value, targets.value, sel.value, ports.value);
+      if (isNew) await call('AddRoute', name.value, targets.value, sel.value, ports.value, localNets.value);
+      else await call('UpdateRoute', index, name.value, targets.value, sel.value, ports.value, localNets.value);
       modal.close();
       await loadRoutes();
       toast(isNew ? '已添加规则' : '已更新规则',
         (name.value.trim() || '未命名') + '：' + splitTargets(targets.value).length + ' 个目标' +
         (splitTargets(ports.value).length ? '，端口 ' + ports.value.trim() : '') + ' → ' +
-        actionName(sel.value),
+        actionName(sel.value) +
+        (splitTargets(localNets.value).length ? '（仅限本机在 ' + localNets.value.trim().replace(/\s+/g, ' ') + ' 时）' : ''),
         'success');
     } catch (e) { modal.error(fail(e)); }
   });
@@ -1142,33 +1167,29 @@ function wire() {
   document.getElementById('btnSaveRestart').onclick = () => saveSettings(true);
   document.getElementById('btnOpenConfig').onclick = () => call('OpenConfigFile').catch(fail);
   document.getElementById('btnOpenDir').onclick = () => call('OpenProgramDir').catch(fail);
-  document.getElementById('btnExportPkg').onclick = async () => {
-    try {
-      const r = await call('ExportPackage');
-      if (!r || !r.path) return; // 用户取消
-      const box = el('div');
-      const tip = el('div', r.warning ? 'export-warn' : 'hint');
-      tip.textContent = r.warning ? ('⚠ ' + r.warning) : '解压后在客户机器上双击「启动NetHub.cmd」（会弹 UAC，必须点「是」）。';
-      box.appendChild(tip);
-      const ul = el('ul', 'export-list');
-      (r.files || []).forEach(f => { const li = el('li', 'mono'); li.textContent = f; ul.appendChild(li); });
-      box.appendChild(ul);
-      const warn = el('div', 'hint');
-      warn.textContent = '含明文上游凭据 —— 别往群里/邮件列表发；传输后可用 SHA256SUMS.txt 校验。';
-      box.appendChild(warn);
-      modal.open('装机包已导出：' + r.path, [box], null);
-    } catch (e) { fail(e); }
-  };
   document.getElementById('btnExportCfg').onclick = async () => {
     try {
       const p = await call('ExportConfig');
-      if (p) toast('已导出配置', p + '　（含上游凭据，请通过安全渠道分发）', 'success');
+      if (p) toast('已导出配置', p + '　（含上游凭据；新机器上「导入配置」选它即可开箱即用。请私发）', 'success');
     } catch (e) { fail(e); }
   };
   document.getElementById('btnExportDoc').onclick = async () => {
     try {
-      const p = await call('ExportSummary');
-      if (p) toast('已导出配置说明', p + '　（不含凭据，可安全发送）', 'success');
+      const p = await call('ExportConfigRedacted');
+      if (p) toast('已导出无凭据配置', p + '　（同样可导入，但需补上游口令；可安全发送）', 'success');
+    } catch (e) { fail(e); }
+  };
+  document.getElementById('btnImportCfg').onclick = async () => {
+    const ok = await confirmBox('导入配置',
+      '会先用新配置做一次完整校验，通过后自动备份当前配置再生效并重启服务。校验不过则什么都不改。确定继续？',
+      false, '选择文件');
+    if (!ok) return;
+    try {
+      const p = await call('ImportConfig');
+      if (p) {
+        toast('已导入配置并重启', p, 'success');
+        await loadAll();
+      }
     } catch (e) { fail(e); }
   };
 

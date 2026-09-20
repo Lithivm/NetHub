@@ -14,11 +14,11 @@ func TestFeatureWiring(t *testing.T) {
 	b, cfg := newRoutesBackend(t)
 
 	// 两条规则：一条宽（走链）、一条窄（直连）+ 一条完全被覆盖的（影子）
-	if err := b.AddRoute("窄段直连", "10.0.0.5", "direct", ""); err != nil {
+	if err := b.AddRoute("窄段直连", "10.0.0.5", "direct", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	// 顺序：窄的在前（最具体优先）
-	if err := b.AddRoute("宽段", "10.0.0.0/24", "proxy-a", ""); err != nil {
+	if err := b.AddRoute("宽段", "10.0.0.0/24", "proxy-a", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	// 被完全覆盖的规则 **存不进去**（程序会拒绝），所以影子目标只可能来自手写配置 ——
