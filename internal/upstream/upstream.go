@@ -35,6 +35,7 @@ package upstream
 import (
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -154,3 +155,52 @@ func (u *Upstream) tls() *tls.Config {
 	}
 	return u.tlsConfig()
 }
+
+// ───────────────────────── 预热连接池（A11）─────────────────────────
+//
+// 思路：把"连上游"这件事拆成两段 ——
+//
+//	预备（Prepare）：TCP + 可选 TLS + SOCKS 方法协商/认证   ← 与目标无关，可以提前做
+//	打通（ConnectOn）：一条 CONNECT 请求                      ← 必须等知道目标才能做
+//
+// 连接池把"预备好的连接"养着，业务来了只做第二段。
+// 实测：现网上游预备要 193～258ms（etyy 甚至 700ms+），打通只要 1 个 RTT。
+
+// Prepare 连上上游并把握手做到"只差 CONNECT"。不支持的上游返回 ErrNoPrepare。
+func (u *Upstream) Prepare(timeout time.Duration) (net.Conn, error) {
+	switch u.Protocol {
+	case "socks5":
+		return socks.Prepare(u.Addr, u.Creds, u.tls(), timeout)
+	case "socks4", "socks4a":
+		return socks.PrepareSOCKS4(u.Addr, u.tls(), timeout)
+	case "http":
+		return prepareHTTPConnect(u, timeout)
+	default:
+		return nil, ErrNoPrepare
+	}
+}
+
+// ConnectOn 在预备好的连接上打通到 targetIP:port。
+func (u *Upstream) ConnectOn(conn net.Conn, targetIP net.IP, targetPort uint16, timeout time.Duration) error {
+	v4 := targetIP.To4()
+	if v4 == nil {
+		return fmt.Errorf("仅支持 IPv4 目标: %v", targetIP)
+	}
+	switch u.Protocol {
+	case "socks5":
+		return socks.ConnectOn(conn, v4, targetPort, timeout)
+	case "socks4", "socks4a":
+		host := v4.String()
+		if u.Protocol == "socks4a" {
+			host = v4.String() // 目标是 IP，4a 与 4 等價
+		}
+		return socks.ConnectSOCKS4On(conn, u.Creds.User, host, targetPort, timeout)
+	case "http":
+		return connectHTTPConnect(u, conn, v4, targetPort, timeout)
+	default:
+		return ErrNoPrepare
+	}
+}
+
+// ErrNoPrepare 这条上游不支持"先预备后打通"（只能整体 Dial）。
+var ErrNoPrepare = errors.New("这条上游不支持预热（只能一次性拨号）")

@@ -128,6 +128,9 @@ type StateView struct {
 	Relay   string `json:"relay"` // 内部中转端口（界面上不再直接显示，只作悬停提示）
 	// Error 非空表示当前处于出错态（启动失败 / 拦截中断）。前端用它决定红/绿。
 	Error string `json:"error"`
+	// 预热连接池近况（A11）
+	PoolWarm uint64 `json:"poolWarm"`
+	PoolHits uint64 `json:"poolHits"`
 	// GostPIDs 已移除：上游为原生实现，不再有子进程。
 	TotalConns  uint64 `json:"totalConns"`
 	ActiveConns int    `json:"activeConns"`
@@ -227,10 +230,13 @@ func (b *Backend) GetState() StateView {
 	total, active := b.a.Engine.Stats()
 	relay := b.a.Engine.RelayAddr()
 	running, errText := b.a.Status()
+	taken, _, warm := b.a.Engine.PoolStats()
 	_, hostsInFile, _, _ := hostsmgr.Read()
 	return StateView{
 		Running:     running,
 		Error:       errText,
+		PoolWarm:    warm,
+		PoolHits:    taken,
 		Relay:       relay,
 		TotalConns:  total,
 		ActiveConns: active,

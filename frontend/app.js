@@ -513,6 +513,17 @@ async function loadChains() {
   await loadChainHealth();
   document.getElementById('badgeChain').textContent = chains.length;
 
+  // 预热连接池近况（A11）：养着几条、命中过多少次
+  const wi = document.getElementById('warmInfo');
+  if (wi) {
+    try {
+      const st = await call('GetState');
+      wi.textContent = st.poolWarm > 0
+        ? ('预热会话：养着 ' + st.poolWarm + ' 条 · 已命中 ' + (st.poolHits || 0) + ' 次')
+        : '';
+    } catch (e) { /* 拿不到就不显示 */ }
+  }
+
   const t = document.getElementById('chainTable');
   t.replaceChildren();
 

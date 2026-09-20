@@ -19,6 +19,20 @@ import (
 
 // dialHTTPConnect 经 HTTP 代理连到 targetIP:port。
 func dialHTTPConnect(u *Upstream, targetIP net.IP, targetPort uint16, timeout time.Duration) (net.Conn, error) {
+	conn, err := prepareHTTPConnect(u, timeout)
+	if err != nil {
+		return nil, err
+	}
+	if err := connectHTTPConnect(u, conn, targetIP, targetPort, timeout); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
+// prepareHTTPConnect 连上代理（+可选 TLS）；HTTP 代理的认证在 CONNECT 里发，
+// 所以预备阶段就是 TCP+TLS。
+func prepareHTTPConnect(u *Upstream, timeout time.Duration) (net.Conn, error) {
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
@@ -27,17 +41,22 @@ func dialHTTPConnect(u *Upstream, targetIP net.IP, targetPort uint16, timeout ti
 		return nil, fmt.Errorf("连代理失败: %w", err)
 	}
 	_ = raw.SetDeadline(time.Now().Add(timeout))
-
-	var conn net.Conn = raw
-	if u.TLS {
-		tc := tls.Client(raw, u.tlsConfig())
-		if err := tc.Handshake(); err != nil {
-			raw.Close()
-			return nil, fmt.Errorf("代理的 TLS 握手失败: %w", err)
-		}
-		conn = tc
+	if !u.TLS {
+		return raw, nil
 	}
+	tc := tls.Client(raw, u.tlsConfig())
+	if err := tc.Handshake(); err != nil {
+		raw.Close()
+		return nil, fmt.Errorf("代理的 TLS 握手失败: %w", err)
+	}
+	return tc, nil
+}
 
+// connectHTTPConnect 在已预备好的连接上发 CONNECT 并读应答（2xx = 隧道建立）。
+func connectHTTPConnect(u *Upstream, conn net.Conn, targetIP net.IP, targetPort uint16, timeout time.Duration) error {
+	if timeout > 0 {
+		_ = conn.SetDeadline(time.Now().Add(timeout))
+	}
 	// CONNECT 的目标一律用 IP：我们的引擎拿到的就是内网 IP，不需要代理解析域名
 	target := net.JoinHostPort(targetIP.String(), fmt.Sprint(targetPort))
 	var sb strings.Builder
@@ -50,26 +69,22 @@ func dialHTTPConnect(u *Upstream, targetIP net.IP, targetPort uint16, timeout ti
 	}
 	sb.WriteString("\r\n")
 	if _, err := io.WriteString(conn, sb.String()); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("CONNECT 请求写入失败: %w", err)
+		return fmt.Errorf("CONNECT 请求写入失败: %w", err)
 	}
 
 	// 只读状态行；2xx 表示隧道已建立
 	br := bufio.NewReader(conn)
 	line, err := br.ReadString('\n')
 	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("读 CONNECT 响应失败: %w", err)
+		return fmt.Errorf("读 CONNECT 响应失败: %w", err)
 	}
 	line = strings.TrimRight(line, "\r\n")
 	if !strings.HasPrefix(line, "HTTP/") {
-		conn.Close()
-		return nil, fmt.Errorf("代理返回的不是 HTTP 响应: %q", truncate(line, 60))
+		return fmt.Errorf("代理返回的不是 HTTP 响应: %q", truncate(line, 60))
 	}
 	fields := strings.SplitN(line, " ", 3)
 	if len(fields) < 2 {
-		conn.Close()
-		return nil, fmt.Errorf("CONNECT 响应格式异常: %q", line)
+		return fmt.Errorf("CONNECT 响应格式异常: %q", line)
 	}
 	code := fields[1]
 	if !strings.HasPrefix(code, "2") {
@@ -80,22 +95,20 @@ func dialHTTPConnect(u *Upstream, targetIP net.IP, targetPort uint16, timeout ti
 		} else if code == "403" {
 			hint = "（代理拒绝该目标）"
 		}
-		conn.Close()
-		return nil, fmt.Errorf("CONNECT 被代理拒绝: %s%s", line, hint)
+		return fmt.Errorf("CONNECT 被代理拒绝: %s%s", line, hint)
 	}
 	// 读完响应头（到空行），否则残留的头部字节会被当成隧道数据
 	for {
 		l, err := br.ReadString('\n')
 		if err != nil {
-			conn.Close()
-			return nil, fmt.Errorf("读 CONNECT 响应头失败: %w", err)
+			return fmt.Errorf("读 CONNECT 响应头失败: %w", err)
 		}
 		if strings.TrimSpace(l) == "" {
 			break
 		}
 	}
 	_ = conn.SetDeadline(time.Time{})
-	return conn, nil
+	return nil
 }
 
 // sessionCache TLS 会话复用（A13）：同一上游的下一条连接可以跳过完整握手

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -225,5 +226,116 @@ func TestDialRacing(t *testing.T) {
 			t.Fatalf("第 %d 次失败：%v", i, err)
 		}
 		conn.Close()
+	}
+}
+
+// slowSocks 起一个假 SOCKS5：**先慢 delay 再回话**，模拟"到上游的握手延迟"。
+// 用它验证预热池到底省不省时间（这才是它唯一的意义）。
+func slowSocks(t *testing.T, delay time.Duration) (string, *atomic.Int64) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	var conns atomic.Int64
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			conns.Add(1)
+			go func(c net.Conn) {
+				defer c.Close()
+				buf := make([]byte, 512)
+				if _, err := c.Read(buf); err != nil { // 方法协商
+					return
+				}
+				time.Sleep(delay) // ← 模拟慢链路（TCP/TLS/招呼都算在这里）
+				if _, err := c.Write([]byte{0x05, 0x00}); err != nil {
+					return
+				}
+				if _, err := c.Read(buf); err != nil { // CONNECT
+					return
+				}
+				if _, err := c.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
+					return
+				}
+				select {} // 挂住
+			}(c)
+		}
+	}()
+	return ln.Addr().String(), &conns
+}
+
+// A11 预热连接池：第二次业务连接应该**不用再等**握手（只发 CONNECT）。
+func TestWarmPoolSkipsHandshake(t *testing.T) {
+	addr, conns := slowSocks(t, 300*time.Millisecond)
+
+	e := newTestEngine()
+	e.bus = logbus.New(50)
+	e.cfg = &config.Config{Tuning: config.Tuning{DialTimeout: "3s", DialBudget: "6s", RaceAfter: "off"}}
+	e.pool = newWarmPool()
+
+	ch := config.Chain{Name: "c", Forwards: []string{"socks5://" + addr}}
+
+	// 第一条（冷）必须等满那 300ms
+	t0 := time.Now()
+	c1, err := e.dialUpstream(ch, net.IPv4(10, 0, 0, 1), 443)
+	cold := time.Since(t0)
+	if err != nil {
+		t.Fatalf("冷启动拨号失败：%v", err)
+	}
+	c1.Close()
+	if cold < 250*time.Millisecond {
+		t.Fatalf("冷启动应该等满握手延迟，实际只有 %s", cold)
+	}
+
+	// 等后台补货完成
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		_, _, warm := e.PoolStats()
+		if warm > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, _, warm := e.PoolStats(); warm == 0 {
+		t.Fatal("补货没成功：池子里一条预热会话都没有")
+	}
+
+	// 第二条（热）应该几乎不用等（只有一次 CONNECT 往返）
+	t0 = time.Now()
+	c2, err := e.dialUpstream(ch, net.IPv4(10, 0, 0, 1), 443)
+	hot := time.Since(t0)
+	if err != nil {
+		t.Fatalf("热拨号失败：%v", err)
+	}
+	c2.Close()
+	if hot > 150*time.Millisecond {
+		t.Errorf("预热没起作用：热拨号花了 %s（期望只剩 CONNECT，远小于 %s 的握手）", hot, cold)
+	}
+	t.Logf("冷 %s → 热 %s（省了 %s）；新建连接数 %d", cold, hot, cold-hot, conns.Load())
+}
+
+// 关掉预热（warm_sessions: off）时不该有池子行为，也不该多建连接。
+func TestWarmPoolDisabled(t *testing.T) {
+	addr, _ := slowSocks(t, 10*time.Millisecond)
+	e := newTestEngine()
+	e.bus = logbus.New(50)
+	e.cfg = &config.Config{Tuning: config.Tuning{
+		DialTimeout: "2s", DialBudget: "4s", RaceAfter: "off", WarmSessions: "off"}}
+	e.pool = newWarmPool()
+	ch := config.Chain{Name: "c", Forwards: []string{"socks5://" + addr}}
+	for i := 0; i < 3; i++ {
+		c, err := e.dialUpstream(ch, net.IPv4(10, 0, 0, 1), 443)
+		if err != nil {
+			t.Fatalf("第 %d 次失败：%v", i, err)
+		}
+		c.Close()
+	}
+	if taken, made, warm := e.PoolStats(); taken != 0 || made != 0 || warm != 0 {
+		t.Errorf("关掉预热后不该有池子活动：taken=%d made=%d warm=%d", taken, made, warm)
 	}
 }

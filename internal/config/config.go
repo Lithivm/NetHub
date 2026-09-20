@@ -633,6 +633,9 @@ type Tuning struct {
 	// RaceAfter 首跳等多久还没连上就并发试其他候选（默认 150ms；0 = 关）。
 	// 竞速会成倍放大连接数，所以只在“第一条明显慢”时才值得。
 	RaceAfter string `yaml:"race_after,omitempty"`
+	// WarmSessions 每条上游预热几条"已握手、只差 CONNECT"的会话（默认 2；0 = 关）。
+	// 实测每条能省 193～258ms 的等待（TCP+TLS+招呼那三段）。
+	WarmSessions string `yaml:"warm_sessions,omitempty"`
 }
 
 // DialTimeoutDur 单次尝试上游的超时（默认 5s，夹在 1s～30s）。
@@ -1246,4 +1249,27 @@ func (c *Config) SaveAs(path string) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// WarmTarget 每条上游预热几条"已握手、只差 CONNECT"的会话（A11）。
+//
+//	""(没写) → 默认 2 条
+//	off/0    → 关闭预热
+//	1～8     → 指定条数（超过 8 按 8，别养一堆让上游嫌弃）
+func (c *Config) WarmTarget() int {
+	s := strings.ToLower(strings.TrimSpace(c.Tuning.WarmSessions))
+	switch s {
+	case "off", "none", "0", "false":
+		return 0
+	case "":
+		return 2
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n <= 0 {
+		return 2
+	}
+	if n > 8 {
+		return 8
+	}
+	return n
 }

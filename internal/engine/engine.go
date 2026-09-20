@@ -201,8 +201,11 @@ type Engine struct {
 	// fatalMu/fatal 记下“拦截已中断”的原因（驱动被卸载、句柄被抢等）
 	fatalMu sync.Mutex
 	fatal   error
-	done    chan struct{}
-	wg      sync.WaitGroup
+
+	// pool 预热连接池（A11）：养着“已握手、只差 CONNECT”的会话
+	pool *warmPool
+	done chan struct{}
+	wg   sync.WaitGroup
 
 	// Notify 由上层（App）注入：把"状态变化"变成应用内提示。
 	// 第二个参数为 true 表示是不好的消息。
@@ -215,8 +218,12 @@ func New(bus *logbus.Bus, rs *rules.Set, cfg *config.Config) *Engine {
 		conns:       map[uint16]*connState{},
 		statPerRule: map[string]uint64{},
 		done:        make(chan struct{}),
+		pool:        newWarmPool(),
 	}
 }
+
+// PoolStats 预热连接池的近况：命中次数、建了多少、当前养着几条。
+func (e *Engine) PoolStats() (taken, made, warm uint64) { return e.pool.stats() }
 
 // Running 是否在拦截中。
 func (e *Engine) Running() bool {
@@ -319,6 +326,7 @@ func (e *Engine) Fatal() error {
 
 // Stop 停止拦截：关句柄（让 packetLoop 的 Recv 立刻返回）、关 relay、等协程退完。
 func (e *Engine) Stop() {
+	e.pool.closeAll() // 池里的会话要主动关，否则退出时留下悬挂连接
 	e.stopOnce.Do(func() {
 		close(e.done)
 
@@ -381,6 +389,11 @@ func (e *Engine) dialUpstream(ch config.Chain, dst net.IP, dport uint16) (net.Co
 	per, budget := e.cfg.DialTimeoutDur(), e.cfg.DialBudgetDur()
 	cands := e.candidates(ch)
 
+	// 预热连接池：先看池子里有没有“已握手、只差 CONNECT”的会话（A11）
+	if c, ok := e.dialWarm(ch, cands[0], dst, dport); ok {
+		e.afterDial(ch, cands[0])
+		return c, nil
+	}
 	// 慢则竞速（A10）：候选有两条以上、且第一条超过 race_after 还没连上时，
 	// 把其余的并发拨出去，取先成功的。
 	// 为什么不是“总是并发”：平时并发会成倍放大连接数与客户端 IP 的落地请求，
@@ -423,6 +436,7 @@ func (e *Engine) dialSequential(ch config.Chain, raws []string, cands []int,
 		}
 		c, err, msg := e.tryUpstream(ch, raws[idx], idx, dst, dport, timeout)
 		if err == nil {
+			e.afterDial(ch, idx) // 用掉一条就要补一条
 			return c, nil
 		}
 		errs = append(errs, msg)

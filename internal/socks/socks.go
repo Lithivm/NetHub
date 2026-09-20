@@ -63,12 +63,12 @@ func DialAuthHost(proxy string, c Creds, host string, dstPort uint16, timeout ti
 	return dialWith(proxy, c, nil, atypDomain, body, dstPort, timeout)
 }
 
-// dialWith 发 SOCKS5 握手 + CONNECT。
+// Prepare 先连上代理并做完“不依赖目标”的握手（TCP + 可选 TLS + 方法协商/认证），
+// 返回一个**待用**的连接（还差一次 CONNECT）。
 //
-// tlsConf 非 nil 时先在连接上做 TLS（= 上游用 socks5+tls 的情况）。
-// addr 是 ATYP 对应的地址体（IPv4 4 字节 / 域名 = 长度+字节）。
-func dialWith(proxy string, c Creds, tlsConf *tls.Config, atyp byte, addr []byte,
-	dstPort uint16, timeout time.Duration) (net.Conn, error) {
+// 用途：预热连接池（A11）—— 把这三段提前做完并放着，业务来了只需发 CONNECT，
+// 省掉 TCP+TLS+招呼（实测 193～258ms）。
+func Prepare(proxy string, c Creds, tlsConf *tls.Config, timeout time.Duration) (net.Conn, error) {
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
@@ -87,16 +87,54 @@ func dialWith(proxy string, c Creds, tlsConf *tls.Config, atyp byte, addr []byte
 		}
 		conn = tc
 	}
-
-	if err := handshake(conn, c, atyp, addr, dstPort); err != nil {
+	if err := negotiate(conn, c); err != nil {
 		conn.Close()
 		return nil, err
 	}
-	_ = conn.SetDeadline(time.Time{}) // 清掉超时，之后是长连接
 	return conn, nil
 }
 
-func handshake(conn net.Conn, c Creds, atyp byte, addr []byte, dstPort uint16) error {
+// ConnectOn 在已预备好的连接上发 CONNECT（IPv4）。
+// 成功后就变成一条正常的长连接（调用方自己清掉 deadline 或不管：我们下一次读写前会清）。
+func ConnectOn(conn net.Conn, dstIP net.IP, dstPort uint16, timeout time.Duration) error {
+	v4 := dstIP.To4()
+	if v4 == nil {
+		return fmt.Errorf("仅支持 IPv4 目标: %v", dstIP)
+	}
+	if timeout > 0 {
+		_ = conn.SetDeadline(time.Now().Add(timeout))
+	}
+	if err := connect(conn, atypIPv4, v4, dstPort); err != nil {
+		return err
+	}
+	_ = conn.SetDeadline(time.Time{}) // 清掉超时，之后是长连接
+	return nil
+}
+
+// dialWith 发 SOCKS5 握手 + CONNECT（Prepare + ConnectOn 的组合，保留给老调用方）。
+//
+// tlsConf 非 nil 时先在连接上做 TLS（= 上游用 socks5+tls 的情况）。
+// addr 是 ATYP 对应的地址体（IPv4 4 字节 / 域名 = 长度+字节）。
+func dialWith(proxy string, c Creds, tlsConf *tls.Config, atyp byte, addr []byte,
+	dstPort uint16, timeout time.Duration) (net.Conn, error) {
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	conn, err := Prepare(proxy, c, tlsConf, timeout)
+	if err != nil {
+		return nil, err
+	}
+	// 域名目标的 CONNECT 走原来的 connect()，不经过 ConnectOn（它只收 IPv4）
+	if err := connect(conn, atyp, addr, dstPort); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	_ = conn.SetDeadline(time.Time{})
+	return conn, nil
+}
+
+// negotiate 方法协商 + 认证（RFC 1928 第 3 步 + RFC 1929）。
+func negotiate(conn net.Conn, c Creds) error {
 	// ① 方法协商。有凭据就优先提认证，同时也提 no-auth（有些代理允许匿名）
 	methods := []byte{methodNoAuth}
 	if !c.empty() {
@@ -127,7 +165,11 @@ func handshake(conn net.Conn, c Creds, atyp byte, addr []byte, dstPort uint16) e
 		return fmt.Errorf("socks 服务端选择了不支持的方法: 0x%02x", rep[1])
 	}
 
-	// ② CONNECT
+	return nil
+}
+
+// connect 发 CONNECT 请求并读应答（Prepare 之后的第二步，也可以单独用）。
+func connect(conn net.Conn, atyp byte, addr []byte, dstPort uint16) error {
 	req := make([]byte, 0, 10+len(addr))
 	req = append(req, 0x05, cmdConnect, 0x00, atyp)
 	req = append(req, addr...)
@@ -276,8 +318,9 @@ func socks4Text(code byte) string {
 
 // DialSOCKS4TLS 与 DialSOCKS4 相同，但可先在连接上做 TLS。
 // （SOCKS4 协议本身没有 TLS，这里是"TLS 传输层 + SOCKS4 协议"的组合，gost 也允许这么写。）
-func DialSOCKS4TLS(proxy, user, host string, dstPort uint16, tlsConf *tls.Config,
-	timeout time.Duration) (net.Conn, error) {
+// PrepareSOCKS4 先连上代理（+可选 TLS），不做 CONNECT —— 给预热连接池用。
+// SOCKS4 没有“方法协商”，所以预备阶段就是 TCP+TLS。
+func PrepareSOCKS4(proxy string, tlsConf *tls.Config, timeout time.Duration) (net.Conn, error) {
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
@@ -286,19 +329,38 @@ func DialSOCKS4TLS(proxy, user, host string, dstPort uint16, tlsConf *tls.Config
 		return nil, fmt.Errorf("连代理失败: %w", err)
 	}
 	_ = raw.SetDeadline(time.Now().Add(timeout))
-	var c net.Conn = raw
-	if tlsConf != nil {
-		tc := tls.Client(raw, tlsConf)
-		if err := tc.Handshake(); err != nil {
-			raw.Close()
-			return nil, fmt.Errorf("TLS 握手失败: %w", err)
-		}
-		c = tc
+	if tlsConf == nil {
+		return raw, nil
 	}
-	if err := socks4Handshake(c, user, host, dstPort); err != nil {
+	tc := tls.Client(raw, tlsConf)
+	if err := tc.Handshake(); err != nil {
+		raw.Close()
+		return nil, fmt.Errorf("TLS 握手失败: %w", err)
+	}
+	return tc, nil
+}
+
+// ConnectSOCKS4On 在预备好的连接上发 SOCKS4/4a 请求。
+func ConnectSOCKS4On(conn net.Conn, user, host string, dstPort uint16, timeout time.Duration) error {
+	if timeout > 0 {
+		_ = conn.SetDeadline(time.Now().Add(timeout))
+	}
+	if err := socks4Handshake(conn, user, host, dstPort); err != nil {
+		return err
+	}
+	_ = conn.SetDeadline(time.Time{})
+	return nil
+}
+
+func DialSOCKS4TLS(proxy, user, host string, dstPort uint16, tlsConf *tls.Config,
+	timeout time.Duration) (net.Conn, error) {
+	c, err := PrepareSOCKS4(proxy, tlsConf, timeout)
+	if err != nil {
+		return nil, err
+	}
+	if err := ConnectSOCKS4On(c, user, host, dstPort, timeout); err != nil {
 		c.Close()
 		return nil, err
 	}
-	_ = c.SetDeadline(time.Time{})
 	return c, nil
 }
