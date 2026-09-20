@@ -2,6 +2,7 @@ package engine
 
 import (
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -58,7 +59,7 @@ func TestConnsSnapshot(t *testing.T) {
 	e.conns[1004] = blocked
 	e.statActive = 1 // 只剩 live 这条还在进行中
 
-	got := e.Conns(10)
+	got := e.Conns(10, false)
 	if len(got) != 4 {
 		t.Fatalf("应有 4 条，实际 %d", len(got))
 	}
@@ -98,7 +99,7 @@ func TestConnsSnapshot(t *testing.T) {
 	}
 
 	// limit 生效
-	if got := e.Conns(2); len(got) != 2 {
+	if got := e.Conns(2, false); len(got) != 2 {
 		t.Errorf("limit=2 应只返回 2 条，实际 %d", len(got))
 	}
 }
@@ -148,4 +149,61 @@ func TestHuman(t *testing.T) {
 			t.Errorf("humanDur(%v) = %q（期望 %q）", c.in, got, c.want)
 		}
 	}
+}
+
+// A20：连接快照能查出真实进程名。
+//
+// 为什么值得单测：整条链是「应用端口 → TCP 表 → PID → 进程名」，任何一段错了
+// 界面上就只会永远显示“未知”，而人肉看代码看不出来 —— 必须真连一条。
+func TestConnsResolveProcess(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("起监听失败: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	c, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("连接失败: %v", err)
+	}
+	defer c.Close()
+	local := c.LocalAddr().(*net.TCPAddr)
+
+	e := newTestEngine()
+	e.proc = procNewResolver()
+	e.mu.Lock()
+	st := &connState{dst: net.ParseIP("10.0.0.5"), dport: 5432, chain: "proxy-a",
+		action: rules.ActionChain, start: time.Now(), appPort: uint16(local.Port)}
+	st.touch()
+	e.conns[uint16(local.Port)] = st
+	e.mu.Unlock()
+
+	got := e.Conns(10, true)
+	if len(got) != 1 {
+		t.Fatalf("快照条数 = %d", len(got))
+	}
+	if got[0].Proc == "" {
+		t.Skipf("查不到端口 %d 的进程（受限环境），跳过", local.Port)
+	}
+	if !strings.Contains(strings.ToLower(got[0].Proc), "engine.test") {
+		t.Errorf("进程名 = %q（PID %d），期望是测试二进制自己", got[0].Proc, got[0].PID)
+	}
+	// withProc=false 时必须不查（零开销路径）
+	e2 := newTestEngine()
+	e2.proc = procNewResolver()
+	e2.mu.Lock()
+	e2.conns[uint16(local.Port)] = st
+	e2.mu.Unlock()
+	if got2 := e2.Conns(10, false); got2[0].Proc != "" {
+		t.Errorf("withProc=false 时不该去查进程，却得到 %q", got2[0].Proc)
+	}
+	t.Logf("端口 %d → %s (PID %d)", local.Port, got[0].Proc, got[0].PID)
 }

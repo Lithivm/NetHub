@@ -35,3 +35,16 @@ local/
 
 # 运行时目录（exe / 驱动 / config.yaml / logs ，一律不入库）
 run/
+
+
+# 程序运行期在自己目录里生成的东西（开发时在仓库根目录跑就会落到这里）
+# 注意：.gitignore 里 # 只有行首才是注释，别把注释写在规则同一行（那样整行会变成一个永远匹配不上的模式）
+update/
+pcap/
+backups/
+secrets.dat
+*.old
+*.bad
+*.tmp
+*.pcap
+logs/

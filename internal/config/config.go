@@ -176,6 +176,11 @@ type Route struct {
 	// 空 = 总是生效。用于“公司网走隧道、家里直连”这类场景，不用手动改配置。
 	LocalNets []string `yaml:"local_nets,omitempty"`
 
+	// Apps 进程条件（A20，可选），写成进程名，支持 * 通配：chrome.exe / *.exe / *weixin*。
+	// 与 Targets 是 AND：只填 Apps 时，该进程的所有 TCP 连接都算命中（此时会拦全部流量）。
+	// 定位：只用来写“例外”（某程序必须走 / 绝不许走隧道），主用法仍是按目标。
+	Apps []string `yaml:"apps,omitempty"`
+
 	// Target 是 v1 的旧写法（一条规则一个目标），只为读老 config.yaml 保留：
 	// 载入时由 Normalize 并进 Targets，保存时不再写出。
 	Target string `yaml:"target,omitempty"`
@@ -229,6 +234,9 @@ func (r Route) Describe() string {
 		return "「" + n + "」"
 	}
 	if len(r.Targets) == 0 {
+		if len(r.Apps) > 0 {
+			return "（进程 " + strings.Join(r.Apps, " ") + "）"
+		}
 		return "（无目标）"
 	}
 	ts := r.Targets
@@ -412,8 +420,13 @@ func (c *Config) Validate() error {
 		if r.NeedsChain() && !seen[r.Chain] {
 			return fmt.Errorf("第 %d 条规则%s: 引用了不存在的链 %q", i+1, r.Describe(), r.Chain)
 		}
-		if len(r.Targets) == 0 {
-			return fmt.Errorf("第 %d 条规则%s: 至少要有一个目标", i+1, r.Describe())
+		if len(r.Targets) == 0 && len(r.Apps) == 0 {
+			return fmt.Errorf("第 %d 条规则%s: 至少要有一个目标（或一个进程条件）", i+1, r.Describe())
+		}
+		for _, a := range r.Apps {
+			if strings.TrimSpace(a) == "" {
+				return fmt.Errorf("第 %d 条规则%s: 进程条件里有空白项", i+1, r.Describe())
+			}
 		}
 		for _, t := range r.Targets {
 			if _, err := NormalizeTarget(t); err != nil {
@@ -904,8 +917,8 @@ func (r *Route) normalize() (changed bool, dup []string, err error) {
 		}
 		out = append(out, n)
 	}
-	if len(out) == 0 {
-		return changed, dup, fmt.Errorf("至少要有一个目标")
+	if len(out) == 0 && len(r.Apps) == 0 {
+		return changed, dup, fmt.Errorf("至少要有一个目标（或一个进程条件）")
 	}
 	if len(out) != len(r.Targets) {
 		changed = true
@@ -935,6 +948,38 @@ func (r *Route) normalize() (changed bool, dup []string, err error) {
 			changed = true
 		}
 		r.Ports = pout
+	}
+
+	// A20 进程条件：去空白、去重（不区分大小写），顺序保持输入顺序。
+	// 注意：这里**不能**把 Apps 漏掉 —— 少了这一趟，界面里填的进程条件
+	// 一保存就消失（规则会被当成“只按目标”，且没目标时直接报错）。
+	if len(r.Apps) > 0 {
+		aout := make([]string, 0, len(r.Apps))
+		aseen := map[string]bool{}
+		for _, a := range r.Apps {
+			n := strings.TrimSpace(a)
+			if n == "" {
+				changed = true
+				continue
+			}
+			if n != a {
+				changed = true
+			}
+			key := strings.ToLower(n)
+			if aseen[key] {
+				dup, changed = append(dup, n), true
+				continue
+			}
+			aseen[key] = true
+			aout = append(aout, n)
+		}
+		if len(aout) != len(r.Apps) {
+			changed = true
+		}
+		r.Apps = aout
+	}
+	if len(r.Targets) == 0 && len(r.Apps) == 0 {
+		return changed, dup, fmt.Errorf("至少要有一个目标（或一个进程条件）")
 	}
 	return changed, dup, nil
 }

@@ -117,3 +117,120 @@ func TestOnlyDirectRoutes(t *testing.T) {
 		t.Errorf("只有直连规则时过滤器应为空，得到 %+v", rs)
 	}
 }
+
+// ───────── 进程条件（A20）─────────
+
+func TestMatchAppName(t *testing.T) {
+	cases := []struct {
+		cond, name string
+		want       bool
+	}{
+		{"chrome.exe", "chrome.exe", true},
+		{"CHROME.EXE", "chrome.exe", true},
+		{"chrome.exe", "msedge.exe", false},
+		{"*weixin*", "weixin.exe", true},
+		{"*weixin*", "wxwork.exe", false},
+		{"*.exe", "gost.exe", true},
+		{`C:\Tools\gost.exe`, "gost.exe", true},
+		{"gost.exe", `C:\Tools\gost.exe`, true},
+		{"gost.exe", "", false},   // 进程未知 → 不命中（fail-open）
+		{"gost.exe", "?", false},  // 查不到时的占位
+		{"", "chrome.exe", false}, // 空条件不命中
+		{"*", "anything.exe", true},
+		{"java*", "javaw.exe", true},
+		{"javaw.exe", "java.exe", false},
+	}
+	for _, c := range cases {
+		if got := MatchAppName(c.cond, c.name); got != c.want {
+			t.Errorf("MatchAppName(%q,%q)=%v 期望 %v", c.cond, c.name, got, c.want)
+		}
+	}
+}
+
+func TestMatchWild(t *testing.T) {
+	yes := [][2]string{{"a*c", "abc"}, {"*b*", "xby"}, {"a*b*c", "a11b22c"}, {"*", "x"}, {"abc", "abc"}}
+	no := [][2]string{{"a*c", "abx"}, {"a*b*c", "a11b22"}, {"abc", "abd"}, {"x*", "yx"}}
+	for _, p := range yes {
+		if !matchWild(p[0], p[1]) {
+			t.Errorf("matchWild(%q,%q) 应为真", p[0], p[1])
+		}
+	}
+	for _, p := range no {
+		if matchWild(p[0], p[1]) {
+			t.Errorf("matchWild(%q,%q) 应为假", p[0], p[1])
+		}
+	}
+}
+
+// 进程条件与目标条件是 AND；只填进程 = 该进程所有连接。
+func TestMatchProcSemantics(t *testing.T) {
+	s := New()
+	err := s.Load([]Route{
+		{Name: "只按进程", Chain: "tun", Apps: []string{"must-via.exe"}},
+		{Name: "进程+目标", Targets: []string{"10.0.0.0/8"}, Chain: "tun2", Apps: []string{"app.exe"}},
+		{Name: "只按目标", Targets: []string{"172.16.0.0/12"}, Chain: "tun3"},
+	})
+	if err != nil {
+		t.Fatalf("载入失败: %v", err)
+	}
+	if !s.NeedsProc() {
+		t.Fatal("有进程条件，NeedsProc 应为 true")
+	}
+
+	// 只按进程：任何目标都命中
+	if chain, _, ok := s.MatchProc(parseIP4("8.8.8.8"), 443, "must-via.exe"); !ok || chain != "tun" {
+		t.Errorf("只按进程的规则应命中任意目标，得到 %q %v", chain, ok)
+	}
+	// 进程对但规则不是这条 → 不命中（8.8.8.8 不在 10/8，也不在 172.16/12）
+	if _, _, ok := s.MatchProc(parseIP4("8.8.8.8"), 443, "app.exe"); ok {
+		t.Error("app.exe 连 8.8.8.8 不该命中任何规则")
+	}
+	// 进程+目标：两个都要对
+	if chain, _, ok := s.MatchProc(parseIP4("10.1.2.3"), 80, "app.exe"); !ok || chain != "tun2" {
+		t.Errorf("进程+目标都命中时应收 tun2，得到 %q %v", chain, ok)
+	}
+	if _, _, ok := s.MatchProc(parseIP4("10.1.2.3"), 80, "other.exe"); ok {
+		t.Error("目标对但进程不对，不该命中 tun2")
+	}
+	// 进程未知（"" 或 "?"）→ 带进程条件的规则一律不命中（fail-open），但纯目标规则照常命中
+	if _, _, ok := s.MatchProc(parseIP4("172.16.1.1"), 8080, ""); !ok {
+		t.Error("进程未知时，纯目标规则仍应命中（fail-open 不能误伤）")
+	}
+	if _, _, ok := s.MatchProc(parseIP4("10.1.2.3"), 80, "?"); ok {
+		t.Error("进程未知时，带进程条件的规则不该命中")
+	}
+}
+
+// 只按进程的规则：过滤器必须拦全部（目标提前不可知）。
+func TestFilterRangesAppsOnly(t *testing.T) {
+	s := New()
+	if err := s.Load([]Route{{Name: "全拦", Chain: "tun", Apps: []string{"x.exe"}}}); err != nil {
+		t.Fatalf("载入失败: %v", err)
+	}
+	rs := s.FilterRanges(false)
+	if len(rs) != 1 || rs[0].First != 0 || rs[0].Last != 0xFFFFFFFF {
+		t.Fatalf("只按进程的规则应拦 0.0.0.0/0，得到 %+v", rs)
+	}
+	// 带目标 + 进程条件时，只拦那些目标
+	s2 := New()
+	if err := s2.Load([]Route{{Name: "窄", Targets: []string{"10.0.0.0/8"}, Chain: "tun", Apps: []string{"x.exe"}}}); err != nil {
+		t.Fatalf("载入失败: %v", err)
+	}
+	rs2 := s2.FilterRanges(false)
+	if len(rs2) != 1 || rs2[0].First != IP2U(net.ParseIP("10.0.0.0").To4()) {
+		t.Fatalf("带目标的进程规则应只拦 10.0.0.0/8，得到 %+v", rs2)
+	}
+}
+
+// 没有进程条件时 NeedsProc=false（引擎据此完全不查 TCP 表）。
+func TestNeedsProcFalse(t *testing.T) {
+	s := New()
+	if err := s.Load([]Route{{Targets: []string{"10.0.0.0/8"}, Chain: "tun"}}); err != nil {
+		t.Fatalf("载入失败: %v", err)
+	}
+	if s.NeedsProc() {
+		t.Error("没有进程条件时 NeedsProc 应为 false")
+	}
+}
+
+func parseIP4(s string) net.IP { return net.ParseIP(s).To4() }

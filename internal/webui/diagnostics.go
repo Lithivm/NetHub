@@ -116,7 +116,7 @@ func (b *Backend) diagReport() string {
 	}
 
 	s.WriteString("\n── 最近连接（最多 30 条）──\n")
-	for _, c := range b.a.Engine.Conns(30) {
+	for _, c := range b.a.Engine.Conns(30, false) {
 		fmt.Fprintf(&s, "  %-22s %-4s %-8s %-8s ↑%d ↓%d  %s %s\n",
 			c.Target, c.Action, c.Chain, c.Dur, c.Up, c.Down, c.State, c.Error)
 	}

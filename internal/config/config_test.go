@@ -611,3 +611,86 @@ func TestDialTuning(t *testing.T) {
 		t.Error("单次超时 15s 时体检应该提醒")
 	}
 }
+
+// A20：进程条件必须能存下来、也能读回来。
+// 这条测试存在的理由：normalize() 是按值改字段的，漏了一行就会“保存后条件消失”
+// —— 和当初 chain.secret 被写掉是同一类 bug，靠人眼看代码看不出来。
+func TestRouteAppsRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	c := Default()
+	c.Chains = []Chain{{Name: "tun", Forward: "socks5://127.0.0.1:1080"}}
+	c.Routes = nil
+
+	// ① 只按进程（无目标）
+	if err := c.AddRoute(Route{Name: "客户端全走隧道", Chain: "tun", Apps: []string{"his.exe", " *Weixin* "}}); err != nil {
+		t.Fatalf("添加只按进程的规则失败: %v", err)
+	}
+	// ② 目标 + 进程（AND）
+	if err := c.AddRoute(Route{Name: "例外", Targets: []string{"10.0.0.0/8"}, Chain: DirectChain,
+		Apps: []string{`C:\Tools\raw.exe`}}); err != nil {
+		t.Fatalf("添加目标+进程规则失败: %v", err)
+	}
+	if err := c.SaveAs(path); err != nil {
+		t.Fatalf("保存失败: %v", err)
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("重新载入失败: %v", err)
+	}
+	if len(got.Routes) != 2 {
+		t.Fatalf("规则数 = %d，期望 2", len(got.Routes))
+	}
+	r0 := got.Routes[0]
+	if len(r0.Targets) != 0 {
+		t.Errorf("第 1 条不该有目标，得到 %v", r0.Targets)
+	}
+	if len(r0.Apps) != 2 || r0.Apps[0] != "his.exe" || r0.Apps[1] != "*Weixin*" {
+		t.Errorf("第 1 条进程条件 = %v，期望 [his.exe *Weixin*]（去空白、保大小写）", r0.Apps)
+	}
+	r1 := got.Routes[1]
+	if len(r1.Apps) != 1 || !strings.EqualFold(r1.Apps[0], `C:\Tools\raw.exe`) {
+		t.Errorf("第 2 条进程条件应原样保存（匹配时自行取文件名），得到 %v", r1.Apps)
+	}
+	if len(r1.Targets) != 1 || r1.Targets[0] != "10.0.0.0/8" {
+		t.Errorf("第 2 条目标 = %v", r1.Targets)
+	}
+
+	// ③ 没目标又没进程 → 必须拒绝（否则会存出一条什么都不匹配的规则）
+	if err := c.AddRoute(Route{Name: "空规则", Chain: "tun"}); err == nil {
+		t.Error("既没目标也没进程条件的规则应被拒绝")
+	}
+	// ④ 进程条件重复要去重（不区分大小写）
+	c2 := Default()
+	c2.Chains = []Chain{{Name: "tun", Forward: "socks5://127.0.0.1:1080"}}
+	c2.Routes = nil
+	if err := c2.AddRoute(Route{Name: "重复", Chain: "tun", Apps: []string{"a.exe", "A.EXE", "a.exe"}}); err != nil {
+		t.Fatalf("添加失败: %v", err)
+	}
+	if len(c2.Routes[0].Apps) != 1 {
+		t.Errorf("进程条件未去重: %v", c2.Routes[0].Apps)
+	}
+}
+
+// A20：有“只按进程”的规则时，排序与重叠检查不能崩，也不能给它乱定优先级。
+func TestAppsOnlyRuleNoPanic(t *testing.T) {
+	c := Default()
+	c.Chains = []Chain{{Name: "tun", Forward: "socks5://127.0.0.1:1080"}}
+	c.Routes = nil
+	if err := c.AddRoute(Route{Name: "例外", Chain: "tun", Apps: []string{"x.exe"}}); err != nil {
+		t.Fatalf("添加失败: %v", err)
+	}
+	if err := c.AddRoute(Route{Name: "窄", Targets: []string{"10.0.0.5"}, Chain: "tun"}); err != nil {
+		t.Fatalf("添加失败: %v", err)
+	}
+	c.SortRoutesBySpecificity() // 不得 panic
+	ov := c.CheckOverlaps()     // 不得 panic
+	t.Logf("排序后顺序: %v / 重叠结论 %d 条", []string{c.Routes[0].Name, c.Routes[1].Name}, len(ov))
+	// 只按进程的规则目标为空 → 它不该被当成“覆盖别人”的那条
+	for _, o := range ov {
+		if o.Kind == "dead" && (o.EarlierName == "例外" || o.LaterName == "例外") {
+			t.Errorf("只按进程的规则被误判为 dead: %+v", o)
+		}
+	}
+}

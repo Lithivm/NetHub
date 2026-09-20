@@ -56,10 +56,23 @@ type Route struct {
 	// 不用手动改配置；也用于“只在客户内网环境下接管”这种安全阀。
 	LocalNets []string `yaml:"local_nets,omitempty" json:"localNets,omitempty"`
 
+	// Apps 进程条件（可选），写成进程名，支持 * 通配：chrome.exe / *.exe / *weixin*。
+	// **与 Targets 是 AND 关系**：两样都填 → 两个都要命中；只填 Apps → 该进程的所有 TCP
+	// 连接都算命中（此时过滤器要拦全部流量，见 FilterRanges）。
+	//
+	// 定位：只用来写“例外”（某程序必须走 / 绝不许走隧道），主用法仍是按目标。
+	// 查不到进程时（受保护进程/系统服务/极短连接）**不命中** —— 即“不因为识别不出
+	// 进程就改变流量走向”，宁可漏过也不误伤（fail-open）。
+	Apps []string `yaml:"apps,omitempty" json:"apps,omitempty"`
+
 	nets  []*net.IPNet // 解析缓存，与 Targets 一一对应
 	ports []portRange  // 解析缓存，与 Ports 一一对应；留空 = 任意端口
 	local []*net.IPNet // 解析缓存，与 LocalNets 一一对应
+	apps  []string     // 解析缓存，与 Apps 一一对应（已去空白）
 }
+
+// HasApps 这条规则带进程条件。
+func (r Route) HasApps() bool { return len(r.apps) > 0 }
 
 // Label 日志/报错里的简短指代。
 func (r Route) Label() string {
@@ -75,6 +88,21 @@ func (r Route) Label() string {
 
 // Matches 目标命中 **且** 端口命中即算该规则命中（Ports 留空 = 端口不参与判定）。
 func (r Route) Matches(ip net.IP, port uint16) bool {
+	return r.MatchesProc(ip, port, "")
+}
+
+// MatchesProc 目标 + 端口 + 进程 三个维度一起判。
+//
+// 只填 Apps 的规则不看目标/端口 —— 该进程的所有连接都命中。
+func (r Route) MatchesProc(ip net.IP, port uint16, procName string) bool {
+	if len(r.apps) > 0 {
+		if !matchAnyApp(r.apps, procName) {
+			return false
+		}
+		if len(r.nets) == 0 {
+			return true // 只按进程：目标/端口不参与
+		}
+	}
 	if !r.matchesIP(ip) {
 		return false
 	}
@@ -83,6 +111,16 @@ func (r Route) Matches(ip net.IP, port uint16) bool {
 	}
 	for _, pr := range r.ports {
 		if port >= pr.first && port <= pr.last {
+			return true
+		}
+	}
+	return false
+}
+
+// matchAnyApp 进程名是否命中 Apps 里任意一条（不区分大小写，支持 * 通配）。
+func matchAnyApp(apps []string, procName string) bool {
+	for _, a := range apps {
+		if MatchAppName(a, procName) {
 			return true
 		}
 	}
@@ -151,6 +189,8 @@ func (r Route) matchesIP(ip net.IP) bool {
 type Set struct {
 	mu     sync.RWMutex
 	routes []Route
+	// needsProc 至少有一条规则带进程条件 —— 引擎据此决定要不要查 TCP 表。
+	needsProc bool
 	// localIPs 本机当前的非回环 IPv4（由引擎探测后写入）。
 	// 规则带 LocalNets 时用它判断“现在这台机器是不是在公司网里”。
 	localIPs []net.IP
@@ -193,8 +233,14 @@ func (s *Set) Load(routes []Route) error {
 	for i, r := range routes {
 		r.Name = strings.TrimSpace(r.Name)
 		r.Chain = strings.TrimSpace(r.Chain)
-		if len(r.Targets) == 0 {
-			return fmt.Errorf("第 %d 条规则%s: 至少要有一个目标", i+1, r.Label())
+		apps := make([]string, 0, len(r.Apps))
+		for _, a := range r.Apps {
+			if a = strings.TrimSpace(a); a != "" {
+				apps = append(apps, a)
+			}
+		}
+		if len(r.Targets) == 0 && len(apps) == 0 {
+			return fmt.Errorf("第 %d 条规则%s: 至少要有一个目标（或一个进程条件）", i+1, r.Label())
 		}
 		if r.Chain == "" {
 			return fmt.Errorf("第 %d 条规则%s: chain 为空", i+1, r.Label())
@@ -232,19 +278,32 @@ func (s *Set) Load(routes []Route) error {
 			}
 			local = append(local, ipnet)
 		}
-		r.ports, r.nets, r.local = ports, nets, local
+		r.ports, r.nets, r.local, r.apps = ports, nets, local, apps
 		out = append(out, r)
 	}
 	s.mu.Lock()
 	s.routes = out
+	s.needsProc = false
+	for i := range out {
+		if out[i].HasApps() {
+			s.needsProc = true
+			break
+		}
+	}
 	s.mu.Unlock()
 	return nil
 }
 
-// Match 返回命中的链名与动作（ActionDirect / ActionBlock 时链名无意义）。
-// 第三个返回值表示是否命中。
-// 每收到一个包都要调一次，所以这里不复制 Route（只回传字符串/枚举 + 布尔）。
+// Match 返回命中的链名与动作（不含进程维度；等价于“进程未知”）。
 func (s *Set) Match(ip net.IP, port uint16) (chain string, act Action, ok bool) {
+	return s.MatchProc(ip, port, "")
+}
+
+// MatchProc 同 Match，但带上“这条连接属于哪个进程”（空串 = 未知）。
+//
+// 返回命中的链名与动作（ActionDirect / ActionBlock 时链名无意义），第三个返回值表示是否命中。
+// 每收到一个包都要调一次，所以这里不复制 Route（只回传字符串/枚举 + 布尔）。
+func (s *Set) MatchProc(ip net.IP, port uint16, procName string) (chain string, act Action, ok bool) {
 	v4 := ip.To4()
 	if v4 == nil {
 		return "", ActionChain, false // 目前只做 IPv4
@@ -256,11 +315,20 @@ func (s *Set) Match(ip net.IP, port uint16) (chain string, act Action, ok bool) 
 		if !s.active(s.routes[i]) {
 			continue
 		}
-		if s.routes[i].Matches(v4, port) {
+		if s.routes[i].MatchesProc(v4, port, procName) {
 			return s.routes[i].Chain, s.routes[i].Action, true
 		}
 	}
 	return "", ActionChain, false
+}
+
+// NeedsProc 当前规则里有没有人用进程条件。
+//
+// 没有的话引擎**一个进程都不查**（TCP 表枚举是毫秒级开销，不该白白付给所有人）。
+func (s *Set) NeedsProc() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.needsProc
 }
 
 // List 返回当前规则的副本。
@@ -315,6 +383,12 @@ func (s *Set) FilterRanges(includeDirect bool) []Range {
 		for _, p := range r.ports {
 			ports = append(ports, PortRange{p.first, p.last})
 		}
+		// 只按进程的规则没写目标 —— 目标提前不可知，只能拦全部（用户显式这么写才发生）。
+		// 代价：所有流量都要过一遍用户态（见 packetLoop 里“没命中任何规则→原样放回”）。
+		if len(r.nets) == 0 {
+			rs = append(rs, Range{0, 0xFFFFFFFF, ports})
+			continue
+		}
 		for _, n := range r.nets {
 			first := IP2U(n.IP.To4())
 			mask := IP2U(net.IP(n.Mask).To4())
@@ -335,6 +409,53 @@ func (s *Set) FilterRanges(includeDirect bool) []Range {
 		out = append(out, r)
 	}
 	return out
+}
+
+// MatchAppName 进程名是否命中一条进程条件（不区分大小写，支持 * 通配，带路径只比文件名）。
+//
+// 放在 rules 而不是 proc：匹配逻辑与操作系统无关，proc 只管“查出进程名”。
+func MatchAppName(cond, name string) bool {
+	cond = strings.ToLower(strings.TrimSpace(cond))
+	name = strings.ToLower(strings.TrimSpace(name))
+	if cond == "" || name == "" || name == "?" {
+		return false
+	}
+	if i := strings.LastIndexAny(cond, `\/`); i >= 0 {
+		cond = cond[i+1:]
+	}
+	if i := strings.LastIndexAny(name, `\/`); i >= 0 {
+		name = name[i+1:]
+	}
+	return matchWild(cond, name)
+}
+
+// matchWild 支持 * 的简单通配（不引入正则：规则要能被人工一眼看懂）。
+func matchWild(pat, s string) bool {
+	if pat == "*" {
+		return true
+	}
+	if !strings.Contains(pat, "*") {
+		return pat == s
+	}
+	parts := strings.Split(pat, "*")
+	if parts[0] != "" && !strings.HasPrefix(s, parts[0]) {
+		return false
+	}
+	if last := parts[len(parts)-1]; last != "" && !strings.HasSuffix(s, last) {
+		return false
+	}
+	pos := len(parts[0])
+	for i := 1; i < len(parts)-1; i++ {
+		if parts[i] == "" {
+			continue
+		}
+		idx := strings.Index(s[pos:], parts[i])
+		if idx < 0 {
+			return false
+		}
+		pos += idx + len(parts[i])
+	}
+	return true
 }
 
 // samePorts 两组端口集合是否完全一致（只有一致的两段才能合并区间）。

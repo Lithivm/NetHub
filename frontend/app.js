@@ -388,7 +388,7 @@ async function loadConns() {
   const t = document.getElementById('connTable');
   t.replaceChildren();
   const head = el('div', 'trow thead conn-grid');
-  ['#', '目标', '动作', '链', '时长', '↑ 发送', '↓ 接收', '状态'].forEach(h =>
+  ['#', '进程', '目标', '动作', '链', '时长', '↑ 发送', '↓ 接收', '状态'].forEach(h =>
     head.appendChild(el('div', 'cell', h)));
   t.appendChild(head);
 
@@ -400,6 +400,23 @@ async function loadConns() {
   conns.forEach((c, i) => {
     const row = el('div', 'trow conn-grid');
     row.appendChild(el('div', 'cell dim', String(i + 1)));
+    // 进程列：谁发起的。查不到时显示“未知”——不做伪装（受保护进程/系统服务查不到）。
+    const pc = el('div', 'cell', c.proc || '未知');
+    pc.classList.add(c.proc ? '' : 'dim');
+    if (c.proc) {
+      pc.title = c.proc + (c.pid ? '  (PID ' + c.pid + ')' : '') +
+        '\n点击可查完整路径';
+      pc.style.cursor = 'pointer';
+      pc.onclick = async () => {
+        try {
+          const p = await call('ProcPath', c.pid);
+          toast(c.proc, p || '（拿不到完整路径，可能是受保护进程）');
+        } catch (e) { toast('查进程失败', String((e && e.message) || e), 'error'); }
+      };
+    } else if (c.pid) {
+      pc.title = 'PID ' + c.pid + '，但拿不到进程名';
+    }
+    row.appendChild(pc);
     row.appendChild(el('div', 'cell mono', c.target || ''));
     row.appendChild(el('div', 'cell' + (c.action === '阻断' ? ' dim' : ''), c.action || ''));
     row.appendChild(el('div', 'cell dim', c.chain || '—'));
@@ -768,7 +785,7 @@ async function loadRoutes() {
     idxCell.appendChild(el('span', 'idx', String(r.index + 1)));
     row.appendChild(idxCell);
     row.appendChild(el('div', 'cell' + (r.name ? ' strong' : ' dim'), r.name || '（未命名）'));
-    row.appendChild(targetsCell(r.targets || [], r.ports || [], r.shadowed || [], r.localNets || [], r.inactive));
+    row.appendChild(targetsCell(r.targets || [], r.ports || [], r.shadowed || [], r.localNets || [], r.inactive, r.apps || []));
     row.appendChild(el('div', 'cell' + (r.direct || r.block ? ' dim' : ''), actionLabel(r)));
     row.appendChild(el('div', 'cell dim', r.note || ''));
 
@@ -784,13 +801,22 @@ async function loadRoutes() {
 
 /* 目标列：一条规则可以挂十几个目标，列表里只给摘要，全量放 title，悬停能看全。
    带端口条件时在末尾追一个暗淡的“· 端口 …”标签。 */
-function targetsCell(list, ports, shadowed, localNets, inactive) {
+function targetsCell(list, ports, shadowed, localNets, inactive, apps) {
   const cap = 3;
   const c = el('div', 'cell mono');
   c.textContent = list.slice(0, cap).join(' ') +
     (list.length > cap ? '  +' + (list.length - cap) + ' 个' : '');
   ports = ports || [];
   if (ports.length) c.appendChild(el('span', 'dim', '  · 端口 ' + ports.join(',')));
+  // A20：进程条件 —— 只按进程的规则（无目标）这里会先说清楚“谁”
+  apps = apps || [];
+  if (apps.length) {
+    const a = el('span', 'dim', (list.length ? '  · ' : '') + '进程 ' + apps.join(','));
+    a.title = '只匹配这些进程发起的连接：' + apps.join(', ') +
+      '\n查不到进程的连接（系统服务/受保护进程）不会命中带进程条件的规则';
+    c.appendChild(a);
+  }
+  if (!list.length && !apps.length) c.appendChild(el('span', 'dim', '任何连接'));
   localNets = localNets || [];
   if (localNets.length) {
     // A16：这条规则只在某些本机网段下生效；当前不满足就标出来（别让人以为“配了却没生效”）
@@ -864,6 +890,37 @@ function ruleForm(index) {
 
   const ports = input('text', (src.ports || []).join(', '), '留空 = 全部端口；也可 443, 8000-9000');
 
+  // A20：进程条件（可选）。定位是“例外”，所以放在后面、并写明代价。
+  // 支持 * 通配；查不到进程时这条条件不命中。
+  const apps = input('text', (src.apps || []).join(', '),
+    '留空 = 不看进程（常规做法）。进程名或 *.exe / *weixin*，逗号分隔；' +
+    '写了它就要求“目标命中 且 是这些进程发的”——只填进程、不填目标也可以');
+  const appBox = el('div', 'input-row top');
+  appBox.appendChild(apps);
+  appBox.appendChild(btn('从当前连接选', 'btn btn-xs', async () => {
+    try {
+      const d = await call('GetConns');
+      const list = ((d && d.list) || []).filter(c => c.proc);
+      if (!list.length) {
+        toast('暂时没有带进程信息的连接', '先让目标程序发起一次连接，再回来点这里', 'info');
+        return;
+      }
+      // 按出现次数排序：用得多的排前面
+      const cnt = {};
+      list.forEach(c => { cnt[c.proc] = (cnt[c.proc] || 0) + 1; });
+      const names = Object.keys(cnt).sort((a, b) => cnt[b] - cnt[a]);
+      modal.open('选进程', [field('最近发起过连接的进程', checkboxList(names, cnt),
+        '勾选后写进“进程”框；也可以直接手打进程名')], async () => {
+        const picked = Array.from(document.querySelectorAll('.pick-app:checked')).map(x => x.value);
+        if (picked.length) {
+          const cur = splitTargets(apps.value);
+          apps.value = cur.concat(picked.filter(p => !cur.includes(p))).join(', ');
+        }
+        modal.close();
+      }, '加入');
+    } catch (e) { fail(e); }
+  }));
+
   // A16：可选“仅在这些本机网段下生效”
   const localNets = textarea((src.localNets || []).join('\n'),
     '留空 = 总是生效。填了就要求“本机也有个地址在这些网段里”才生效，\n示例：10.0.0.0/8（在公司才走隧道，回家自动直连）', 3);
@@ -887,6 +944,10 @@ function ruleForm(index) {
     field('动作', sel,
       '「直连」= 不改写、不进隧道（本机网段、打印机、共享盘、同事机器用这个）；' +
       '「阻断」= 直接丢弃；规则自上而下匹配，命中即停'),
+    field('进程（可选）', appBox,
+      '用来写“例外”：某个程序必须走隧道、或绝不允许走隧道（哪怕它的目标不固定）。' +
+      '⚠ 查不到进程的连接（系统服务、受保护进程）不会命中带进程条件的规则 —— 宁可漏过也不误伤；' +
+      '另外“只填进程、不填目标”会让所有流量都过一遗用户态（性能略降），慎用'),
     field('生效条件（可选）', lnBox,
       '只在这台机器处于某个网络时才生效 —— 笔记本在公司走隧道、回家自动直连。' +
       '当前不满足条件的规则会在列表里标灰，不会模棱两可地“好像没生效”'),
@@ -894,18 +955,42 @@ function ruleForm(index) {
 
   modal.open(isNew ? '添加规则' : '编辑规则', nodes, async () => {
     try {
-      if (isNew) await call('AddRoute', name.value, targets.value, sel.value, ports.value, localNets.value);
-      else await call('UpdateRoute', index, name.value, targets.value, sel.value, ports.value, localNets.value);
+      if (isNew) await call('SaveRoute', -1, {
+        name: name.value, targets: targets.value, chain: sel.value,
+        ports: ports.value, localNets: localNets.value, apps: apps.value,
+      });
+      else await call('SaveRoute', index, {
+        name: name.value, targets: targets.value, chain: sel.value,
+        ports: ports.value, localNets: localNets.value, apps: apps.value,
+      });
       modal.close();
       await loadRoutes();
       toast(isNew ? '已添加规则' : '已更新规则',
         (name.value.trim() || '未命名') + '：' + splitTargets(targets.value).length + ' 个目标' +
-        (splitTargets(ports.value).length ? '，端口 ' + ports.value.trim() : '') + ' → ' +
+        (splitTargets(ports.value).length ? '，端口 ' + ports.value.trim() : '') +
+        (splitTargets(apps.value).length ? '，仅 ' + apps.value.trim().replace(/\s+/g, ' ') + ' 发起' : '') +
+        ' → ' +
         actionName(sel.value) +
         (splitTargets(localNets.value).length ? '（仅限本机在 ' + localNets.value.trim().replace(/\s+/g, ' ') + ' 时）' : ''),
         'success');
     } catch (e) { modal.error(fail(e)); }
   });
+}
+
+/* 勾选列表：多选用（选进程用）。cnt 只用来在右侧显示出现次数。 */
+function checkboxList(items, cnt) {
+  const box = el('div', 'pick-list');
+  items.forEach(name => {
+    const row = el('label', 'pick-row');
+    const cb = el('input', 'pick-app');
+    cb.type = 'checkbox';
+    cb.value = name;
+    row.appendChild(cb);
+    row.appendChild(el('span', 'mono', name));
+    if (cnt && cnt[name]) row.appendChild(el('span', 'dim', '× ' + cnt[name]));
+    box.appendChild(row);
+  });
+  return box;
 }
 
 /* 只为在提示语里数一下目标个数（真正的拆分与归一化在后端做）。 */

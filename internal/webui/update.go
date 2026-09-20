@@ -174,91 +174,108 @@ func (b *Backend) GetUpdateStatus() UpdateStatus {
 // 为什么敢在客户机上自动重启：因为这是用户**明确点的一个按钮**，
 // 而且替换过程本身是原子的（换 exe 用改名+写入，被占用的 DLL 留到重启后、
 // 装载驱动之前再换）。失败时上一版本还在（nethub.exe.old），可一键回滚。
+// UpdateNow 执行一次完整更新：查 → 下载 → 校验 → 暂存 → 换 exe → 拉起新进程。
+//
+// 拆成独立函数（而不是只写成 Backend 方法）是为了两件事：
+//  1. 命令行也能跑（nethub.exe -update-now）—— 支持远程指导客户"跑一下这个命令"，
+//     也让"一键更新"这条链路本身可以被脚本化验证（不需要人去点界面）。
+//  2. 复用同一份逻辑，避免界面和命令行各写一遍、只修一处。
+//
+// 返回新版本号；没有新版本时返回 "" 且 err 为 nil。progress 可为 nil。
+func UpdateNow(progDir string, progress func(stage, text string, pct int)) (string, error) {
+	if progress == nil {
+		progress = func(string, string, int) {}
+	}
+	if progDir == "" {
+		progDir = "."
+	}
+	progress("check", "正在查最新版本…", -1)
+	rel, err := latestReleaseFull()
+	if err != nil {
+		return "", err
+	}
+	if Version != "dev" && cmpVersion(rel.TagName, Version) <= 0 {
+		return "", nil // 已是最新
+	}
+	asset, err := pickAsset(rel)
+	if err != nil {
+		return "", err
+	}
+
+	// 下载到程序目录下的 update/（同盘写入才能原子替换）
+	if err := os.MkdirAll(filepath.Join(progDir, selfupdate.StageDirName), 0o755); err != nil {
+		return "", err
+	}
+	zipPath := filepath.Join(progDir, selfupdate.StageDirName, "download.zip")
+	progress("download", "正在下载 "+asset.Name+"…", 0)
+	if err := downloadWithProgress(asset.URL, zipPath, progress); err != nil {
+		return "", err
+	}
+
+	if asset.SHA256 != "" {
+		progress("verify", "正在校验完整性…", -1)
+		sum, err := fileSHA256(zipPath)
+		if err != nil {
+			return "", err
+		}
+		if !strings.EqualFold(sum, asset.SHA256) {
+			return "", fmt.Errorf("下载包校验不通过（期望 %s…，实际 %s…），已中止，没有动程序文件",
+				asset.SHA256[:12], sum[:12])
+		}
+	}
+
+	progress("stage", "正在解包…", -1)
+	pend, err := selfupdate.Stage(zipPath, progDir, rel.TagName, os.Getpid())
+	if err != nil {
+		return "", err
+	}
+	progress("swap", "正在替换程序文件…", -1)
+	if err := selfupdate.SwapRunningExe(progDir); err != nil {
+		return "", err
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	// 起新进程：它带 -after-update，会先等本进程退出、再替换被占用的 DLL。
+	// 原始参数一并带过去（例如 -no-elevate）：重启不该偷偷改变提权行为。
+	args := append([]string{"-after-update"}, os.Args[1:]...)
+	cmd := exec.Command(exe, args...)
+	cmd.Dir = progDir
+	if err := cmd.Start(); err != nil {
+		return pend.Version, fmt.Errorf("新版本已就位，但启动失败（旧版本保留为 nethub.exe.old，可用 -rollback 回滚）: %w", err)
+	}
+	return pend.Version, nil
+}
+
+// DownloadAndUpdate 界面上的「下载并更新」：跑一遍 UpdateNow，成功后退出界面让新进程接手。
 func (b *Backend) DownloadAndUpdate() error {
 	updMu.Lock()
-	if updStatus.Stage == "download" || updStatus.Stage == "verify" || updStatus.Stage == "stage" {
-		updMu.Unlock()
+	busy := updStatus.Stage == "download" || updStatus.Stage == "verify" || updStatus.Stage == "stage" ||
+		updStatus.Stage == "swap" || updStatus.Stage == "check"
+	updMu.Unlock()
+	if busy {
 		return fmt.Errorf("已经在更新了")
 	}
-	updMu.Unlock()
 
+	progDir := dirOf(b.a.Cfg.Path())
 	go func() {
-		setUpd("check", "正在查最新版本…", -1)
-		rel, err := latestReleaseFull()
+		v, err := UpdateNow(progDir, func(stage, text string, pct int) {
+			updMu.Lock()
+			updStatus = UpdateStatus{Stage: stage, Text: text, Percent: pct}
+			updMu.Unlock()
+		})
 		if err != nil {
 			setUpdErr(err)
 			return
 		}
-		if cmpVersion(rel.TagName, Version) <= 0 && Version != "dev" {
+		if v == "" {
 			setUpd("done", "已经是最新版本（"+Version+"）", 100)
 			return
 		}
-		asset, err := pickAsset(rel)
-		if err != nil {
-			setUpdErr(err)
-			return
-		}
-
-		progDir := dirOf(b.a.Cfg.Path())
-		if progDir == "" {
-			progDir = "."
-		}
-		// 下载到程序目录下的 update/（同盘写入才能原子替换）
-		if err := os.MkdirAll(filepath.Join(progDir, selfupdate.StageDirName), 0o755); err != nil {
-			setUpdErr(err)
-			return
-		}
-		zipPath := filepath.Join(progDir, selfupdate.StageDirName, "download.zip")
-
-		setUpd("download", "正在下载 "+asset.Name+"…", 0)
-		if err := downloadWithProgress(asset.URL, zipPath); err != nil {
-			setUpdErr(err)
-			return
-		}
-
-		if asset.SHA256 != "" {
-			setUpd("verify", "正在校验完整性…", -1)
-			sum, err := fileSHA256(zipPath)
-			if err != nil {
-				setUpdErr(err)
-				return
-			}
-			if !strings.EqualFold(sum, asset.SHA256) {
-				setUpdErr(fmt.Errorf("下载包校验不通过（期望 %s…，实际 %s…），已中止，没有动你的程序",
-					asset.SHA256[:12], sum[:12]))
-				return
-			}
-		} else {
-			b.a.Bus.Warn("更新包没有官方摘要可校验（GitHub 未提供），只做了结构校验")
-		}
-
-		setUpd("stage", "正在解包…", -1)
-		pend, err := selfupdate.Stage(zipPath, progDir, rel.TagName, os.Getpid())
-		if err != nil {
-			setUpdErr(err)
-			return
-		}
-		setUpd("swap", "正在替换程序文件…", -1)
-		if err := selfupdate.SwapRunningExe(progDir); err != nil {
-			setUpdErr(err)
-			return
-		}
-
-		exe, err := os.Executable()
-		if err != nil {
-			setUpdErr(err)
-			return
-		}
-		b.a.Bus.Warn("已更新到 %s（替换 %s）；正在自动重启…", pend.Version, selfupdate.Describe(pend.Files))
-		setUpd("restart", "已更新到 "+pend.Version+"，正在重启…", 100)
-
-		// 起新进程（带 -after-update：它会先等我们退出，再替换被占用的 DLL）
-		cmd := exec.Command(exe, "-after-update")
-		cmd.Dir = progDir
-		if err := cmd.Start(); err != nil {
-			setUpdErr(fmt.Errorf("启动新版本失败（旧版本已保留为 nethub.exe.old，可回滚）: %w", err))
-			return
-		}
+		b.a.Bus.Warn("已更新到 %s，正在自动重启…", v)
+		setUpd("restart", "已更新到 "+v+"，正在重启…", 100)
 		time.Sleep(700 * time.Millisecond) // 让新进程先把界面起来
 		b.Quit()
 	}()
@@ -282,7 +299,8 @@ func (b *Backend) RollbackUpdate() error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(exe, "-after-update")
+	args := append([]string{"-after-update"}, os.Args[1:]...)
+	cmd := exec.Command(exe, args...)
 	cmd.Dir = progDir
 	if err := cmd.Start(); err != nil {
 		return err
@@ -362,7 +380,7 @@ func pickAsset(rel ghRelease) (ghAsset, error) {
 }
 
 // downloadWithProgress 流式下载并回报进度。
-func downloadWithProgress(url, dst string) error {
+func downloadWithProgress(url, dst string, progress func(stage, text string, pct int)) error {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return err
@@ -395,8 +413,7 @@ func downloadWithProgress(url, dst string) error {
 			got += int64(n)
 			if total > 0 && time.Since(last) > 200*time.Millisecond {
 				last = time.Now()
-				setUpd("download", fmt.Sprintf("正在下载… %.1f / %.1f MB", float64(got)/1e6, float64(total)/1e6),
-					int(got*100/total))
+				progress("download", fmt.Sprintf("正在下载… %.1f / %.1f MB", float64(got)/1e6, float64(total)/1e6), int(got*100/total))
 			}
 		}
 		if err == io.EOF {

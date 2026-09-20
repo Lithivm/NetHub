@@ -212,7 +212,7 @@ func toRules(rs []config.Route) []rules.Route {
 			act = rules.ActionBlock
 		}
 		out = append(out, rules.Route{Name: r.Name, Targets: r.Targets, Ports: r.Ports,
-			LocalNets: r.LocalNets, Chain: r.Chain, Action: act})
+			LocalNets: r.LocalNets, Apps: r.Apps, Chain: r.Chain, Action: act})
 	}
 	return out
 }

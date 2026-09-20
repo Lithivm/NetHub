@@ -29,6 +29,7 @@ import (
 
 	"nethub/internal/config"
 	"nethub/internal/logbus"
+	"nethub/internal/proc"
 	"nethub/internal/rules"
 	"nethub/internal/upstream"
 )
@@ -57,6 +58,11 @@ type connState struct {
 	chain   string
 	action  rules.Action
 	start   time.Time
+
+	// 进程名 / PID（A20）：SYN 时查一次，建 connState 前就写定 → 发布后不再改，无需加锁。
+	// 空串 = 查不到（受保护进程/系统服务/已消失）——界面显示“未知”。
+	procName string
+	pid      uint32
 
 	last    atomic.Int64  // unix nano：最后一次看到包/数据的时间
 	up      atomic.Uint64 // 应用 → 目标 的字节（直连只能统计出方向）
@@ -103,6 +109,8 @@ type ConnView struct {
 	Target  string `json:"target"`
 	Action  string `json:"action"`
 	Chain   string `json:"chain"`
+	Proc    string `json:"proc"` // 发起这条连接的进程名（空 = 未知）
+	PID     uint32 `json:"pid"`
 	Started string `json:"started"`
 	Dur     string `json:"dur"`
 	Up      uint64 `json:"up"`
@@ -113,7 +121,12 @@ type ConnView struct {
 }
 
 // Conns 返回连接表快照：进行中在前，其余按最后活动时间倒序；limit<=0 表示不限。
-func (e *Engine) Conns(limit int) []ConnView {
+//
+// withProc 为真时，给还没查过进程的连接补上进程名（连接页打开时用）。
+// 为什么不在建连接时无脑查：TCP 表是全量枚举，毫秒级开销；只有界面真要看到
+// “是谁在连”时才值得付。**规则里写了进程条件时另一条路已经查过了**（flowProc），
+// 这里只是补上那些连接。
+func (e *Engine) Conns(limit int, withProc bool) []ConnView {
 	e.mu.RLock()
 	snap := make([]*connState, 0, len(e.conns))
 	for _, st := range e.conns {
@@ -148,10 +161,20 @@ func (e *Engine) Conns(limit int) []ConnView {
 		if t := st.endTime(); !t.IsZero() {
 			end = t
 		}
+		name, pid := st.procName, st.pid
+		if withProc && name == "" && e.proc != nil {
+			// 只读查询，不写回 connState —— 快照是拿读锁生成的，写回会与包路径抢。
+			// 代价可控：解析器自己有缓存，最多每个刷新周期多枚举一次 TCP 表。
+			if n, p, ok := e.proc.ByPort(st.appPort); ok {
+				name, pid = n, p
+			}
+		}
 		out = append(out, ConnView{
 			Target:  fmt.Sprintf("%s:%d", st.dst, st.dport),
 			Action:  st.action.String(),
 			Chain:   st.chain,
+			Proc:    name,
+			PID:     pid,
 			Started: st.start.Format("15:04:05"),
 			Dur:     humanDur(end.Sub(st.start)),
 			Up:      st.up.Load(),
@@ -210,6 +233,10 @@ type Engine struct {
 
 	// pool 预热连接池（A11）：养着“已握手、只差 CONNECT”的会话
 	pool *warmPool
+
+	// proc 端口→进程（A20）：只在规则里写了进程条件时才查（见 rules.NeedsProc）
+	proc *proc.Resolver
+
 	done chan struct{}
 	wg   sync.WaitGroup
 
@@ -227,6 +254,7 @@ func New(bus *logbus.Bus, rs *rules.Set, cfg *config.Config) *Engine {
 		pool:        newWarmPool(),
 		loop:        newLoopGuard(),
 		cap:         newCapturer(),
+		proc:        proc.NewResolver(),
 	}
 }
 
@@ -336,6 +364,9 @@ func (e *Engine) Fatal() error {
 // Stop 停止拦截：关句柄（让 packetLoop 的 Recv 立刻返回）、关 relay、等协程退完。
 func (e *Engine) Stop() {
 	e.pool.closeAll() // 池里的会话要主动关，否则退出时留下悬挂连接
+	if e.proc != nil {
+		e.proc.Stop()
+	}
 	e.stopOnce.Do(func() {
 		close(e.done)
 
@@ -688,23 +719,31 @@ func (e *Engine) packetLoop() {
 		dport := be16(pkt, t+offDstPort)
 		flags := pkt[t+offFlags]
 
-		// 方向判定不依赖 addr.Flags 的位布局：目标落在规则内 = 应用发出的包。
-		if chain, act, hit := e.rules.Match(dst, dport); hit {
-			switch act {
-			case rules.ActionDirect, rules.ActionBlock:
-				e.passThrough(h, pkt, addr, t, src, dst, sport, dport, flags, act)
-			default:
-				e.rewriteOutbound(h, pkt, addr, t, src, dst, sport, dport, flags, chain, relayIP, relayPort)
-			}
-			continue
-		}
-		// 没命中任何规则：要么是 relay 回来的包（源端口 = relay 端口），
-		// 要么是“带本机网段条件的规则”**当前不生效**（A16）——
-		// 后者必须原样放回内核，绝不能当入站包改写（会把用户的包改坏）。
+		// 入方向：源端口 = relay 端口的包，只可能是本机 relay 回来的
+		// （应用不可能正好用着 relay 占着的那个端口）。先判它，
+		// 否则“只按进程”的规则会把回来的包也当出站命中。
 		if sport == relayPort {
 			e.rewriteInbound(h, pkt, addr, t, dport)
 			continue
 		}
+
+		// 出方向：这条连接属于哪个进程（只在规则里写了进程条件时才查表，其余情况零开销）。
+		// 优先用连接上缓存的结论，避免每个包都查。
+		procName, procPID := e.flowProc(sport)
+
+		// 方向判定不依赖 addr.Flags 的位布局：目标落在规则内 = 应用发出的包。
+		if chain, act, hit := e.rules.MatchProc(dst, dport, procName); hit {
+			switch act {
+			case rules.ActionDirect, rules.ActionBlock:
+				e.passThrough(h, pkt, addr, t, src, dst, sport, dport, flags, act, procName, procPID)
+			default:
+				e.rewriteOutbound(h, pkt, addr, t, src, dst, sport, dport, flags, chain, relayIP, relayPort, procName, procPID)
+			}
+			continue
+		}
+		// 没命中任何规则：要么是“带本机网段条件的规则”**当前不生效**（A16），
+		// 要么是“只按进程”的规则拦下的其它程序的包（A20）。
+		// 两种都必须原样放回内核，绝不能当入站包改写（会把用户的包改坏）。
 		// 直连流量（仅当开了“统计直连流量”才会被拦到这里）：
 		// 回来的包也要数上，否则界面上永远只有出方向（A15）。
 		if st := e.flow(dport); st != nil && st.action == rules.ActionDirect {
@@ -741,12 +780,44 @@ func (e *Engine) noteAction(kind string, sport uint16, dst net.IP, dport uint16,
 	}
 }
 
+// flowProc 这条连接的进程名 / PID。
+//
+// 三层次序：① 规则里没人写进程条件 → 直接返回空（零开销）；
+// ② 连接上已经查过 → 用缓存的；③ 查一次 TCP 表（常见情况只是内存里的 map 命中）。
+func (e *Engine) flowProc(sport uint16) (string, uint32) {
+	if e.proc == nil || !e.rules.NeedsProc() {
+		return "", 0
+	}
+	if st := e.flow(sport); st != nil && st.procName != "" {
+		return st.procName, st.pid
+	}
+	name, pid, _ := e.proc.ByPort(sport)
+	return name, pid
+}
+
+// ProcStats 进程解析器缓存规模（诊断页用）。
+func (e *Engine) ProcStats() (ports, pids int) {
+	if e.proc == nil {
+		return 0, 0
+	}
+	return e.proc.Stats()
+}
+
+// ProcPath 某个 PID 的完整路径（界面看“到底是谁”时用）。
+func (e *Engine) ProcPath(pid uint32) string {
+	if e.proc == nil {
+		return ""
+	}
+	return e.proc.FullPath(pid)
+}
+
 // isSyn 只看 SYN（不带 ACK）—— 新连接的第一个包。
 func isSyn(flags byte) bool { return flags&0x02 != 0 && flags&0x10 == 0 }
 
 // rewriteOutbound 把应用发往内网目标的包改成"发给本机 relay"。
 func (e *Engine) rewriteOutbound(h *divert.Handle, pkt []byte, addr *divert.Address, t int,
-	src, dst net.IP, sport, dport uint16, flags byte, chain string, relayIP net.IP, relayPort uint16) {
+	src, dst net.IP, sport, dport uint16, flags byte, chain string, relayIP net.IP, relayPort uint16,
+	procName string, pid uint32) {
 
 	if isSyn(flags) {
 		// A14：新建连接时判一次环（目标=上游自己 / 源=目标 / 同目标疯狂重连）
@@ -759,6 +830,7 @@ func (e *Engine) rewriteOutbound(h *divert.Handle, pkt []byte, addr *divert.Addr
 			dst: dst, dport: dport,
 			app: append(net.IP(nil), src...), appPort: sport,
 			chain: chain, action: rules.ActionChain, start: time.Now(),
+			procName: procName, pid: pid,
 		}
 		st.touch()
 		e.conns[sport] = st
@@ -822,13 +894,13 @@ func (e *Engine) flow(sport uint16) *connState {
 // passThrough 处理直连与阻断：计数 + 必要时记一行日志（去重）。
 // 直连的包原样放回内核转发；阻断的包丢掉，并在 SYN 上回一个 RST。
 func (e *Engine) passThrough(h *divert.Handle, pkt []byte, addr *divert.Address, t int,
-	src, dst net.IP, sport, dport uint16, flags byte, act rules.Action) {
+	src, dst net.IP, sport, dport uint16, flags byte, act rules.Action, procName string, pid uint32) {
 
 	if isSyn(flags) {
 		e.mu.Lock()
 		if _, ok := e.conns[sport]; !ok {
 			st := &connState{dst: dst, dport: dport, app: append(net.IP(nil), src...),
-				appPort: sport, action: act, start: time.Now()}
+				appPort: sport, action: act, start: time.Now(), procName: procName, pid: pid}
 			st.touch()
 			e.conns[sport] = st
 		}
@@ -1163,3 +1235,6 @@ func ipsKey(ips []net.IP) string {
 	sort.Strings(ss)
 	return strings.Join(ss, ", ")
 }
+
+// procNewResolver 供测试直接造一个进程解析器（生产路径由 New 注入）。
+func procNewResolver() *proc.Resolver { return proc.NewResolver() }

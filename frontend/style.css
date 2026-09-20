@@ -430,7 +430,7 @@ code, .mono { font-family: var(--font-mono); }
 .sim-badge.bad { background: var(--error-soft); color: var(--error); }
 .sim-badge.none { background: var(--card-strong); color: var(--muted); }
 .rule-grid  { grid-template-columns: 46px 170px minmax(200px, 1.5fr) 130px minmax(120px, 1fr) 150px; }
-.conn-grid  { grid-template-columns: 40px minmax(170px, 1.2fr) 62px 100px 76px 90px 90px 96px; }
+.conn-grid  { grid-template-columns: 40px 132px minmax(160px, 1.2fr) 62px 92px 74px 84px 84px 92px; }
 /* 上游健康的小圆点（只探测到代理这一段） */
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; vertical-align: middle; background: var(--muted-soft); }
 .dot.ok  { background: #2f9e5e; }
@@ -664,3 +664,10 @@ code, .mono { font-family: var(--font-mono); }
 }
 .card-about .input-row { justify-content: center; gap: var(--s3); }
 .card-about .hint, .card-about code { text-align: center; }
+
+/* 多选列表（A20 选进程用） */
+.pick-list { display: flex; flex-direction: column; gap: 2px; max-height: 260px; overflow: auto;
+  border: 1px solid var(--line); border-radius: var(--r); padding: var(--s2); }
+.pick-row { display: flex; align-items: center; gap: var(--s2); padding: 3px 4px; border-radius: 4px; cursor: pointer; }
+.pick-row:hover { background: var(--bg-soft); }
+.pick-row .dim { margin-left: auto; font-size: var(--fs-xs); }

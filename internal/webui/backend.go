@@ -168,6 +168,8 @@ type RouteView struct {
 	// A16：仅在这些本机网段下生效；Inactive=当前本机网络下这条规则不生效
 	LocalNets []string `json:"localNets"`
 	Inactive  bool     `json:"inactive"`
+	// A20：进程条件（空 = 不看进程）
+	Apps []string `json:"apps"`
 }
 
 type LogView struct {
@@ -340,6 +342,7 @@ func (b *Backend) GetRoutes() []RouteView {
 			Shadowed:  b.a.Cfg.ShadowedTargets(i),
 			LocalNets: r.LocalNets,
 			Inactive:  !localNetsMatch(r.LocalNets, localIPv4s()),
+			Apps:      r.Apps,
 		})
 	}
 	return out
@@ -453,11 +456,17 @@ type ConnList struct {
 func (b *Backend) GetConns() ConnList {
 	total, active := b.a.Engine.Stats()
 	return ConnList{
-		List:     b.a.Engine.Conns(150),
+		List:     b.a.Engine.Conns(150, true),
 		Total:    total,
 		Active:   active,
 		PerChain: b.a.Engine.ChainCounts(),
 	}
+}
+
+// ProcPath 某个 PID 的完整路径（连接页点进程名看“到底是谁”）。
+// 拿不到时返回空串（受保护进程/已退出）。
+func (b *Backend) ProcPath(pid uint32) string {
+	return b.a.Engine.ProcPath(pid)
 }
 
 // ───────────────────── 规则智能 / 体检 / 备份 / 诊断 ─────────────────────
@@ -740,15 +749,64 @@ func (in ChainInput) toChain() config.Chain {
 
 // ───────────────────────── 规则（≈ Proxifier 的 Rules）─────────────────────────
 
+// RouteInput 界面上一条规则的完整输入（字段与表单一一对应）。
+// 目标/端口/进程都可以一次填多个（换行/逗号/顿号/空格分隔）。
+type RouteInput struct {
+	Name      string `json:"name"`
+	Targets   string `json:"targets"`
+	Chain     string `json:"chain"`
+	Ports     string `json:"ports"`
+	LocalNets string `json:"localNets"`
+	Apps      string `json:"apps"`
+}
+
+// ruleFromInput 把界面输入整理成 config.Route。
+func ruleFromInput(in RouteInput) (config.Route, error) {
+	return ruleFrom(in.Name, in.Targets, in.Chain, in.Ports, in.LocalNets, in.Apps)
+}
+
+// SaveRoute 保存一条规则：index < 0 = 新增，否则替换第 index 条。
+// 这是界面当前用的入口（老方法保留给已有调用方，行为一致）。
+func (b *Backend) SaveRoute(index int, in RouteInput) error {
+	rt, err := ruleFromInput(in)
+	if err != nil {
+		return err
+	}
+	if index < 0 {
+		if err := b.a.Cfg.AddRoute(rt); err != nil {
+			return err
+		}
+		return b.save(ruleSaved("添加", rt))
+	}
+	old := ""
+	if rs := b.a.Cfg.Routes; index < len(rs) {
+		old = rs[index].Name
+		if strings.TrimSpace(old) == "" {
+			old = rs[index].Describe()
+		}
+	}
+	if err := b.a.Cfg.UpdateRoute(index, rt); err != nil {
+		return err
+	}
+	if old != "" && strings.TrimSpace(in.Name) != "" && old != in.Name {
+		return b.save(fmt.Sprintf("%s→%s（%d 个目标）", old, in.Name, len(rt.Targets)))
+	}
+	return b.save(ruleSaved("修改", rt))
+}
+
 // ruleFrom 把界面传来的"一条规则"整理成 config.Route：目标与端口文本都可以一次填多个
 // （换行/逗号/顿号/空格分隔），这里负责拆分 + 归一化。端口留空 = 任意端口。
-func ruleFrom(name, targets, chain, ports, localNets string) (config.Route, error) {
+func ruleFrom(name, targets, chain, ports, localNets, apps string) (config.Route, error) {
 	ts, _, err := config.NormalizeTargets(targets)
 	if err != nil {
 		return config.Route{}, err
 	}
-	if len(ts) == 0 {
-		return config.Route{}, fmt.Errorf("至少要填一个目标")
+	as, err := normalizeApps(apps)
+	if err != nil {
+		return config.Route{}, err
+	}
+	if len(ts) == 0 && len(as) == 0 {
+		return config.Route{}, fmt.Errorf("至少要填一个目标（或一个进程条件）")
 	}
 	ps, _, err := config.NormalizePorts(ports)
 	if err != nil {
@@ -772,11 +830,48 @@ func ruleFrom(name, targets, chain, ports, localNets string) (config.Route, erro
 		}
 		lns = append(lns, ln)
 	}
-	return config.Route{Name: name, Targets: ts, Ports: ps, Chain: chain, LocalNets: lns}, nil
+	return config.Route{Name: name, Targets: ts, Ports: ps, Chain: chain, LocalNets: lns, Apps: as}, nil
+}
+
+// normalizeApps 拆分并校验进程条件：进程名（可带 * 通配，也可写完整路径）。
+// 这里只挡明显的写法错误，真正的匹配在 rules.MatchAppName。
+func normalizeApps(s string) ([]string, error) {
+	if strings.TrimSpace(s) == "" {
+		return nil, nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, a := range strings.FieldsFunc(s, func(r rune) bool {
+		switch r {
+		case ',', '，', '、', ';', '；', ' ', '\t', '\n', '\r':
+			return true
+		}
+		return false
+	}) {
+		a = strings.TrimSpace(a)
+		if a == "" || seen[a] {
+			continue
+		}
+		if strings.ToLower(a) != a {
+			// 大小写保留原样（匹配时不分大小写）
+		}
+		if strings.ContainsAny(a, `<>|"`) {
+			return nil, fmt.Errorf("进程条件 %q 含非法字符", a)
+		}
+		// 写完整路径也照原样存（匹配时只比文件名，见 rules.MatchAppName）——
+		// 不替用户改写输入，界面显示原形。
+
+		seen[a] = true
+		out = append(out, a)
+	}
+	return out, nil
 }
 
 // ruleSaved 保存成功后给日志/界面的回执文案。
 func ruleSaved(verb string, rt config.Route) string {
+	if len(rt.Targets) == 0 && len(rt.Apps) > 0 {
+		return fmt.Sprintf("%s规则%s（进程 %s）", verb, rt.Describe(), strings.Join(rt.Apps, " "))
+	}
 	if len(rt.Ports) > 0 {
 		return fmt.Sprintf("%s规则%s（%d 个目标，端口 %s）", verb, rt.Describe(), len(rt.Targets), config.PortText(rt.Ports))
 	}
@@ -786,7 +881,7 @@ func ruleSaved(verb string, rt config.Route) string {
 // AddRoute 添加一条规则。名字可留空；目标与端口都可以一次填多个 ——
 // 多个目标属于**同一条规则**（对齐 Proxifier：一个动作挂一组目标 + 一组端口）。
 func (b *Backend) AddRoute(name, targets, chain, ports, localNets string) error {
-	rt, err := ruleFrom(name, targets, chain, ports, localNets)
+	rt, err := ruleFrom(name, targets, chain, ports, localNets, "")
 	if err != nil {
 		return err
 	}
@@ -798,7 +893,7 @@ func (b *Backend) AddRoute(name, targets, chain, ports, localNets string) error 
 
 // UpdateRoute 替换第 index 条规则（同样支持多目标 + 端口条件）。
 func (b *Backend) UpdateRoute(index int, name, targets, chain, ports, localNets string) error {
-	rt, err := ruleFrom(name, targets, chain, ports, localNets)
+	rt, err := ruleFrom(name, targets, chain, ports, localNets, "")
 	if err != nil {
 		return err
 	}
