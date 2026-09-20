@@ -1028,13 +1028,16 @@ async function loadSettings() {
   loadSecretsSetting();
   setValue('setDialTimeout', s.dialTimeout || 5);
   setValue('setDialBudget', s.dialBudget || 10);
-  setValue('setRaceAfter', s.raceAfter === 0 ? 0 : (s.raceAfter || 150));
+  setValue('setRaceAfter', s.raceAfter === 0 ? 0 : (s.raceAfter || 300));
+  setValue('setWarm', s.warmSessions === 0 ? 0 : (s.warmSessions || 2));
   const dh = document.getElementById('dialHint');
   if (dh) {
-    dh.textContent = '默认 5s / 10s / 150ms。上游半死时，业务等待时间约等于「单次超时」；'
-      + '现网上游握手实测 0.1～0.8s，5s 余量足够。'
-      + '「竞速起跑」= 第一条超过这个时间还没连上就并发试其他上游、取先到的（填 0 关闭）；'
-      + '实测某条链的 CONNECT 要 620ms、另一条只要 75ms，竞速能直接把业务拉到快链路。改完点「保存并重启」生效。';
+    dh.textContent = '默认：单次 5s / 总预算 10s / 竞速起跑 300ms / 预热 2 条。'
+      + '「单次超时」= 一条上游最多等多久（实测现网握手 0.1～0.8s，5s 余量充足；调小切得更快但可能误杀慢链路）；'
+      + '「总预算」= 一整次连接最多花多久；'
+      + '「竞速起跑」= 第一条超过这个时间还没连上，就并发试其他上游、取先到的（0 = 关闭）。实测某条链的 CONNECT 要 620ms、另一条只要 75ms，'
+      + '竞速直接把业务拉到快链路；但太激进会让健康上游也每条都多拨一次，所以默认 300ms 而不是更小；'
+      + '「预热会话」= 每条上游提前养几条“已握手、只差 CONNECT”的会话，业务来了不用等握手（0 = 关闭）。改完点「保存并重启」生效。';
   }
 }
 
@@ -1068,7 +1071,12 @@ async function saveSettings(restart) {
     raceAfter: (function () {
       const e = document.getElementById('setRaceAfter');
       const n = e ? parseInt(e.value, 10) : NaN;
-      return Number.isFinite(n) && n >= 0 ? n : 150;
+      return Number.isFinite(n) && n >= 0 ? n : 300;
+    })(),
+    warmSessions: (function () {
+      const e = document.getElementById('setWarm');
+      const n = e ? parseInt(e.value, 10) : NaN;
+      return Number.isFinite(n) && n >= 0 ? n : 2;
     })(),
   };
   try {
@@ -1204,6 +1212,7 @@ function wire() {
       if (p) toast('已导出无凭据配置', p + '　（同样可导入，但需补上游口令；可安全发送）', 'success');
     } catch (e) { fail(e); }
   };
+  document.getElementById('btnDialReset').onclick = resetDialDefaults;
   document.getElementById('btnImportURL').onclick = importConfigFromURL;
   document.getElementById('setSecrets').onchange = async (ev) => {
     try {

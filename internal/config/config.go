@@ -662,7 +662,7 @@ func (c *Config) PatrolInterval() time.Duration {
 type Tuning struct {
 	DialTimeout string `yaml:"dial_timeout,omitempty"` // 如 5s（默认 5s）
 	DialBudget  string `yaml:"dial_budget,omitempty"`  // 默认 2×dial_timeout；一般不用写
-	// RaceAfter 首跳等多久还没连上就并发试其他候选（默认 150ms；0 = 关）。
+	// RaceAfter 首跳等多久还没连上就并发试其他候选（默认 300ms；0 = 关）。
 	// 竞速会成倍放大连接数，所以只在“第一条明显慢”时才值得。
 	RaceAfter string `yaml:"race_after,omitempty"`
 	// CountDirect 是否把直连流量也纳入统计（默认 false：直连不进内核过滤器，完全零开销）。
@@ -691,7 +691,7 @@ func (c *Config) DialBudgetDur() time.Duration {
 	return d
 }
 
-// RaceAfterDur 竞速起跑时间（默认 150ms）。
+// RaceAfterDur 竞速起跑时间（默认 300ms）。
 // 显式写 0 / off 表示关闭竞速；非法值回默认。
 func (c *Config) RaceAfterDur() time.Duration {
 	s := strings.ToLower(strings.TrimSpace(c.Tuning.RaceAfter))
@@ -699,12 +699,12 @@ func (c *Config) RaceAfterDur() time.Duration {
 	case "0", "off", "none", "false":
 		return 0
 	case "":
-		return 150 * time.Millisecond
+		return 300 * time.Millisecond
 	}
 	if d, err := time.ParseDuration(s); err == nil && d > 0 {
 		return d
 	}
-	return 150 * time.Millisecond
+	return 300 * time.Millisecond
 }
 
 // clampDur 解析 duration 字符串；空/非法取 def，并夹到 [lo, hi]。

@@ -189,8 +189,12 @@ type SettingsView struct {
 	// 上游拨号（秒）。0 表示前端没传 → 保持原值，不当成“设成 0”。
 	DialTimeout int `json:"dialTimeout,omitempty"`
 	DialBudget  int `json:"dialBudget,omitempty"`
-	// RaceAfter 竞速起跑（毫秒）。0 = 关闭竞速（这是合法配置，所以用 -1 表示“前端没传”）。
-	RaceAfter int `json:"raceAfter"`
+	// RaceAfter 竞速起跑（毫秒）：0 = 关闭竞速。
+	// 用指针是为了区分“没传”（nil = 不改）与“明确设成 0”（关）—— 用 int 的话，
+	// 前端一旦漏传就会被当成“关闭”，静默把功能关了。
+	RaceAfter *int `json:"raceAfter"`
+	// WarmSessions 预热会话条数：0 = 关闭（同样用指针区分“没传”）。
+	WarmSessions *int `json:"warmSessions"`
 }
 
 type ChainInput struct {
@@ -649,7 +653,8 @@ func (b *Backend) GetSettings() SettingsView {
 		Theme:        b.a.Cfg.UI.Theme,
 		DialTimeout:  int(b.a.Cfg.DialTimeoutDur() / time.Second),
 		DialBudget:   int(b.a.Cfg.DialBudgetDur() / time.Second),
-		RaceAfter:    int(b.a.Cfg.RaceAfterDur() / time.Millisecond),
+		RaceAfter:    intPtr(int(b.a.Cfg.RaceAfterDur() / time.Millisecond)),
+		WarmSessions: intPtr(b.a.Cfg.WarmTarget()),
 	}
 }
 
@@ -900,19 +905,26 @@ func (b *Backend) SaveSettings(s SettingsView) error {
 	if s.DialBudget > 0 {
 		cfg.Tuning.DialBudget = fmt.Sprintf("%ds", s.DialBudget)
 	}
-	// 竞速起跑：界面用 -1 表示“没传/不改”，≥0 才写（0 = 明确关闭）
-	if s.RaceAfter >= 0 {
-		if s.RaceAfter == 0 {
+	// 竞速起跑 / 预热会话：nil = 前端没传 → 保持原值；0 = 明确关闭
+	if s.RaceAfter != nil {
+		if *s.RaceAfter == 0 {
 			cfg.Tuning.RaceAfter = "off"
 		} else {
-			cfg.Tuning.RaceAfter = fmt.Sprintf("%dms", s.RaceAfter)
+			cfg.Tuning.RaceAfter = fmt.Sprintf("%dms", *s.RaceAfter)
+		}
+	}
+	if s.WarmSessions != nil {
+		if *s.WarmSessions == 0 {
+			cfg.Tuning.WarmSessions = "off"
+		} else {
+			cfg.Tuning.WarmSessions = fmt.Sprintf("%d", *s.WarmSessions)
 		}
 	}
 	if err := b.a.SaveConfig(); err != nil {
 		return err
 	}
-	b.a.Bus.Info("设置已保存（hosts 托管=%v；拨号单次 %s / 总预算 %s / 竞速起跑 %s）",
-		cfg.Hosts.Manage, cfg.DialTimeoutDur(), cfg.DialBudgetDur(), cfg.RaceAfterDur())
+	b.a.Bus.Info("设置已保存（hosts 托管=%v；拨号单次 %s / 总预算 %s / 竞速起跑 %s / 预热 %d 条）",
+		cfg.Hosts.Manage, cfg.DialTimeoutDur(), cfg.DialBudgetDur(), cfg.RaceAfterDur(), cfg.WarmTarget())
 	return nil
 }
 
@@ -1397,3 +1409,6 @@ func (b *Backend) SetSecrets(on bool) error {
 	}
 	return nil
 }
+
+// intPtr 取个指针（给"区分没传与传了 0"的字段用）。
+func intPtr(v int) *int { return &v }
