@@ -382,12 +382,19 @@ func (e *Engine) acceptLoop() {
 //   - 总预算：一整次连接最多花多久，防止候选多时逐个等满。
 //     拒绝型失败（端口不通）只花几毫秒，所以不会触发截断；只有超时型才吃预算。
 func (e *Engine) dialUpstream(ch config.Chain, dst net.IP, dport uint16) (net.Conn, error) {
+	return e.dialUpstreamKeyed(ch, dst, dport, "")
+}
+
+// dialUpstreamKeyed 带一个「粘性键」（一般是客户端 IP）：
+// 链的策略是 hash 时，同一个键永远落到同一条上游 —— 需要"对方按来源 IP 做白名单/会话"
+// 的场景就靠它（A17）。
+func (e *Engine) dialUpstreamKeyed(ch config.Chain, dst net.IP, dport uint16, key string) (net.Conn, error) {
 	raws := ch.Upstreams()
 	if len(raws) == 0 {
 		return nil, fmt.Errorf("链 %s 没有配置上游", ch.Name)
 	}
 	per, budget := e.cfg.DialTimeoutDur(), e.cfg.DialBudgetDur()
-	cands := e.candidates(ch)
+	cands := e.candidatesFor(ch, key)
 
 	// 预热连接池：先看池子里有没有“已握手、只差 CONNECT”的会话（A11）
 	if c, ok := e.dialWarm(ch, cands[0], dst, dport); ok {
@@ -586,7 +593,7 @@ func (e *Engine) handleConn(c net.Conn) {
 		return
 	}
 
-	up, err := e.dialUpstream(ch, st.dst, st.dport)
+	up, err := e.dialUpstreamKeyed(ch, st.dst, st.dport, st.app.String())
 	if err != nil {
 		e.bus.Error("[%s] 隧道建立失败 %s:%d — %v", st.chain, st.dst, st.dport, err)
 		st.fail(err.Error())

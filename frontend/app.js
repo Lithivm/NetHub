@@ -614,7 +614,8 @@ function chainForm(index, preset) {
   const strategy = el('select', 'input');
   [['failover', '故障转移（按顺序试，第一个能用的就用）'],
    ['round', '轮询（均摊到多条上游）'],
-   ['random', '随机']].forEach(([v, label]) => {
+   ['random', '随机'],
+   ['hash', '粘性（同一台客户端固定走同一条上游）']].forEach(([v, label]) => {
     const o = el('option', null, label);
     o.value = v;
     strategy.appendChild(o);

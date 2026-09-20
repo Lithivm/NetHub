@@ -37,6 +37,9 @@ const (
 	StrategyFailover = "failover" // 按顺序试，第一个能用的就用（默认）
 	StrategyRound    = "round"    // 轮询（负载均衡）
 	StrategyRandom   = "random"   // 随机
+	// StrategyHash 按「粘性键」（一般是客户端 IP）一致性哈希选上游：
+	// 同一台机器固定从同一条上游出去（对方按来源 IP 做白名单/会话时才有意义）。
+	StrategyHash = "hash"
 )
 
 // Upstreams 这条链的上游列表（Forward 与 Forwards 合并后的结果）。
@@ -57,6 +60,8 @@ func (ch Chain) StrategyName() string {
 		return StrategyRound
 	case StrategyRandom:
 		return StrategyRandom
+	case StrategyHash:
+		return StrategyHash
 	default:
 		return StrategyFailover
 	}

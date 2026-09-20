@@ -113,3 +113,44 @@ func TestProbeChainRecords(t *testing.T) {
 		t.Error("状态从坏到好应算翻转")
 	}
 }
+
+// A17 哈希策略：同一个客户端 IP 永远落到同一条上游，换 IP 才可能换链。
+func TestCandidatesHash(t *testing.T) {
+	e := newTestEngine()
+	ch := config.Chain{Name: "c", Strategy: config.StrategyHash, Forwards: []string{
+		"socks5://127.0.0.1:1", "socks5://127.0.0.1:2", "socks5://127.0.0.1:3"}}
+
+	// 同一个键多次调用 → 结果必须一致
+	first := e.candidatesFor(ch, "192.168.1.10")
+	if len(first) != 3 {
+		t.Fatalf("候选数不对：%v", first)
+	}
+	for i := 0; i < 20; i++ {
+		if got := e.candidatesFor(ch, "192.168.1.10"); !eqInts(got, first) {
+			t.Fatalf("同一客户端 IP 映射不稳定：%v vs %v", got, first)
+		}
+	}
+
+	// 多个不同 IP 应能落到不同上游（不然哈希没意义）
+	seen := map[int]bool{}
+	for _, ip := range []string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5"} {
+		if got := e.candidatesFor(ch, ip); len(got) > 0 {
+			seen[got[0]] = true
+		}
+	}
+	if len(seen) < 2 {
+		t.Errorf("哈希把不同客户端都分到同一条上游了：%v", seen)
+	}
+
+	// 没有键（如目标巡检自己拨号）→ 退回配置顺序
+	if got := e.candidatesFor(ch, ""); !eqInts(got, []int{0, 1, 2}) {
+		t.Errorf("无键时应按配置顺序：%v", got)
+	}
+
+	// 坏上游仍然会被垫后（哈希不能破坏健康排序）
+	hs := e.healthOf(ch)
+	hs[first[0]].ok, hs[first[0]].checked = false, time.Now()
+	if got := e.candidatesFor(ch, "192.168.1.10"); got[len(got)-1] != first[0] {
+		t.Errorf("哈希命中的上游坏了，应垫到最后：%v（原本首位 %d）", got, first[0])
+	}
+}

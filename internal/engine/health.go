@@ -97,6 +97,9 @@ func (e *Engine) candidates(ch config.Chain) []int {
 		e.mu.Unlock()
 	case config.StrategyRandom:
 		start = rand.Intn(n)
+	case config.StrategyHash:
+		// hash 策略的起点由键决定，见 candidatesFor；这里保持配置顺序，
+		// 以便没有键（巡检等）时行为可预期。
 	}
 
 	hs := e.healthOf(ch)
@@ -115,6 +118,53 @@ func (e *Engine) candidates(ch config.Chain) []int {
 		good = append(good, idx)
 	}
 	return append(good, bad...)
+}
+
+// candidatesFor 带粘性键的候选顺序（hash 策略用）。
+// key 为空（如目标巡检自己拨号）时就退回配置顺序。
+func (e *Engine) candidatesFor(ch config.Chain, key string) []int {
+	if ch.StrategyName() != config.StrategyHash || key == "" {
+		return e.candidates(ch)
+	}
+	n := len(ch.Upstreams())
+	if n == 0 {
+		return nil
+	}
+	// 一致性哈希（FNV-1a，稳定不依赖进程内随机种子）：
+	// 同一个客户端 IP 永远从同一条上游出去；上游增删时只影响少量映射。
+	h := fnv32a(key)
+	start := int(h % uint32(n))
+
+	hs := e.healthOf(ch)
+	good := make([]int, 0, n)
+	bad := make([]int, 0, n)
+	for i := 0; i < n; i++ {
+		idx := (start + i) % n
+		var hh *upHealth
+		if idx < len(hs) {
+			hh = hs[idx]
+		}
+		if hh != nil && !hh.checked.IsZero() && !hh.ok {
+			bad = append(bad, idx)
+			continue
+		}
+		good = append(good, idx)
+	}
+	return append(good, bad...)
+}
+
+// fnv32a FNV-1a 32 位哈希（标准库 hash/fnv 的实现，自己写一份免得多一个依赖）。
+func fnv32a(s string) uint32 {
+	const (
+		offset = 2166136261
+		prime  = 16777619
+	)
+	h := uint32(offset)
+	for i := 0; i < len(s); i++ {
+		h ^= uint32(s[i])
+		h *= prime
+	}
+	return h
 }
 
 // probeChain 探一条链的所有上游（顺序做；只测到代理这一段，不碰业务目标）。
