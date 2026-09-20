@@ -108,7 +108,8 @@ func TestDialBudgetAndTimeout(t *testing.T) {
 		t.Errorf("太早放弃：耗时 %s（第一条应至少等满单次超时）", el)
 	}
 
-	// 三条半死：预算 2s 只够试两条 → 必须留痕说明“剩下的没试”，不能静默少试
+	// 三条半死：默认开了竞速（race_after=150ms）→ 三条会被并发试完，
+	// 总耗时 ≈ 一个单次超时，而不是三个。（这正是竞速要的效果）
 	ch3 := config.Chain{Name: "c3", Forwards: []string{
 		"socks5://" + a, "socks5://" + b, "socks5://" + c}}
 	t0 = time.Now()
@@ -118,11 +119,27 @@ func TestDialBudgetAndTimeout(t *testing.T) {
 		conn.Close()
 		t.Fatal("三条半死上游不该拨成功")
 	}
+	if el > 2000*time.Millisecond {
+		t.Errorf("竞速后应≈一个单次超时，实际 %s", el)
+	}
+	if !containsStr(err.Error(), "所有上游") {
+		t.Errorf("全失败要把话说清楚，实际：%v", err)
+	}
+
+	// 关掉竞速 → 回到“顺序等满”，此时预算 2s 只够试两条，必须留痕
+	e.cfg = &config.Config{Tuning: config.Tuning{DialTimeout: "1s", DialBudget: "2s", RaceAfter: "off"}}
+	t0 = time.Now()
+	conn, err = e.dialUpstream(ch3, net.IPv4(10, 0, 0, 1), 443)
+	el = time.Since(t0)
+	if err == nil {
+		conn.Close()
+		t.Fatal("不该成功")
+	}
 	if el > 2500*time.Millisecond {
-		t.Errorf("预算没封顶：耗时 %s（期望 ≈2s）", el)
+		t.Errorf("预算没封顶：耗时 %s", el)
 	}
 	if !containsStr(err.Error(), "未尝试") {
-		t.Errorf("截断必须说清楚剩余候选没试，实际错误：%v", err)
+		t.Errorf("顺序模式下截断必须说清楚剩余候选没试，实际：%v", err)
 	}
 }
 
@@ -161,4 +178,52 @@ func indexOf(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+// A10 慢则竞速：第一条半死时不该傻等满单次超时，其余候选要立刻并发试出去。
+func TestDialRacing(t *testing.T) {
+	dead, stopDead := silentUpstream(t)
+	defer stopDead()
+	good := newFakeSocks(t)
+
+	e := newTestEngine()
+	e.bus = logbus.New(50)
+	e.cfg = &config.Config{Tuning: config.Tuning{DialTimeout: "3s", DialBudget: "6s"}}
+
+	ch := config.Chain{Name: "c", Forwards: []string{"socks5://" + dead, "socks5://" + good}}
+
+	// 默认 race_after=150ms：必须在远小于单次超时（3s）的时间内拿到好上游
+	t0 := time.Now()
+	conn, err := e.dialUpstream(ch, net.IPv4(10, 0, 0, 1), 443)
+	el := time.Since(t0)
+	if err != nil {
+		t.Fatalf("竞速应能拿到好上游：%v（耗时 %s）", err, el)
+	}
+	conn.Close()
+	if el > 1500*time.Millisecond {
+		t.Errorf("竞速没起作用：耗时 %s（期望 ~150ms 起跑）", el)
+	}
+
+	// 关掉竞速（race_after: off）→ 退回顺序等满，明显更慢
+	e.cfg = &config.Config{Tuning: config.Tuning{DialTimeout: "1s", DialBudget: "3s", RaceAfter: "off"}}
+	t0 = time.Now()
+	conn, err = e.dialUpstream(ch, net.IPv4(10, 0, 0, 1), 443)
+	el = time.Since(t0)
+	if err != nil {
+		t.Fatalf("顺序模式也该能连上：%v", err)
+	}
+	conn.Close()
+	if el < 900*time.Millisecond {
+		t.Errorf("关掉竞速后应先等满第一条超时（1s），实际 %s", el)
+	}
+
+	// 竞速成功时多余的连接必须被关掉（不能泄漏）：连跑 5 次
+	e.cfg = &config.Config{Tuning: config.Tuning{DialTimeout: "2s", DialBudget: "6s"}}
+	for i := 0; i < 5; i++ {
+		conn, err := e.dialUpstream(ch, net.IPv4(10, 0, 0, 1), 443)
+		if err != nil {
+			t.Fatalf("第 %d 次失败：%v", i, err)
+		}
+		conn.Close()
+	}
 }

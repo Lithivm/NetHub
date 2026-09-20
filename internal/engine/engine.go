@@ -379,10 +379,35 @@ func (e *Engine) dialUpstream(ch config.Chain, dst net.IP, dport uint16) (net.Co
 		return nil, fmt.Errorf("链 %s 没有配置上游", ch.Name)
 	}
 	per, budget := e.cfg.DialTimeoutDur(), e.cfg.DialBudgetDur()
+	cands := e.candidates(ch)
+
+	// 慢则竞速（A10）：候选有两条以上、且第一条超过 race_after 还没连上时，
+	// 把其余的并发拨出去，取先成功的。
+	// 为什么不是“总是并发”：平时并发会成倍放大连接数与客户端 IP 的落地请求，
+	// 只有在“第一条明显慢”时才值得。实测 etyy 的 CONNECT 阶段要 620ms、sjy 只要 75ms，
+	// 这一招能把业务直接拉到快链路。
+	if len(cands) > 1 && e.cfg.RaceAfterDur() > 0 {
+		c, ok, raced := e.dialRacing(ch, raws, cands, dst, dport, per, budget)
+		if ok {
+			return c, nil
+		}
+		if raced {
+			// 竞速已经把**所有**候选都拨过一遍了，失败就是真失败；
+			// 再回退一次顺序试等于把同一批上游拨两遍（白等一个预算）。
+			return nil, fmt.Errorf("链 %s：所有上游都连不上", ch.Name)
+		}
+		// 第一条在起跑前就明确失败 → 从第二条开始顺序试（不重复第一条）
+		return e.dialSequential(ch, raws, cands[1:], dst, dport, per, budget)
+	}
+	return e.dialSequential(ch, raws, cands, dst, dport, per, budget)
+}
+
+// dialSequential 顺序试（原行为）：一个不成马上换下一个。
+func (e *Engine) dialSequential(ch config.Chain, raws []string, cands []int,
+	dst net.IP, dport uint16, per, budget time.Duration) (net.Conn, error) {
 	start := time.Now()
 	var errs []string
-
-	for n, idx := range e.candidates(ch) {
+	for n, idx := range cands {
 		el := time.Since(start)
 		// 第一条无论如何都试（否则预算配小了就永远不会拨号）
 		if n > 0 && el >= budget {
@@ -392,30 +417,138 @@ func (e *Engine) dialUpstream(ch config.Chain, dst net.IP, dport uint16) (net.Co
 			errs = append(errs, msg)
 			break
 		}
-		// 单次尝试不超剩余预算
 		timeout := per
 		if left := budget - el; left > 0 && left < timeout {
 			timeout = left
 		}
-
-		raw := raws[idx]
-		up, err := upstream.Parse(raw)
-		if err != nil {
-			e.markUp(ch.Name, idx, false, 0, err.Error())
-			errs = append(errs, fmt.Sprintf("上游 %d: %v", idx+1, err))
-			continue
-		}
-		t0 := time.Now()
-		c, err := up.Dial(dst, dport, timeout)
-		lat := time.Since(t0)
+		c, err, msg := e.tryUpstream(ch, raws[idx], idx, dst, dport, timeout)
 		if err == nil {
-			e.markUp(ch.Name, idx, true, lat, "")
 			return c, nil
 		}
-		e.markUp(ch.Name, idx, false, lat, err.Error())
-		errs = append(errs, fmt.Sprintf("%s: %v", up.String(), err))
+		errs = append(errs, msg)
 	}
 	return nil, fmt.Errorf("%s", strings.Join(errs, "；"))
+}
+
+// tryUpstream 试一条上游，并把结果记进健康表。
+func (e *Engine) tryUpstream(ch config.Chain, raw string, idx int, dst net.IP, dport uint16,
+	timeout time.Duration) (net.Conn, error, string) {
+	up, err := upstream.Parse(raw)
+	if err != nil {
+		e.markUp(ch.Name, idx, false, 0, err.Error())
+		return nil, err, fmt.Sprintf("上游 %d: %v", idx+1, err)
+	}
+	t0 := time.Now()
+	c, err := up.Dial(dst, dport, timeout)
+	lat := time.Since(t0)
+	if err == nil {
+		e.markUp(ch.Name, idx, true, lat, "")
+		return c, nil, ""
+	}
+	e.markUp(ch.Name, idx, false, lat, err.Error())
+	return nil, err, fmt.Sprintf("%s: %v", up.String(), err)
+}
+
+// dialAttempt 一次拨号尝试的结果（竞速用）。
+type dialAttempt struct {
+	c   net.Conn
+	err error
+	msg string
+}
+
+// dialRacing 慢则竞速：等 raceAfter，第一条还没好就把剩下的并发拨出去，取先到的。
+//
+// 返回：conn（成功时）、ok（拿到连接）、raced（是否真的进过竞速阶段）。
+// 　　　raced=false 表示第一条在起跑前就明确失败，调用方应从第二条开始顺序试。
+func (e *Engine) dialRacing(ch config.Chain, raws []string, cands []int,
+	dst net.IP, dport uint16, per, budget time.Duration) (net.Conn, bool, bool) {
+	race := e.cfg.RaceAfterDur()
+	if race <= 0 || race >= per {
+		race = per / 2 // 竞速必须早于单次超时，否则没意义
+	}
+	t0 := time.Now()
+	first := make(chan dialAttempt, 1)
+	go func(idx int) {
+		c, err, msg := e.tryUpstream(ch, raws[idx], idx, dst, dport, minDur(per, budget))
+		first <- dialAttempt{c, err, msg}
+	}(cands[0])
+
+	select {
+	case a := <-first:
+		if a.err == nil {
+			return a.c, true, true
+		}
+		// 第一条已经明确失败（被拒/解析错）→ 交给顺序试，它从第二条开始
+		if a.c != nil {
+			a.c.Close()
+		}
+		return nil, false, false
+	case <-time.After(race):
+	}
+
+	// 剩下的并发拨（总超时受剩余预算约束）
+	n := len(cands) - 1
+	left := budget - time.Since(t0)
+	if left <= 0 {
+		left = per
+	}
+	rest := make(chan dialAttempt, n)
+	for _, idx := range cands[1:] {
+		go func(idx int) {
+			c, err, msg := e.tryUpstream(ch, raws[idx], idx, dst, dport, minDur(per, left))
+			rest <- dialAttempt{c, err, msg}
+		}(idx)
+	}
+	e.bus.Info("链 %s：第一条上游还没连上（等满 %.0fms），并发试其余 %d 条",
+		ch.Name, race.Seconds()*1000, n)
+
+	errs := []string{}
+	readRest, firstRead := 0, 0
+	for readRest < n || firstRead == 0 {
+		select {
+		case a := <-rest:
+			readRest++
+			if a.err == nil {
+				// 其余候选还在跑：它们的连接成功也来不及用了，收尾时关掉
+				go drainAttempts(rest, n-readRest, per)
+				go drainAttempts(first, 1-firstRead, per)
+				return a.c, true, true
+			}
+			errs = append(errs, a.msg)
+		case a := <-first:
+			firstRead = 1
+			if a.err == nil {
+				go drainAttempts(rest, n-readRest, per)
+				return a.c, true, true
+			}
+			errs = append(errs, a.msg)
+		}
+	}
+	e.bus.Warn("链 %s 竞速全失败：%s", ch.Name, strings.Join(errs, "；"))
+	return nil, false, true
+}
+
+// drainAttempts 把竞速里多余的尝试收干净：成功的连接要关掉，不能漏。
+func drainAttempts(ch chan dialAttempt, n int, wait time.Duration) {
+	deadline := time.After(wait + time.Second)
+	for i := 0; i < n; i++ {
+		select {
+		case a := <-ch:
+			if a.c != nil {
+				a.c.Close()
+			}
+		case <-deadline:
+			return
+		}
+	}
+}
+
+// minDur 取较小值（给拨号超时用）。
+func minDur(a, b time.Duration) time.Duration {
+	if a < b || b <= 0 {
+		return a
+	}
+	return b
 }
 
 func (e *Engine) handleConn(c net.Conn) {

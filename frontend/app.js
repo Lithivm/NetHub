@@ -974,10 +974,13 @@ async function loadSettings() {
   setValue('setHostsEntries', (s.hostsEntries || []).join('\n'));
   setValue('setDialTimeout', s.dialTimeout || 5);
   setValue('setDialBudget', s.dialBudget || 10);
+  setValue('setRaceAfter', s.raceAfter === 0 ? 0 : (s.raceAfter || 150));
   const dh = document.getElementById('dialHint');
   if (dh) {
-    dh.textContent = '默认 5s / 10s。上游半死时，业务等待时间约等于「单次超时」；'
-      + '现网上游握手实测 0.1～0.8s，5s 余量足够。改完点「保存并重启」生效。';
+    dh.textContent = '默认 5s / 10s / 150ms。上游半死时，业务等待时间约等于「单次超时」；'
+      + '现网上游握手实测 0.1～0.8s，5s 余量足够。'
+      + '「竞速起跑」= 第一条超过这个时间还没连上就并发试其他上游、取先到的（填 0 关闭）；'
+      + '实测某条链的 CONNECT 要 620ms、另一条只要 75ms，竞速能直接把业务拉到快链路。改完点「保存并重启」生效。';
   }
 }
 
@@ -1007,6 +1010,12 @@ async function saveSettings(restart) {
     theme: state.theme,
     dialTimeout: intVal('setDialTimeout', 5),
     dialBudget: intVal('setDialBudget', 10),
+    // 竞速起跑允许 0（= 关闭），所以单独处理
+    raceAfter: (function () {
+      const e = document.getElementById('setRaceAfter');
+      const n = e ? parseInt(e.value, 10) : NaN;
+      return Number.isFinite(n) && n >= 0 ? n : 150;
+    })(),
   };
   try {
     await call('SaveSettings', payload);

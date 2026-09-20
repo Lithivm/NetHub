@@ -183,6 +183,8 @@ type SettingsView struct {
 	// 上游拨号（秒）。0 表示前端没传 → 保持原值，不当成“设成 0”。
 	DialTimeout int `json:"dialTimeout,omitempty"`
 	DialBudget  int `json:"dialBudget,omitempty"`
+	// RaceAfter 竞速起跑（毫秒）。0 = 关闭竞速（这是合法配置，所以用 -1 表示“前端没传”）。
+	RaceAfter int `json:"raceAfter"`
 }
 
 type ChainInput struct {
@@ -575,6 +577,7 @@ func (b *Backend) GetSettings() SettingsView {
 		Theme:        b.a.Cfg.UI.Theme,
 		DialTimeout:  int(b.a.Cfg.DialTimeoutDur() / time.Second),
 		DialBudget:   int(b.a.Cfg.DialBudgetDur() / time.Second),
+		RaceAfter:    int(b.a.Cfg.RaceAfterDur() / time.Millisecond),
 	}
 }
 
@@ -807,11 +810,19 @@ func (b *Backend) SaveSettings(s SettingsView) error {
 	if s.DialBudget > 0 {
 		cfg.Tuning.DialBudget = fmt.Sprintf("%ds", s.DialBudget)
 	}
+	// 竞速起跑：界面用 -1 表示“没传/不改”，≥0 才写（0 = 明确关闭）
+	if s.RaceAfter >= 0 {
+		if s.RaceAfter == 0 {
+			cfg.Tuning.RaceAfter = "off"
+		} else {
+			cfg.Tuning.RaceAfter = fmt.Sprintf("%dms", s.RaceAfter)
+		}
+	}
 	if err := b.a.SaveConfig(); err != nil {
 		return err
 	}
-	b.a.Bus.Info("设置已保存（hosts 托管=%v；拨号单次 %s / 总预算 %s）",
-		cfg.Hosts.Manage, cfg.DialTimeoutDur(), cfg.DialBudgetDur())
+	b.a.Bus.Info("设置已保存（hosts 托管=%v；拨号单次 %s / 总预算 %s / 竞速起跑 %s）",
+		cfg.Hosts.Manage, cfg.DialTimeoutDur(), cfg.DialBudgetDur(), cfg.RaceAfterDur())
 	return nil
 }
 
