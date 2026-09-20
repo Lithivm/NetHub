@@ -1217,3 +1217,19 @@ func (b *Backend) ExportConfig() (string, error) {
 	b.a.Bus.Info("设置已导出到 %s（含上游凭据，请通过安全渠道分发）", path)
 	return path, nil
 }
+
+// LoopInfo 疑似环路统计（与 Clash 共存那张卡一起显示：最典型的环就是被别的代理绕回来）。
+type LoopInfo struct {
+	Alerts uint64 `json:"alerts"`
+	Last   string `json:"last"`
+	At     string `json:"at"`
+}
+
+// GetLoopInfo 环路检测结果。
+func (b *Backend) GetLoopInfo() LoopInfo {
+	if b.a.Engine == nil {
+		return LoopInfo{}
+	}
+	n, last, at := b.a.Engine.LoopAlerts()
+	return LoopInfo{Alerts: n, Last: last, At: at}
+}

@@ -285,12 +285,15 @@ code, .mono { font-family: var(--font-mono); }
 .tab-top.is-active { background: var(--primary-soft); color: var(--primary); border-color: var(--primary); }
 .tab-top.is-active:hover { background: var(--primary-soft); color: var(--primary); }
 .tabs .tab {
-  /* 等宽且紧凑：以最宽的那个（“隧道链路”+ 角标）为准。
-     横向内边距用 --s3 而不是默认的 --s4，整体窄 8px；104px 仍能容下两位数字的角标。 */
+  /* 紧凑：横向内边距用 --s3（比默认 --s4 窄 8px） */
   padding: 6px var(--s3);
-  min-width: 104px;
   justify-content: center;
   white-space: nowrap;
+}
+/* 前四个等宽（以最宽的“隧道链路 + 角标”为准，避免切页时宽度跳动）；
+   最后一个（诊断）自身内容窄，就让它自适应、窄一点。 */
+.tabs .tab:not(:last-child) {
+  min-width: 104px;
 }
 .tab {
   font-family: inherit; font-size: var(--fs-sm); font-weight: 600;

@@ -147,6 +147,7 @@
         <div class="card-body form">
           <div class="clash-state" id="clashState">尚未检测。点右上角「重新检测」。</div>
           <div id="clashDetail"></div>
+          <div class="hint" id="loopInfo">环路检测：—</div>
           <div class="field" id="clashFixWrap" hidden>
             <label>把下面这段填进 Clash Verge 的「绕过地址」
               <em>入口：Clash Verge → 设置 → 系统代理 那一行【左侧的小齿轮】→ 「代理绕过设置」。
@@ -293,7 +294,7 @@
             <b>导入配置</b>：选一个配置 .yaml（也可以选 zip 包里的）→ 先校验，再自动备份当前配置，然后直接生效。
             校验不过就不动任何东西。回滚同理：选 backups 目录里的旧文件导入回去即可。
           </div>
-          <div class="input-row"><span class="hint">—— 自动备份（每次保存前备一份，最多留 20 份）——</span></div>
+          <div class="input-row"><span class="hint">—— 自动备份（每次保存前备一份，最多留 3 份）——</span></div>
           <div id="backupList" class="hint">—</div>
         </div>
       </div>

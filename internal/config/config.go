@@ -347,7 +347,7 @@ func (c *Config) Save() error {
 	}
 	header := "# NetHub 配置 —— 由程序读写，手工改也生效\n" +
 		"# forward 里的凭据是本机敏感信息，不要外传、不要提交进 git。\n"
-	// 覆盖前先备份一份（backups/ 目录，只留最新 20 份），改坏了能回滚
+	// 覆盖前先备份一份（backups/ 目录，只留最新 3 份），改坏了能回滚
 	if err := c.backupLocked(); err != nil {
 		return fmt.Errorf("备份旧配置失败: %w", err)
 	}
@@ -1083,7 +1083,12 @@ func (c *Config) RestoreBackup(name string) (*Config, error) {
 	return Load(c.path)
 }
 
-// backupLocked 把当前配置文件复制进 backups/，并只保留最新的 20 份。
+// backupLocked 把当前配置文件复制进 backups/，并只保留最新的 keepBackups 份。
+//
+// 为什么是 3 份：回滚的实用场景是"刚才改坏了"，3 份足够覆盖连续的几次改动；
+// 留几十份只会让 backups/ 目录变成另一个没人看的日志。
+const keepBackups = 3
+
 func (c *Config) backupLocked() error {
 	d := c.BackupDir()
 	if d == "" {
@@ -1109,9 +1114,9 @@ func (c *Config) backupLocked() error {
 	if err := os.WriteFile(filepath.Join(d, name), cur, 0o600); err != nil {
 		return err
 	}
-	// 只留最新 20 份
-	if all := c.Backups(); len(all) > 20 {
-		for _, old := range all[20:] {
+	// 只留最新 keepBackups 份（够回滚就行；留太多反而让人在列表里挑半天）
+	if all := c.Backups(); len(all) > keepBackups {
+		for _, old := range all[keepBackups:] {
 			_ = os.Remove(filepath.Join(d, old))
 		}
 	}

@@ -981,6 +981,22 @@ async function clashCheck() {
     st.className = 'clash-state is-error';
     st.textContent = '检测失败：' + ((e && e.message) || String(e));
   }
+  await renderLoopInfo();
+}
+
+// A14：疑似环路（最典型的成因就是被别的代理绕回来，所以放在这张卡里）
+async function renderLoopInfo() {
+  const box = document.getElementById('loopInfo');
+  if (!box) return;
+  let v = null;
+  try { v = await call('GetLoopInfo'); } catch (e) { return; }
+  if (!v || !v.alerts) {
+    box.className = 'hint';
+    box.textContent = '环路检测：未发现异常。';
+    return;
+  }
+  box.className = 'export-warn';
+  box.textContent = '⚠ 疑似环路 ' + v.alerts + ' 次；最近一次（' + (v.at || '') + '）：' + (v.last || '');
 }
 
 async function copyBypass() {

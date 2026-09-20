@@ -202,6 +202,9 @@ type Engine struct {
 	fatalMu sync.Mutex
 	fatal   error
 
+	// loop 环路检测（A14）：与其它代理共存时发现自己打转
+	loop *loopGuard
+
 	// pool 预热连接池（A11）：养着“已握手、只差 CONNECT”的会话
 	pool *warmPool
 	done chan struct{}
@@ -219,6 +222,7 @@ func New(bus *logbus.Bus, rs *rules.Set, cfg *config.Config) *Engine {
 		statPerRule: map[string]uint64{},
 		done:        make(chan struct{}),
 		pool:        newWarmPool(),
+		loop:        newLoopGuard(),
 	}
 }
 
@@ -733,6 +737,8 @@ func (e *Engine) rewriteOutbound(h *divert.Handle, pkt []byte, addr *divert.Addr
 	src, dst net.IP, sport, dport uint16, flags byte, chain string, relayIP net.IP, relayPort uint16) {
 
 	if isSyn(flags) {
+		// A14：新建连接时判一次环（目标=上游自己 / 源=目标 / 同目标疯狂重连）
+		e.checkLoop(src, dst, dport, chain)
 		e.mu.Lock()
 		_, existed := e.conns[sport]
 		st := &connState{
@@ -848,6 +854,7 @@ func (e *Engine) janitor() {
 		case <-e.done:
 			return
 		case <-tk.C:
+			e.pruneLoops() // A14：清掉过期的环路检测窗口
 			activeCut := time.Now().Add(-10 * time.Minute).UnixNano()
 			endedCut := time.Now().Add(-2 * time.Minute).UnixNano()
 			e.mu.Lock()
