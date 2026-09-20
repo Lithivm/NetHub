@@ -380,6 +380,28 @@ code, .mono { font-family: var(--font-mono); }
   font-size: var(--fs-xs); font-weight: 700; font-family: var(--font-mono);
 }
 .chain-grid { grid-template-columns: 120px minmax(200px, 1.4fr) 92px minmax(110px, 1fr) 150px; }
+
+/* 装机包导出结果 */
+.export-list { margin: var(--s2) 0 var(--s2) var(--s4); padding: 0; max-height: 40vh; overflow: auto; }
+.export-list li { font-size: var(--fs-xs); color: var(--muted); margin: 2px 0; }
+.export-warn { padding: var(--s2) var(--s3); border-radius: var(--r-btn); background: var(--error-soft); color: var(--error); font-size: var(--fs-sm); }
+
+/* 批量模拟结果（路由规则页「模拟」） */
+.sim-grid { grid-template-columns: minmax(140px, 1fr) 130px minmax(220px, 1.6fr); }
+.sim-summary {
+  padding: var(--s2) var(--s4); font-size: var(--fs-sm); color: var(--ink);
+  background: var(--canvas-soft); border-bottom: 1px solid var(--hairline);
+}
+.sim-box { display: flex; flex-direction: column; max-height: 60vh; }
+.sim-badge {
+  display: inline-block; padding: 2px var(--s2); border-radius: var(--r-pill);
+  font-size: var(--fs-xs); font-weight: 700;
+  background: var(--card-strong); color: var(--muted);
+}
+.sim-badge.tunnel { background: var(--primary-soft); color: var(--primary); }
+.sim-badge.direct { background: var(--ok-soft, var(--card-strong)); color: var(--ok, var(--ink)); }
+.sim-badge.bad { background: var(--error-soft); color: var(--error); }
+.sim-badge.none { background: var(--card-strong); color: var(--muted); }
 .rule-grid  { grid-template-columns: 46px 170px minmax(200px, 1.5fr) 130px minmax(120px, 1fr) 150px; }
 .conn-grid  { grid-template-columns: 40px minmax(170px, 1.2fr) 62px 100px 76px 90px 90px 96px; }
 /* 上游健康的小圆点（只探测到代理这一段） */

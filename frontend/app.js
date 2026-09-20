@@ -125,7 +125,48 @@ async function sortRoutes() {
 
 async function explainTarget() {
   const raw = (document.getElementById('explainIp').value || '').trim();
-  if (!raw) { toast('先填一个 IP', '例如 10.0.0.5 或 10.0.0.5:5432', 'warn'); return; }
+  if (!raw) { toast('先填一批目标', '每行一个，例如 10.0.0.5:5432 或 172.16.0.0/24', 'warn'); return; }
+
+  // 先按和后台一致的规则切一遍，决定是“详细解释”还是“批量表”
+  const tokens = raw.split(/[\n,，;；\t ]+/).map(s => {
+    const i = s.indexOf('#');
+    return (i >= 0 ? s.slice(0, i) : s).trim();
+  }).filter(Boolean);
+
+  if (tokens.length === 1) { return explainOne(tokens[0]); }
+
+  let v;
+  try { v = await call('SimulateTargets', raw); }
+  catch (e) { fail(e); return; }
+
+  const head = el('div', 'sim-summary');
+  head.textContent = v.summary;
+  const box = el('div', 'sim-box');
+  box.appendChild(head);
+
+  const tbl = el('div', 'table');
+  const th = el('div', 'trow thead sim-grid');
+  ['目标', '会怎么走', '命中的规则'].forEach(h => th.appendChild(el('div', 'cell', h)));
+  tbl.appendChild(th);
+  (v.rows || []).forEach(r => {
+    const row = el('div', 'trow sim-grid');
+    row.appendChild(el('div', 'cell mono', r.input || ''));
+    const c2 = el('div', 'cell');
+    const badge = el('span', 'sim-badge ' + actionClass(r));
+    badge.textContent = !r.ok ? '无法解析' : (r.action || '未命中');
+    c2.appendChild(badge);
+    row.appendChild(c2);
+    row.appendChild(el('div', 'cell dim', !r.ok ? (r.err || '')
+      : ((r.ruleNo ? '第 ' + r.ruleNo + ' 条 ' : '') + (r.rule || '—') +
+        (r.chain ? ' → ' + r.chain : '') + (r.note ? '　（' + r.note + '）' : ''))));
+    tbl.appendChild(row);
+  });
+  box.appendChild(tbl);
+  modal.open('批量模拟结果', [box], null);
+}
+
+// 单个目标：沿用原来的详细解释（含链健康、目标巡检、被抢先的规则）
+async function explainOne(raw) {
   const i = raw.lastIndexOf(':');
   const ip = i > 0 ? raw.slice(0, i) : raw;
   const port = i > 0 ? raw.slice(i + 1) : '';
@@ -167,6 +208,14 @@ async function explainTarget() {
   const pre = el('pre', 'explain-out mono');
   pre.textContent = lines.join('\n');
   modal.open('这个目标怎么走 —— ' + v.input, [pre], null);
+}
+
+function actionClass(r) {
+  if (!r.ok) return 'bad';
+  if (r.action && r.action.indexOf('隧道') >= 0) return 'tunnel';
+  if (r.action && r.action.indexOf('阻断') >= 0) return 'bad';
+  if (r.action && r.action.indexOf('直连') >= 0) return 'direct';
+  return 'none';
 }
 
 /* ═══════════════ headless 模式（Windows 服务） ═══════════════ */
@@ -956,6 +1005,13 @@ async function loadSettings() {
   // 那会抛 TypeError 把 boot() 整个搞挂，导致状态轮询都注册不上）
   setChecked('setHostsManage', s.hostsManage);
   setValue('setHostsEntries', (s.hostsEntries || []).join('\n'));
+  setValue('setDialTimeout', s.dialTimeout || 5);
+  setValue('setDialBudget', s.dialBudget || 10);
+  const dh = document.getElementById('dialHint');
+  if (dh) {
+    dh.textContent = '默认 5s / 10s。上游半死时，业务等待时间约等于「单次超时」；'
+      + '现网上游握手实测 0.1～0.8s，5s 余量足够。改完点「保存并重启」生效。';
+  }
 }
 
 // 安全地取元素：元素不存在时返回 null 而不是报错，
@@ -968,6 +1024,12 @@ function setValue(id, v) {
   const e = document.getElementById(id);
   if (e) e.value = v;
 }
+// 数字输入框取值（空/非法 → def）
+function intVal(id, def) {
+  const e = document.getElementById(id);
+  const n = e ? parseInt(e.value, 10) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : def;
+}
 
 async function saveSettings(restart) {
   const elEntries = document.getElementById('setHostsEntries');
@@ -976,6 +1038,8 @@ async function saveSettings(restart) {
     hostsManage: !!(elManage && elManage.checked),
     hostsEntries: elEntries ? elEntries.value.split('\n').map(s => s.trim()).filter(Boolean) : [],
     theme: state.theme,
+    dialTimeout: intVal('setDialTimeout', 5),
+    dialBudget: intVal('setDialBudget', 10),
   };
   try {
     await call('SaveSettings', payload);
@@ -1029,7 +1093,10 @@ function wire() {
   // 规则页
   document.getElementById('btnRuleSort').onclick = sortRoutes;
   document.getElementById('btnExplain').onclick = explainTarget;
-  document.getElementById('explainIp').onkeydown = e => { if (e.key === 'Enter') explainTarget(); };
+  document.getElementById('explainIp').onkeydown = e => {
+    // Ctrl/⌘+Enter 触发（普通 Enter 要能换行，因为现在是多行输入）
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) explainTarget();
+  };
 
   // 诊断页：一键诊断 / 巡检设置
   document.getElementById('btnDiagAll').onclick = runAllDiagnostics;
@@ -1088,6 +1155,23 @@ function wire() {
   document.getElementById('btnSaveRestart').onclick = () => saveSettings(true);
   document.getElementById('btnOpenConfig').onclick = () => call('OpenConfigFile').catch(fail);
   document.getElementById('btnOpenDir').onclick = () => call('OpenProgramDir').catch(fail);
+  document.getElementById('btnExportPkg').onclick = async () => {
+    try {
+      const r = await call('ExportPackage');
+      if (!r || !r.path) return; // 用户取消
+      const box = el('div');
+      const tip = el('div', r.warning ? 'export-warn' : 'hint');
+      tip.textContent = r.warning ? ('⚠ ' + r.warning) : '解压后在客户机器上双击「启动NetHub.cmd」（会弹 UAC，必须点「是」）。';
+      box.appendChild(tip);
+      const ul = el('ul', 'export-list');
+      (r.files || []).forEach(f => { const li = el('li', 'mono'); li.textContent = f; ul.appendChild(li); });
+      box.appendChild(ul);
+      const warn = el('div', 'hint');
+      warn.textContent = '含明文上游凭据 —— 别往群里/邮件列表发；传输后可用 SHA256SUMS.txt 校验。';
+      box.appendChild(warn);
+      modal.open('装机包已导出：' + r.path, [box], null);
+    } catch (e) { fail(e); }
+  };
   document.getElementById('btnExportCfg').onclick = async () => {
     try {
       const p = await call('ExportConfig');

@@ -23,7 +23,7 @@ func newTestEngine() *Engine {
 func TestConnsSnapshot(t *testing.T) {
 	e := newTestEngine()
 
-	live := &connState{dst: net.ParseIP("10.0.0.5"), dport: 5432, chain: "etyy",
+	live := &connState{dst: net.ParseIP("10.0.0.5"), dport: 5432, chain: "proxy-a",
 		action: rules.ActionChain, start: time.Now().Add(-3 * time.Second)}
 	live.up.Store(2048)
 	live.down.Store(1024 * 1024)
@@ -36,7 +36,7 @@ func TestConnsSnapshot(t *testing.T) {
 	done.packets.Store(7)
 	done.ended.Store(true)
 
-	failed := &connState{dst: net.ParseIP("10.0.0.9"), dport: 443, chain: "etyy",
+	failed := &connState{dst: net.ParseIP("10.0.0.9"), dport: 443, chain: "proxy-a",
 		action: rules.ActionChain, start: time.Now().Add(-2 * time.Second)}
 	failed.touch()
 	failed.fail("连代理失败: i/o timeout")
@@ -69,7 +69,7 @@ func TestConnsSnapshot(t *testing.T) {
 	if got[0].Up != 2048 || got[0].Down != 1024*1024 {
 		t.Errorf("字节数不对: up=%d down=%d", got[0].Up, got[0].Down)
 	}
-	if got[0].Chain != "etyy" {
+	if got[0].Chain != "proxy-a" {
 		t.Errorf("链名不对: %s", got[0].Chain)
 	}
 

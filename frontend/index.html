@@ -93,10 +93,12 @@
         <button class="btn btn-sm btn-primary" id="btnRuleAdd">添加规则</button>
       </div>
       <div class="card-body form">
-        <div class="input-row">
-          <input type="text" id="explainIp" class="input mono" placeholder="查一个 IP（可带端口，如 10.0.0.5:5432）—— 它会走哪条链？">
-          <button class="btn btn-sm" id="btnExplain">解释</button>
+        <div class="input-row" style="align-items:flex-start">
+          <textarea id="explainIp" class="input textarea mono" spellcheck="false" rows="3"
+            placeholder="一批目标：一行一个（也支持逗号/分号分隔、# 注释），如&#10;10.0.0.5:5432&#10;172.16.0.0/24&#10;10.20.0.99:80   # 影像库"></textarea>
+          <button class="btn btn-sm btn-primary" id="btnExplain">模拟</button>
         </div>
+        <div class="hint">上客户现场之前，把服务器清单糊进来一次验完：每条走哪条链 / 哪个直连 / 哪个根本没被拦到。只填一个时给出详细解释。</div>
       </div>
       <div class="table" id="ruleTable"></div>
     </div>
@@ -244,6 +246,22 @@
       </div>
 
       <div class="card">
+        <div class="card-head">
+          <h2>上游拨号</h2>
+          <span class="hint">一条上游不响应时，等多久换下一条</span>
+        </div>
+        <div class="card-body form">
+          <div class="input-row">
+            <label style="margin:0">单次超时（秒）</label>
+            <input type="number" min="1" max="30" step="1" class="input input-sm" id="setDialTimeout" style="width:80px">
+            <label style="margin:0 0 0 var(--s3)">总预算（秒）</label>
+            <input type="number" min="1" max="60" step="1" class="input input-sm" id="setDialBudget" style="width:80px">
+          </div>
+          <div class="hint" id="dialHint"></div>
+        </div>
+      </div>
+
+      <div class="card">
         <div class="card-head"><h2>开机自启</h2></div>
         <div class="card-body form">
           <label class="check">
@@ -283,9 +301,11 @@
         </div>
         <div class="card-body form">
           <div class="input-row">
-            <button class="btn btn-sm btn-primary" id="btnExportCfg">导出配置（含凭据）</button>
+            <button class="btn btn-sm btn-primary" id="btnExportPkg">导出客户装机包</button>
+            <button class="btn btn-sm" id="btnExportCfg">导出配置（含凭据）</button>
             <button class="btn btn-sm" id="btnExportDoc">导出配置说明（无凭据）</button>
           </div>
+          <div class="hint">装机包 = 程序 + 驱动 + 当前配置 + 启动脚本 + 装机说明 + 校验值（一个 zip，上门直接拷过去）。不含日志/备份/连接历史；含明文凭据，只发给客户本人。</div>
           <div class="hint">
             <b>导出配置</b>：完整的配置文件（链路、上游、规则、设置），同事放到程序目录就能用。<br>
             <span class="clash-no">⚠ 这个文件里含上游登录口令，别发到群里或公共仓库，请私发。</span><br><br>

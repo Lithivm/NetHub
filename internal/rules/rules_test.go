@@ -10,24 +10,24 @@ import (
 func TestDirectRoute(t *testing.T) {
 	s := New()
 	err := s.Load([]Route{
-		{Name: "本机网段直连", Targets: []string{"192.168.199.0/24"}, Chain: "direct", Action: ActionDirect},
-		{Name: "HIS 主链路", Targets: []string{"10.10.10.0/24", "172.30.4.0/24"}, Chain: "etyy"},
-		{Name: "邻居机器直连", Targets: []string{"10.10.10.102"}, Chain: "direct", Action: ActionDirect},
+		{Name: "本机网段直连", Targets: []string{"192.168.1.0/24"}, Chain: "direct", Action: ActionDirect},
+		{Name: "HIS 主链路", Targets: []string{"10.0.0.0/24", "172.16.0.0/24"}, Chain: "proxy-a"},
+		{Name: "邻居机器直连", Targets: []string{"10.0.0.102"}, Chain: "direct", Action: ActionDirect},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// 一个和隧道网段不重叠的直连目标：命中且是直连
-	if _, act, ok := s.Match(net.ParseIP("192.168.199.42"), 443); !ok || act != ActionDirect {
+	if _, act, ok := s.Match(net.ParseIP("192.168.1.42"), 443); !ok || act != ActionDirect {
 		t.Errorf("本机网段应命中直连，得到 act=%v ok=%v", act, ok)
 	}
-	// 10.10.10.102 同时落在直连规则和隧道网段里：规则自上而下，先命中的赢
-	if chain, act, ok := s.Match(net.ParseIP("10.10.10.102"), 443); !ok || act != ActionChain || chain != "etyy" {
+	// 10.0.0.102 同时落在直连规则和隧道网段里：规则自上而下，先命中的赢
+	if chain, act, ok := s.Match(net.ParseIP("10.0.0.102"), 443); !ok || act != ActionChain || chain != "proxy-a" {
 		t.Errorf("直连规则在隧道规则后面时应该走隧道，得到 chain=%q act=%v ok=%v", chain, act, ok)
 	}
 	// 隧道网段里的普通地址照旧走隧道
-	if chain, act, ok := s.Match(net.ParseIP("172.30.4.217"), 443); !ok || act != ActionChain || chain != "etyy" {
+	if chain, act, ok := s.Match(net.ParseIP("172.16.0.9"), 443); !ok || act != ActionChain || chain != "proxy-a" {
 		t.Errorf("隧道网段应命中隧道，得到 chain=%q act=%v ok=%v", chain, act, ok)
 	}
 	// 没命中的公网地址：不拦截
@@ -46,10 +46,10 @@ func TestDirectRoute(t *testing.T) {
 		}
 		return false
 	}
-	if has("192.168.199.42") {
+	if has("192.168.1.42") {
 		t.Error("直连规则的目标不该进 WinDivert 过滤器")
 	}
-	if !has("10.10.10.237") || !has("172.30.4.217") {
+	if !has("10.0.0.5") || !has("172.16.0.9") {
 		t.Error("隧道网段必须进过滤器")
 	}
 }
@@ -59,7 +59,7 @@ func TestBlockRoute(t *testing.T) {
 	s := New()
 	err := s.Load([]Route{
 		{Name: "拉黑扫描源", Targets: []string{"10.9.9.9"}, Chain: "block", Action: ActionBlock},
-		{Name: "HIS 主链路", Targets: []string{"10.10.10.0/24"}, Chain: "etyy"},
+		{Name: "HIS 主链路", Targets: []string{"10.0.0.0/24"}, Chain: "proxy-a"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -67,7 +67,7 @@ func TestBlockRoute(t *testing.T) {
 	if _, act, ok := s.Match(net.ParseIP("10.9.9.9"), 22); !ok || act != ActionBlock {
 		t.Errorf("应命中阻断，得到 act=%v ok=%v", act, ok)
 	}
-	if _, act, ok := s.Match(net.ParseIP("10.10.10.1"), 443); !ok || act != ActionChain {
+	if _, act, ok := s.Match(net.ParseIP("10.0.0.1"), 443); !ok || act != ActionChain {
 		t.Errorf("隧道规则不该被影响，得到 act=%v ok=%v", act, ok)
 	}
 	u := IP2U(net.ParseIP("10.9.9.9"))
@@ -87,18 +87,18 @@ func TestBlockRoute(t *testing.T) {
 func TestDirectBeforeTunnel(t *testing.T) {
 	s := New()
 	if err := s.Load([]Route{
-		{Name: "邻居机器直连", Targets: []string{"10.10.10.102"}, Chain: "direct", Action: ActionDirect},
-		{Name: "HIS 主链路", Targets: []string{"10.10.10.0/24"}, Chain: "etyy"},
+		{Name: "邻居机器直连", Targets: []string{"10.0.0.102"}, Chain: "direct", Action: ActionDirect},
+		{Name: "HIS 主链路", Targets: []string{"10.0.0.0/24"}, Chain: "proxy-a"},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, act, ok := s.Match(net.ParseIP("10.10.10.102"), 443); !ok || act != ActionDirect {
+	if _, act, ok := s.Match(net.ParseIP("10.0.0.102"), 443); !ok || act != ActionDirect {
 		t.Errorf("直连在前时应直连，得到 act=%v ok=%v", act, ok)
 	}
-	if chain, act, ok := s.Match(net.ParseIP("10.10.10.237"), 443); !ok || act != ActionChain || chain != "etyy" {
+	if chain, act, ok := s.Match(net.ParseIP("10.0.0.5"), 443); !ok || act != ActionChain || chain != "proxy-a" {
 		t.Errorf("同网段其它地址仍走隧道，得到 chain=%q act=%v ok=%v", chain, act, ok)
 	}
-	// 10.10.10.102 被直连规则先命中，但 10.10.10.0/24 整体仍在过滤器里
+	// 10.0.0.102 被直连规则先命中，但 10.0.0.0/24 整体仍在过滤器里
 	//（过滤器是"可能被接管"的粗筛，精确顺序由引擎判定）
 	if rs := s.FilterRanges(); len(rs) != 1 {
 		t.Errorf("期望只合并出一段，得到 %+v", rs)

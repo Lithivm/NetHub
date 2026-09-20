@@ -10,26 +10,26 @@ import (
 func TestPortMatch(t *testing.T) {
 	s := New()
 	err := s.Load([]Route{
-		{Name: "排除更新端口", Targets: []string{"10.10.10.0/24"}, Ports: []string{"7680"}, Chain: "direct", Action: ActionDirect},
-		{Name: "HIS 主链路", Targets: []string{"10.10.10.0/24"}, Ports: []string{"443", "5432", "8000-9000"}, Chain: "etyy"},
+		{Name: "排除更新端口", Targets: []string{"10.0.0.0/24"}, Ports: []string{"7680"}, Chain: "direct", Action: ActionDirect},
+		{Name: "HIS 主链路", Targets: []string{"10.0.0.0/24"}, Ports: []string{"443", "5432", "8000-9000"}, Chain: "proxy-a"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if _, act, ok := s.Match(net.ParseIP("10.10.10.102"), 7680); !ok || act != ActionDirect {
+	if _, act, ok := s.Match(net.ParseIP("10.0.0.102"), 7680); !ok || act != ActionDirect {
 		t.Errorf("7680 应命中直连，得到 act=%v ok=%v", act, ok)
 	}
 	for _, port := range []uint16{443, 5432, 8000, 9000} {
-		if chain, act, ok := s.Match(net.ParseIP("10.10.10.237"), port); !ok || act != ActionChain || chain != "etyy" {
+		if chain, act, ok := s.Match(net.ParseIP("10.0.0.5"), port); !ok || act != ActionChain || chain != "proxy-a" {
 			t.Errorf("端口 %d 应命中隧道，得到 chain=%q act=%v ok=%v", port, chain, act, ok)
 		}
 	}
 	// 9001 不在 8000-9000 里，两条规则都不命中
-	if _, _, ok := s.Match(net.ParseIP("10.10.10.237"), 9001); ok {
+	if _, _, ok := s.Match(net.ParseIP("10.0.0.5"), 9001); ok {
 		t.Error("8000-9000 之外的端口不该命中")
 	}
-	if _, _, ok := s.Match(net.ParseIP("10.10.10.237"), 80); ok {
+	if _, _, ok := s.Match(net.ParseIP("10.0.0.5"), 80); ok {
 		t.Error("没写 80 就不该命中")
 	}
 

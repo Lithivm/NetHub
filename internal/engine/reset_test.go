@@ -26,9 +26,9 @@ func mkSyn(t *testing.T, src, dst string, sport, dport uint16, seq uint32) []byt
 // buildReset 产出的是"目标 → 应用"的 RST/ACK：IP/端口互换、seq=0、ack=对方 seq+1、
 // 头长收缩到 20 字节、总长同步改小。
 func TestBuildReset(t *testing.T) {
-	pkt := mkSyn(t, "192.168.199.42", "10.10.10.237", 55555, 5432, 0x11223344)
+	pkt := mkSyn(t, "192.168.1.42", "10.0.0.5", 55555, 5432, 0x11223344)
 	rst, ok := buildReset(pkt, 20,
-		net.ParseIP("192.168.199.42"), net.ParseIP("10.10.10.237"), 55555, 5432)
+		net.ParseIP("192.168.1.42"), net.ParseIP("10.0.0.5"), 55555, 5432)
 	if !ok {
 		t.Fatal("buildReset 应该成功")
 	}
@@ -39,10 +39,10 @@ func TestBuildReset(t *testing.T) {
 	if got := be16(rst, 2); got != 40 {
 		t.Errorf("IP 总长应为 40，实际 %d", got)
 	}
-	if got := net.IPv4(rst[offSrcIP], rst[offSrcIP+1], rst[offSrcIP+2], rst[offSrcIP+3]).String(); got != "10.10.10.237" {
+	if got := net.IPv4(rst[offSrcIP], rst[offSrcIP+1], rst[offSrcIP+2], rst[offSrcIP+3]).String(); got != "10.0.0.5" {
 		t.Errorf("源 IP 应为目标，实际 %s", got)
 	}
-	if got := net.IPv4(rst[offDstIP], rst[offDstIP+1], rst[offDstIP+2], rst[offDstIP+3]).String(); got != "192.168.199.42" {
+	if got := net.IPv4(rst[offDstIP], rst[offDstIP+1], rst[offDstIP+2], rst[offDstIP+3]).String(); got != "192.168.1.42" {
 		t.Errorf("目标 IP 应为应用，实际 %s", got)
 	}
 	if got := be16(rst, 20+offSrcPort); got != 5432 {
@@ -71,11 +71,11 @@ func TestBuildResetBadInput(t *testing.T) {
 		t.Error("太短的包应返回 false")
 	}
 	// 带选项的 SYN（TCP 头 24 字节）也要能处理：总长按最小头收缩
-	pkt := mkSyn(t, "192.168.199.42", "10.10.10.237", 1234, 80, 7)
+	pkt := mkSyn(t, "192.168.1.42", "10.0.0.5", 1234, 80, 7)
 	pkt = append(pkt, 0, 0, 0, 0) // 假装有 4 字节选项
 	pkt[20+tcpOffDataOff] = 6 << 4
 	putBE16(pkt, 2, 44)
-	rst, ok := buildReset(pkt, 20, net.ParseIP("192.168.199.42"), net.ParseIP("10.10.10.237"), 1234, 80)
+	rst, ok := buildReset(pkt, 20, net.ParseIP("192.168.1.42"), net.ParseIP("10.0.0.5"), 1234, 80)
 	if !ok {
 		t.Fatal("带选项的 SYN 也应能构造 RST")
 	}

@@ -242,6 +242,7 @@ type Config struct {
 	Chains []Chain  `yaml:"chains"`
 	Routes []Route  `yaml:"routes"`
 	Patrol Patrol   `yaml:"patrol,omitempty"` // 业务目标巡检（间隔/每轮数量）
+	Tuning Tuning   `yaml:"tuning,omitempty"` // 网络调优（上游拨号超时/总预算）
 	Hosts  HostsCfg `yaml:"hosts"`
 	UI     UICfg    `yaml:"ui"`
 
@@ -615,6 +616,54 @@ func (c *Config) PatrolInterval() time.Duration {
 	return 5 * time.Minute
 }
 
+// Tuning 网络调优。默认值对现网够用，异常网络（上游常常半死）时才调。
+//
+// 两个旋钮的分工：
+//   - DialTimeout 管“一条上游最多等多久” —— 越小越快切换，太小会把慢链路误杀。
+//     （实测：现网上游 TCP+TLS 握手中位 84～585ms，RTT 抖动到 2s+，所以 3s 留了余量）
+//   - DialBudget 管“一次连接总共最多花多久” —— 防止候选多时逐个等满、用户等到 20s。
+//     拒绝（端口不通）几乎不花时间，所以总预算只吃“超时型”失败。
+//
+// 说明：现网上游 TCP+TLS 握手中位 84～585ms，RTT 有抖动（实测峰值 2.4s），
+// 所以默认 5s —— 既给了慢链路余量，又把“一条半死时等多久才换下一条”
+// 从老的 10s 降到 5s（两条上游全死时从 20s 降到 10s）。
+type Tuning struct {
+	DialTimeout string `yaml:"dial_timeout,omitempty"` // 如 5s（默认 5s）
+	DialBudget  string `yaml:"dial_budget,omitempty"`  // 默认 2×dial_timeout；一般不用写
+}
+
+// DialTimeoutDur 单次尝试上游的超时（默认 5s，夹在 1s～30s）。
+func (c *Config) DialTimeoutDur() time.Duration {
+	return clampDur(c.Tuning.DialTimeout, 5*time.Second, time.Second, 30*time.Second)
+}
+
+// DialBudgetDur 一次连接在所有上游上最多花多久。
+// 默认 = 2×单次超时（即“最多两轮”）：拒绝型失败几乎不花时间，所以
+// 候选多时照样会一路试下去；只有“超时型”失败才会把预算吃光。
+func (c *Config) DialBudgetDur() time.Duration {
+	per := c.DialTimeoutDur()
+	d := clampDur(c.Tuning.DialBudget, 2*per, per, time.Minute)
+	if d < per { // 配置里总预算比单次还小 → 以单次为准，否则第一条就被预算卡掉
+		d = per
+	}
+	return d
+}
+
+// clampDur 解析 duration 字符串；空/非法取 def，并夹到 [lo, hi]。
+func clampDur(s string, def, lo, hi time.Duration) time.Duration {
+	d := def
+	if v, err := time.ParseDuration(strings.ToLower(strings.TrimSpace(s))); err == nil && v > 0 {
+		d = v
+	}
+	if d < lo {
+		d = lo
+	}
+	if d > hi {
+		d = hi
+	}
+	return d
+}
+
 // PatrolCount 每轮巡检的目标数（默认 8，上限 32，免得一下探爆客户内网）。
 func (c *Config) PatrolCount() int {
 	n := c.Patrol.Count
@@ -942,6 +991,18 @@ func (c *Config) Precheck() []string {
 	}
 	if !strings.Contains(c.Relay, ":") {
 		out = append(out, "✗ relay 不是 host:port")
+	}
+
+	// 拨号调优：只报“会让人等太久”或“会误杀慢链路”的组合
+	dt, db := c.DialTimeoutDur(), c.DialBudgetDur()
+	switch {
+	case dt >= 10*time.Second:
+		out = append(out, fmt.Sprintf("⚠ 单次上游超时 %s 偏大：一条上游半死时，业务要等这么久才换下一条（默认 5s）", dt))
+	case dt <= time.Second && db <= time.Second:
+		out = append(out, fmt.Sprintf("⚠ 单次超时 %s 偏小：现网上游握手中位到 585ms、抖动上过 2s，可能误杀慢链路", dt))
+	}
+	if db > 15*time.Second {
+		out = append(out, fmt.Sprintf("⚠ 拨号总预算 %s 偏大：所有上游都半死时，用户要等这么久才拿到“连不上”", db))
 	}
 	return out
 }

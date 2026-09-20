@@ -136,7 +136,7 @@ func TestTargetsSummary(t *testing.T) {
 // 视图要带 direct 标记 + 一句说明，且不需要先建链。
 func TestAddDirectRoute(t *testing.T) {
 	b, cfg := newRoutesBackend(t)
-	if err := b.AddRoute("本机网段直连", "192.168.199.0/24 10.10.10.102", "direct", ""); err != nil {
+	if err := b.AddRoute("本机网段直连", "192.168.1.0/24 10.0.0.102", "direct", ""); err != nil {
 		t.Fatalf("加直连规则不该要求先建链: %v", err)
 	}
 	vs := b.GetRoutes()
@@ -151,7 +151,7 @@ func TestAddDirectRoute(t *testing.T) {
 	}
 
 	// 直连和隧道规则共存，互不影响
-	if err := b.AddRoute("HIS 主链路", "10.10.10.0/24", "proxy-a", ""); err != nil {
+	if err := b.AddRoute("HIS 主链路", "10.0.0.0/24", "proxy-a", ""); err != nil {
 		t.Fatal(err)
 	}
 	vs = b.GetRoutes()

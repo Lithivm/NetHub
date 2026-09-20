@@ -346,13 +346,38 @@ func (e *Engine) acceptLoop() {
 //
 // 一条链可能有多个上游（故障转移/轮询/随机）：按策略拿候选顺序，依次试，
 // 第一个成功的就用；每次成/败都记进健康表（被动探测，不靠主动探也能学到东西）。
+// dialUpstream 按候选顺序试上游，一个不成马上换下一个。
+//
+// 两个旋钮（都在 config.tuning 里，默认 5s / 10s）：
+//   - 单次超时：一条上游最多等多久。半死上游（TCP 通但不回话）会吃满这个时间，
+//     所以它直接决定“业务等多久才换下一条”。老的硬编码 10s 是实测 TTFB 偏高的主因。
+//   - 总预算：一整次连接最多花多久，防止候选多时逐个等满。
+//     拒绝型失败（端口不通）只花几毫秒，所以不会触发截断；只有超时型才吃预算。
 func (e *Engine) dialUpstream(ch config.Chain, dst net.IP, dport uint16) (net.Conn, error) {
 	raws := ch.Upstreams()
 	if len(raws) == 0 {
 		return nil, fmt.Errorf("链 %s 没有配置上游", ch.Name)
 	}
+	per, budget := e.cfg.DialTimeoutDur(), e.cfg.DialBudgetDur()
+	start := time.Now()
 	var errs []string
-	for _, idx := range e.candidates(ch) {
+
+	for n, idx := range e.candidates(ch) {
+		el := time.Since(start)
+		// 第一条无论如何都试（否则预算配小了就永远不会拨号）
+		if n > 0 && el >= budget {
+			msg := fmt.Sprintf("剩余 %d 条上游未尝试（已用 %s，总预算 %s）",
+				len(raws)-n, el.Round(time.Millisecond), budget)
+			e.bus.Warn("链 %s 拨号：%s", ch.Name, msg)
+			errs = append(errs, msg)
+			break
+		}
+		// 单次尝试不超剩余预算
+		timeout := per
+		if left := budget - el; left > 0 && left < timeout {
+			timeout = left
+		}
+
 		raw := raws[idx]
 		up, err := upstream.Parse(raw)
 		if err != nil {
@@ -360,12 +385,14 @@ func (e *Engine) dialUpstream(ch config.Chain, dst net.IP, dport uint16) (net.Co
 			errs = append(errs, fmt.Sprintf("上游 %d: %v", idx+1, err))
 			continue
 		}
-		c, err := up.Dial(dst, dport, 10*time.Second)
+		t0 := time.Now()
+		c, err := up.Dial(dst, dport, timeout)
+		lat := time.Since(t0)
 		if err == nil {
-			e.markUp(ch.Name, idx, true, 0, "")
+			e.markUp(ch.Name, idx, true, lat, "")
 			return c, nil
 		}
-		e.markUp(ch.Name, idx, false, 0, err.Error())
+		e.markUp(ch.Name, idx, false, lat, err.Error())
 		errs = append(errs, fmt.Sprintf("%s: %v", up.String(), err))
 	}
 	return nil, fmt.Errorf("%s", strings.Join(errs, "；"))

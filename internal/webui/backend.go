@@ -38,8 +38,9 @@ import (
 
 // Backend 是绑定给前端的对象。
 type Backend struct {
-	a   *app.App
-	ctx context.Context
+	a      *app.App
+	ctx    context.Context
+	exeDir string // 程序目录（装机包用；测试可注入，空则取 os.Executable 所在目录）
 
 	mu       sync.Mutex
 	logCh    chan logbus.Line
@@ -177,6 +178,9 @@ type SettingsView struct {
 	HostsManage  bool     `json:"hostsManage"`
 	HostsEntries []string `json:"hostsEntries"`
 	Theme        string   `json:"theme"`
+	// 上游拨号（秒）。0 表示前端没传 → 保持原值，不当成“设成 0”。
+	DialTimeout int `json:"dialTimeout,omitempty"`
+	DialBudget  int `json:"dialBudget,omitempty"`
 }
 
 type ChainInput struct {
@@ -565,6 +569,8 @@ func (b *Backend) GetSettings() SettingsView {
 		HostsManage:  b.a.Cfg.Hosts.Manage,
 		HostsEntries: entries,
 		Theme:        b.a.Cfg.UI.Theme,
+		DialTimeout:  int(b.a.Cfg.DialTimeoutDur() / time.Second),
+		DialBudget:   int(b.a.Cfg.DialBudgetDur() / time.Second),
 	}
 }
 
@@ -790,10 +796,18 @@ func (b *Backend) SaveSettings(s SettingsView) error {
 	if len(s.HostsEntries) > 0 {
 		cfg.Hosts.Entries = s.HostsEntries
 	}
+	// 拨号调优：只在界面确实传了值时才改（0 = 没传，保持原样）
+	if s.DialTimeout > 0 {
+		cfg.Tuning.DialTimeout = fmt.Sprintf("%ds", s.DialTimeout)
+	}
+	if s.DialBudget > 0 {
+		cfg.Tuning.DialBudget = fmt.Sprintf("%ds", s.DialBudget)
+	}
 	if err := b.a.SaveConfig(); err != nil {
 		return err
 	}
-	b.a.Bus.Info("设置已保存（hosts 托管=%v）", cfg.Hosts.Manage)
+	b.a.Bus.Info("设置已保存（hosts 托管=%v；拨号单次 %s / 总预算 %s）",
+		cfg.Hosts.Manage, cfg.DialTimeoutDur(), cfg.DialBudgetDur())
 	return nil
 }
 

@@ -237,17 +237,17 @@ func TestDirectRoute(t *testing.T) {
 		Relay:  "127.0.0.1:0",
 		Chains: []Chain{{Name: "proxy-a", Forward: "socks5://127.0.0.1:1080"}},
 	}
-	if err := c.AddRoute(Route{Name: "本机网段直连", Targets: []string{"192.168.199.0/24"}, Chain: DirectChain}); err != nil {
+	if err := c.AddRoute(Route{Name: "本机网段直连", Targets: []string{"192.168.1.0/24"}, Chain: DirectChain}); err != nil {
 		t.Fatalf("直连规则不该要求先建链: %v", err)
 	}
 	if !c.Routes[0].IsDirect() {
 		t.Error("IsDirect 应为真")
 	}
 	// 和隧道规则共存，且隧道网段里的单个邻居也能直连（宽里有窄，不拦）
-	if err := c.AddRoute(Route{Name: "HIS 主链路", Targets: []string{"10.10.10.0/24"}, Chain: "proxy-a"}); err != nil {
+	if err := c.AddRoute(Route{Name: "HIS 主链路", Targets: []string{"10.0.0.0/24"}, Chain: "proxy-a"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.AddRoute(Route{Name: "同事机器直连", Targets: []string{"10.10.10.102"}, Chain: DirectChain}); err != nil {
+	if err := c.AddRoute(Route{Name: "同事机器直连", Targets: []string{"10.0.0.102"}, Chain: DirectChain}); err != nil {
 		t.Errorf("直连目标不该被当重复拦掉: %v", err)
 	}
 
@@ -260,7 +260,7 @@ func TestDirectRoute(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "config.yaml")
 	seed := "relay: 127.0.0.1:0\n" +
 		"chains:\n  - name: proxy-a\n    forward: socks5://127.0.0.1:1080\n" +
-		"routes:\n  - name: 本机网段直连\n    targets: [\"192.168.199.0/24\"]\n    chain: direct\n"
+		"routes:\n  - name: 本机网段直连\n    targets: [\"192.168.1.0/24\"]\n    chain: direct\n"
 	if err := os.WriteFile(p, []byte(seed), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -558,5 +558,56 @@ func TestShadowedByWiderRule(t *testing.T) {
 	}
 	if got := c.ShadowedTargets(2); len(got) != 0 {
 		t.Errorf("不同端口不该被标成影子: %v", got)
+	}
+}
+
+// 拨号调优：默认 5s/10s，非法值回默认，极值夹住，总预算不小于单次超时。
+func TestDialTuning(t *testing.T) {
+	c := &Config{}
+	if got := c.DialTimeoutDur(); got != 5*time.Second {
+		t.Errorf("默认单次超时应为 5s，得到 %s", got)
+	}
+	if got := c.DialBudgetDur(); got != 10*time.Second {
+		t.Errorf("默认总预算应为 10s，得到 %s", got)
+	}
+
+	c.Tuning = Tuning{DialTimeout: "3s", DialBudget: "20s"}
+	if c.DialTimeoutDur() != 3*time.Second || c.DialBudgetDur() != 20*time.Second {
+		t.Errorf("自定义值没生效: %s / %s", c.DialTimeoutDur(), c.DialBudgetDur())
+	}
+
+	// 总预算比单次还小 → 提到单次（否则第一条就被预算卡掉）
+	c.Tuning = Tuning{DialTimeout: "5s", DialBudget: "2s"}
+	if got := c.DialBudgetDur(); got != 5*time.Second {
+		t.Errorf("总预算不该小于单次超时，得到 %s", got)
+	}
+
+	// 非法/越界
+	c.Tuning = Tuning{DialTimeout: "很快", DialBudget: "-1s"}
+	if c.DialTimeoutDur() != 5*time.Second || c.DialBudgetDur() != 10*time.Second {
+		t.Errorf("非法值应回默认: %s / %s", c.DialTimeoutDur(), c.DialBudgetDur())
+	}
+	c.Tuning = Tuning{DialTimeout: "5m", DialBudget: "10m"}
+	if c.DialTimeoutDur() != 30*time.Second || c.DialBudgetDur() != time.Minute {
+		t.Errorf("极值应夹住: %s / %s", c.DialTimeoutDur(), c.DialBudgetDur())
+	}
+	c.Tuning = Tuning{DialTimeout: "100ms"}
+	if c.DialTimeoutDur() != time.Second {
+		t.Errorf("过小的单次超时应提到 1s，得到 %s", c.DialTimeoutDur())
+	}
+
+	// 体检要把“会让人等太久”的情况说出来
+	c.Chains = []Chain{{Name: "a", Forward: "socks5://127.0.0.1:1080"}}
+	c.Routes = []Route{{Name: "r", Targets: []string{"10.0.0.0/24"}, Chain: "a"}}
+	c.Relay = "127.0.0.1:0"
+	c.Tuning = Tuning{DialTimeout: "15s"}
+	found := false
+	for _, line := range c.Precheck() {
+		if strings.Contains(line, "单次上游超时") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("单次超时 15s 时体检应该提醒")
 	}
 }
