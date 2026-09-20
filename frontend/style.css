@@ -654,7 +654,7 @@ code, .mono { font-family: var(--font-mono); }
 }
 
 /* 关于卡：整卡居中（标题、GitHub、版本、许可说明都居中） */
-.card-about .card-head { justify-content: center; }
+/* 关于卡：卡片头不动（左标题、右按钮），下面内容全部居中 */
 .card-about .card-body {
   display: flex; flex-direction: column; align-items: center;
   gap: var(--s3); text-align: center;
