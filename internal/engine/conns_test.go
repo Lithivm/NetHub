@@ -7,12 +7,14 @@ import (
 	"time"
 
 	"nethub/internal/config"
+	"nethub/internal/logbus"
 	"nethub/internal/rules"
 )
 
 // newTestEngine 造一个够用的空引擎：没有驱动、没有 relay，只测连接表的快照与统计。
 func newTestEngine() *Engine {
 	return &Engine{
+		bus:         logbus.New(50),
 		cfg:         &config.Config{},
 		conns:       map[uint16]*connState{},
 		notices:     map[uint16]noticeSeen{},
@@ -206,4 +208,62 @@ func TestConnsResolveProcess(t *testing.T) {
 		t.Errorf("withProc=false 时不该去查进程，却得到 %q", got2[0].Proc)
 	}
 	t.Logf("端口 %d → %s (PID %d)", local.Port, got[0].Proc, got[0].PID)
+}
+
+// 看门狗：拦截了但 relay 迟迟没收到 → 标成“未送达中转”并给出原因。
+//
+// 这条对应真实事故（同事机上 40 次拦截、0 次到 relay，日志却一片安静）。
+func TestRelayWatchdog(t *testing.T) {
+	e := newTestEngine()
+	st := &connState{dst: net.ParseIP("172.30.4.220"), dport: 9056, chain: "etyy",
+		action: rules.ActionChain, start: time.Now().Add(-10 * time.Second)}
+	st.touch()
+	e.mu.Lock()
+	e.conns[40001] = st
+	e.mu.Unlock()
+
+	// 已经送达 relay 的 → 不该被判成异常
+	ok := &connState{dst: net.ParseIP("10.0.0.5"), dport: 443, chain: "etyy",
+		action: rules.ActionChain, start: time.Now().Add(-10 * time.Second)}
+	ok.touch()
+	ok.relayed.Store(true)
+	e.mu.Lock()
+	e.conns[40002] = ok
+	e.mu.Unlock()
+	// 直连/阻断的连接不走 relay → 也不该判异常
+	direct := &connState{dst: net.ParseIP("192.168.1.9"), dport: 445, chain: "direct",
+		action: rules.ActionDirect, start: time.Now().Add(-10 * time.Second)}
+	direct.touch()
+	e.mu.Lock()
+	e.conns[40003] = direct
+	e.mu.Unlock()
+
+	e.checkUnrelayed()
+
+	if !st.unrelayed.Load() {
+		t.Fatal("超时未送达 relay 的连接应被标记")
+	}
+	if ok.unrelayed.Load() || direct.unrelayed.Load() {
+		t.Error("正常连接和直连不该被标记")
+	}
+	if !strings.Contains(st.err(), "relay") {
+		t.Errorf("原因文字里要说明白，得到 %q", st.err())
+	}
+	got := e.Conns(10, false)
+	for _, c := range got {
+		if c.Target == "172.30.4.220:9056" {
+			if c.State != "未送达中转" {
+				t.Errorf("界面状态 = %q，期望“未送达中转”", c.State)
+			}
+			if c.Error == "" {
+				t.Error("这一行的原因不该为空（否则界面只有一个状态词，用户不知道怎么办）")
+			}
+		}
+	}
+	// 再跑一次不该重复标记（幂等）
+	st.unrelayed.Store(false)
+	e.checkUnrelayed()
+	if !st.unrelayed.Load() {
+		t.Error("第二次检查也应该标记")
+	}
 }

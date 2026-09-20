@@ -170,6 +170,8 @@ type RouteView struct {
 	Inactive  bool     `json:"inactive"`
 	// A20：进程条件（空 = 不看进程）
 	Apps []string `json:"apps"`
+	// 规则开关（默认开）；停用的规则不进匹配、不占目标
+	Enabled bool `json:"enabled"`
 }
 
 type LogView struct {
@@ -343,6 +345,7 @@ func (b *Backend) GetRoutes() []RouteView {
 			LocalNets: r.LocalNets,
 			Inactive:  !localNetsMatch(r.LocalNets, localIPv4s()),
 			Apps:      r.Apps,
+			Enabled:   r.IsEnabled(),
 		})
 	}
 	return out
@@ -542,6 +545,34 @@ func (b *Backend) ExplainTarget(ip, port string) (ExplainView, error) {
 		}
 	}
 	return v, nil
+}
+
+// SetRouteEnabled 开/关一条规则。
+//
+// 为什么做成一个独立的小入口（而不是走保存整条规则的表单）：现场要在十几个
+// 内网环境之间来回切，开关必须**一下点到位**，不能每次弹出表单改完再存。
+func (b *Backend) SetRouteEnabled(index int, on bool) error {
+	if index < 0 || index >= len(b.a.Cfg.Routes) {
+		return fmt.Errorf("规则序号超出范围")
+	}
+	was := b.a.Cfg.Routes[index].IsEnabled()
+	if was == on {
+		return nil
+	}
+	rt := b.a.Cfg.Routes[index]
+	rt.SetEnabled(on)
+	if err := b.a.Cfg.UpdateRoute(index, rt); err != nil {
+		// 启用时如果链丢了/目标冲了，要当场说清楚，而不是模糊地“保存失败”
+		return err
+	}
+	name := rt.Name
+	if strings.TrimSpace(name) == "" {
+		name = rt.Describe()
+	}
+	if on {
+		return b.save(fmt.Sprintf("启用规则%s（%d 个目标）", name, len(rt.Targets)))
+	}
+	return b.save(fmt.Sprintf("停用规则%s —— 停用后不进匹配也不占目标，可与其已启用的规则同时存在", name))
 }
 
 // SortRoutes 按“最具体优先”重排规则（等于帮用户点了几十次上下箭头）。
@@ -780,6 +811,9 @@ func (b *Backend) SaveRoute(index int, in RouteInput) error {
 	}
 	old := ""
 	if rs := b.a.Cfg.Routes; index < len(rs) {
+		// 规则开关由列表上的开关控制，不是表单字段 —— 编辑内容时**必须继承原状态**，
+		// 否则“改个名字/加个目标”会悳悹把停用的规则重新启用。
+		rt.Enabled = rs[index].Enabled
 		old = rs[index].Name
 		if strings.TrimSpace(old) == "" {
 			old = rs[index].Describe()
@@ -1172,15 +1206,22 @@ func (b *Backend) SelfTest() {
 				}
 			}
 
-			// ② 没有真实目标（新装的机器）才退回：hosts 里的主机 + 常见端口
+			// ② 没有真实目标（新装机器）才退回：hosts 里的主机 + 常见端口。
+			//
+			// ⚠ 这条路径上的端口是**猜**的，所以“全没连上”**不能说明链路有问题**：
+			// 真实事故：172.30.4.217 上的服务在 9054，而猜测列表里没有这个端口 →
+			// 六次全灭 → 界面报“链路有问题，上游挂了？”，但其实链路好好的（同端口
+			// 用工具直连 3/3 成功）。所以这里只能报 WARN，不能计入“有问题”的链。
+			guessed := false
 			ip := net.ParseIP(hitIP)
 			if hit == 0 {
+				guessed = true
 				ip = probeIPForChain(b.a.Cfg, ch.Name)
 				if ip == nil {
 					b.a.Bus.Warn("[%s] 找不到可探测的真实主机（hosts 为空且还没有内网连接），跳过", ch.Name)
 					continue
 				}
-				for _, port := range []uint16{443, 80, 5432, 6446, 5000, 9056} {
+				for _, port := range []uint16{443, 80, 5432, 6446, 5000, 9054, 9056} {
 					conn, derr := dial(ip, port)
 					if derr == nil {
 						conn.Close()
@@ -1190,8 +1231,16 @@ func (b *Backend) SelfTest() {
 				}
 			}
 			if hit > 0 {
-				b.a.Bus.Info("[%s] ✓ 端到端可达：%s → %s:%d", ch.Name, desc, ip, hit)
+				if guessed {
+					b.a.Bus.Info("[%s] ✓ 端到端可达：%s → %s:%d（端口是从常见端口里试出来的，不代表业务端口）", ch.Name, desc, ip, hit)
+				} else {
+					b.a.Bus.Info("[%s] ✓ 端到端可达：%s → %s:%d", ch.Name, desc, ip, hit)
+				}
 				b.emit("selftest", ProbeView{Target: ip.String(), Port: hit, OK: true})
+			} else if guessed {
+				// 端口是猜的：不下结论，也不计入“有问题”（这是以前误报的来源）
+				b.a.Bus.Warn("[%s]  %s 的常见端口都没通 —— 这不能说明链路有问题（端口是猜的），"+
+					"等有过内网访问记录后自检才准", ch.Name, ip)
 			} else {
 				b.a.Bus.Error("[%s] ✗ 经该链连不上 %s 的任何端口（上游挂了？上游限制了目标？）", ch.Name, ip)
 				bad++

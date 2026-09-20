@@ -204,6 +204,11 @@ func (a *App) SaveConfig() error {
 func toRules(rs []config.Route) []rules.Route {
 	out := make([]rules.Route, 0, len(rs))
 	for _, r := range rs {
+		// 停用的规则**不进规则集**：既不参与匹配，也不进内核过滤器 ——
+		// 所以停掉一条规则是真正的零开销（而不是“匹配到了再忽略”）。
+		if !r.IsEnabled() {
+			continue
+		}
 		act := rules.ActionChain
 		switch {
 		case r.IsDirect():

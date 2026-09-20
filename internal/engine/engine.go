@@ -70,6 +70,13 @@ type connState struct {
 	packets atomic.Uint64 // 包数（直连/阻断时用得上）
 	ended   atomic.Bool
 	errText atomic.Value // string：失败原因（如隧道建立失败）
+
+	// relayed / unrelayed：看门狗用（真实事故，见 AGENTS.md）。
+	// relayed = relay 真的收到了这条连接（handleConn 开始处理时置位）；
+	// 如果 SYN 被改写注入后**迟迟没有**送达 relay，客户端会卡到 SYN 重传耗尽（约 30s）
+	// 然后重试 —— 而旧版代码在这条路径上一条日志都不打，看着“一切正常”。
+	relayed   atomic.Bool
+	unrelayed atomic.Bool
 }
 
 func (st *connState) touch() { st.last.Store(time.Now().UnixNano()) }
@@ -150,6 +157,8 @@ func (e *Engine) Conns(limit int, withProc bool) []ConnView {
 		}
 		state := "进行中"
 		switch {
+		case st.unrelayed.Load():
+			state = "未送达中转"
 		case st.action == rules.ActionBlock:
 			state = "已阻断"
 		case st.err() != "":
@@ -227,6 +236,9 @@ type Engine struct {
 
 	// loop 环路检测（A14）：与其它代理共存时发现自己打转
 	loop *loopGuard
+
+	// unrelayedNotified 上次因“包没送到 relay”弹应用内提示的时间（节流用）
+	unrelayedNotified time.Time
 
 	// cap 抓包（A19）：按需把包写成 pcap
 	cap *capturer
@@ -336,10 +348,11 @@ func (e *Engine) Start() error {
 			ch.Name, len(ch.Upstreams()), ch.StrategyName(), ch.ProbeInterval())
 	}
 
-	e.wg.Add(6)
+	e.wg.Add(7)
 	go e.acceptLoop()
 	go e.packetLoop()
 	go e.janitor()
+	go e.relayWatch()
 	go e.healthLoop()
 	go e.targetLoop()
 	go e.localNetLoop()
@@ -626,6 +639,9 @@ func (e *Engine) handleConn(c net.Conn) {
 		e.bus.Warn("relay 收到未知来源连接 sport=%d，丢弃", sport)
 		return
 	}
+	// 看门狗：relay 确实收到了这条连接（这一步以前没有任何记录，
+	// 导致“包没到 relay”这种故障在日志里完全看不出来）。
+	st.relayed.Store(true)
 
 	ch, ok := e.cfg.ChainByName(st.chain)
 	if !ok {
@@ -966,6 +982,107 @@ func (e *Engine) janitor() {
 					delete(e.notices, k)
 				}
 			}
+			e.mu.Unlock()
+		}
+	}
+}
+
+// relayGrace 拦截到 SYN 之后，等 relay 收到这条连接的时间上限。
+//
+// 正常路径是毫秒级（本机环回一跳）；4 秒已经比它大三个数量级，
+// 而客户端 SYN 重传是 1s / 2s / 4s…，所以 4 秒足够判定“改写的包根本没到 relay”。
+const relayGrace = 4 * time.Second
+
+// relayWatch 看门狗：拦截了但 relay 没收到 → 必须报错。
+//
+// 为什么非有不可（真实事故）：客户端机上的安全软件/另一个代理在内核层拦走了
+// 我们改写后注入的包 → 包到不了本机 relay → 客户端 SYN 无人应答，一直重传到
+// 约 30 秒才放弃、再重试；而日志里只有一行“拦截 X → relay”，**既没有失败也没有下文**，
+// 用户看到的就是“软件里显示一切正常，但内网访问不通”。
+func (e *Engine) relayWatch() {
+	defer e.wg.Done()
+	tk := time.NewTicker(1500 * time.Millisecond)
+	defer tk.Stop()
+	for {
+		select {
+		case <-e.done:
+			return
+		case <-tk.C:
+			e.checkUnrelayed()
+		}
+	}
+}
+
+// checkUnrelayed 找出“已拦截、超时仍未送达 relay”的连接，报一次错（不刷屏）。
+func (e *Engine) checkUnrelayed() {
+	now := time.Now()
+	type bad struct {
+		sport uint16
+		dst   string
+		chain string
+		proc  string
+		since time.Duration
+	}
+	var fresh []bad
+	e.mu.RLock()
+	for sport, st := range e.conns {
+		if st.action != rules.ActionChain || st.ended.Load() {
+			continue
+		}
+		if st.relayed.Load() || st.unrelayed.Load() {
+			continue
+		}
+		if d := now.Sub(st.start); d >= relayGrace {
+			fresh = append(fresh, bad{sport, fmt.Sprintf("%s:%d", st.dst, st.dport), st.chain, st.procName, d})
+		}
+	}
+	e.mu.RUnlock()
+	if len(fresh) == 0 {
+		return
+	}
+
+	// 先给这几条连接打上“未送达”标记，供界面展示（幂等，不会重复报）
+	for _, b := range fresh {
+		e.mu.RLock()
+		st := e.conns[b.sport]
+		e.mu.RUnlock()
+		if st == nil {
+			continue
+		}
+		if st.unrelayed.CompareAndSwap(false, true) {
+			st.fail(fmt.Sprintf("已拦截改写，但 %.0f 秒内没有送达本机 relay（正常应 <1ms）—— "+
+				"基本可断定：改写的包在内核层被别的程序拦走了（安全软件 / Clash 的 TUN 模式 / 另一个代理），"+
+				"或者有另一个本程序实例在抢管。客户端表现：连不上，约 30 秒后重试。", relayGrace.Seconds()))
+		}
+	}
+
+	e.bus.Error("【没送达 relay】%d 条连接已被拦截改写，但 %.0f 秒内没送到本机 relay（正常 <1ms）：",
+		len(fresh), relayGrace.Seconds())
+	for i, b := range fresh {
+		if i >= 5 {
+			e.bus.Error("   …还有 %d 条", len(fresh)-5)
+			break
+		}
+		who := b.proc
+		if who == "" {
+			who = "未知进程"
+		}
+		e.bus.Error("   %s （链 %s，%s，已等 %.1fs）", b.dst, b.chain, who, b.since.Seconds())
+	}
+	e.bus.Error("   怎么办：① 把内网网段加进 Clash 等代理的「绕过/直连」列表（否则它们的内核钩子会先把包吃掉）；" +
+		"② 安全软件里信任 nethub.exe 与 WinDivert64.sys（含 TUN 类驱动）；③ 确认没有同时开着第二个 nethub。")
+
+	// 应用内也提一句（同一分钟内只说一次，避免刷屏）
+	if e.Notify != nil {
+		e.mu.Lock()
+		if time.Since(e.unrelayedNotified) > time.Minute {
+			e.unrelayedNotified = now
+			e.mu.Unlock()
+			e.Notify("改写的包没送到中转", fmt.Sprintf(
+				"%d 条连接被拦截后卡住了（客户端会一直连不上）。\n"+
+					"多半是安全软件或 Clash（TUN/系统代理）先一步把包拦走了，\n"+
+					"把内网网段加进它们的直连/绕过列表，然后重启本程序。", len(fresh)), true)
+		} else {
 			e.mu.Unlock()
 		}
 	}

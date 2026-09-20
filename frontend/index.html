@@ -24,8 +24,7 @@
 </div>
 
 <!-- ── 状态条 + 主操作 ── -->
-<header class="toolbar">
-  <div class="statusline">
+<header class="toolbar">  <div class="statusline">
     <span class="runstate" id="runState"><span class="dot"></span><span id="runStateText">未启动</span></span>
     <span class="sep"></span>
     <span class="kv">累计 <b id="stTotal">0</b></span>
@@ -38,6 +37,10 @@
     <button class="btn" id="btnTheme">深色模式</button>
   </div>
 </header>
+
+<!-- 常驻告警条：只在"内网会被别的代理接管"这类红线问题上出现，修好自行消失。
+     为什么不只用 toast：toast 一闪而过，同事那次就是弹了没看见，最后只能从日志里挖。 -->
+<div class="noticebar" id="noticeBar" hidden></div>
 
 <!-- ── 标签条（分段式，不是文件夹书签） ── -->
 <div class="tabbar">
@@ -89,7 +92,7 @@
         <h2>路由规则</h2>
         <span class="hint">自上而下匹配，命中即停；一条规则可含多个目标。改动即时保存，点「重启」生效</span>
         <div class="spacer"></div>
-        <button class="btn btn-sm" id="btnRuleSort">按最具体优先排序</button>
+        <button class="btn btn-sm" id="btnRuleSort" title="前缀长的（/32 比 /24 具体）排前面，带端口条件的更靠前；本机自身 / 环回（127.0.0.0/8）类规则放最后——它是兜底，不跟内网网段抢位置；停用的规则原地不动">按优先级排序</button>
         <button class="btn btn-sm" id="btnRuleOverlap">检查重叠</button>
         <button class="btn btn-sm btn-primary" id="btnRuleAdd">添加规则</button>
       </div>
@@ -152,8 +155,8 @@
 
       <div class="card">
         <div class="card-head">
-          <h2>与 Clash 共存</h2>
-          <span class="hint">看内网数据会走哪、走得对不对（只读，不改任何设置）</span>
+          <h2>与其它代理共存</h2>
+          <span class="hint">看内网数据会走哪、走得对不对（只读，不改任何设置）· 实测环境：Clash Verge v2.5.2</span>
           <div class="spacer"></div>
           <button class="btn btn-sm" id="btnClashCheck">重新检测</button>
         </div>
@@ -161,6 +164,9 @@
           <div class="clash-state" id="clashState">尚未检测。点右上角「重新检测」。</div>
           <div id="clashDetail"></div>
           <div class="hint" id="loopInfo">环路检测：—</div>
+          <div class="hint">检测依据是 Windows 的**系统代理设置**（注册表里的"代理服务器/绕过列表"）——
+            不限于 Clash，任何装到系统代理上的工具都一样适用；实测与 Clash Verge v2.5.2 一致。
+            如果这台机器压根没启用系统代理，本页会直接判定正常。</div>
           <div class="field" id="clashFixWrap" hidden>
             <label>把下面这段填进 Clash Verge 的「绕过地址」
               <em>入口：Clash Verge → 设置 → 系统代理 那一行【左侧的小齿轮】→ 「代理绕过设置」。

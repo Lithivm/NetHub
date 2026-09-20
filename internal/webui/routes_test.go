@@ -164,3 +164,51 @@ func TestAddDirectRoute(t *testing.T) {
 		t.Error("链名 direct 应该被拒绝")
 	}
 }
+
+// 规则开关：切换 + 编辑规则内容时不能把停用状态弄丢。
+func TestRouteEnableSwitch(t *testing.T) {
+	b, _ := newRoutesBackend(t)
+	if err := b.AddRoute("环境A", "172.30.4.0/24", "proxy-a", "", ""); err != nil {
+		t.Fatalf("加规则失败: %v", err)
+	}
+	if !b.GetRoutes()[0].Enabled {
+		t.Error("新加的规则默认应为启用")
+	}
+
+	// 停用
+	if err := b.SetRouteEnabled(0, false); err != nil {
+		t.Fatalf("停用失败: %v", err)
+	}
+	if b.GetRoutes()[0].Enabled {
+		t.Fatal("停用后状态应为 false")
+	}
+
+	// 停用状态下编辑内容（改名字）→ 不能被重新启用
+	if err := b.SaveRoute(0, RouteInput{Name: "环境A-改名", Targets: "172.30.4.0/24", Chain: "proxy-a"}); err != nil {
+		t.Fatalf("编辑失败: %v", err)
+	}
+	r := b.GetRoutes()[0]
+	if r.Enabled {
+		t.Error("编辑停用的规则不该把它重新启用")
+	}
+	if r.Name != "环境A-改名" {
+		t.Errorf("改名没生效: %q", r.Name)
+	}
+
+	// 停用状态下可以加一条同目标规则（多环境共存），启用状态下不行
+	r2 := RouteInput{Name: "环境B", Targets: "172.30.4.0/24", Chain: "proxy-a"}
+	if err := b.SaveRoute(-1, r2); err != nil {
+		t.Fatalf("停用着第一条时，加同目标规则应允许: %v", err)
+	}
+	// 停用第一条 → 第二条能启用
+	if err := b.SetRouteEnabled(0, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.SetRouteEnabled(1, true); err != nil {
+		t.Fatalf("第二条启用应成功: %v", err)
+	}
+	// 现在两条都启用 → 第二条启用时目标已被第一条占着？第一条是停用的 → 仍可
+	if err := b.SetRouteEnabled(0, true); err == nil {
+		t.Error("两条都启用且目标相同时，第二条启用应报冲突")
+	}
+}

@@ -103,11 +103,16 @@ func Parse(raw string) (*Upstream, error) {
 			return nil, fmt.Errorf("auth 参数不是合法的 base64(user:pass)")
 		}
 		s := string(dec)
-		i := strings.Index(s, ":")
-		if i < 0 {
-			return nil, fmt.Errorf("auth 解出来后没有冒号，期望 user:pass")
+		if i := strings.Index(s, ":"); i >= 0 {
+			up.Creds.User, up.Creds.Pass = s[:i], s[i+1:]
+		} else {
+			// 只给了一个 token（没有 user:pass 的写法）。
+			// 真实客户里就有这种（gost 的 `auth=base64(token)`，同事的 snzyy 链），
+			// 当时直接报错"没冒号"，等于这类上游根本用不了。
+			// 约定：整串当口令，用户名为空 —— SOCKS5 的 RFC1929 允许 ULEN=0，
+			// HTTP 代理也能用 `:token` 的形式（见 authHeader）。
+			up.Creds.User, up.Creds.Pass = "", s
 		}
-		up.Creds.User, up.Creds.Pass = s[:i], s[i+1:]
 	}
 	if q := u.Query(); q.Get("secure") == "true" {
 		up.Verify = true

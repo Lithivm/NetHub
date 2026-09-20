@@ -694,3 +694,119 @@ func TestAppsOnlyRuleNoPanic(t *testing.T) {
 		}
 	}
 }
+
+// 规则开关：停用的规则不进匹配、不占目标、不参与排序与重叠判断。
+func TestRouteEnabled(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	c := Default()
+	c.Chains = []Chain{{Name: "tun", Forward: "socks5://127.0.0.1:1080"}}
+	c.Routes = nil
+
+	// 同一段内网地址，两条规则指向不同链（多环境现场就是这么用的）
+	if err := c.AddRoute(Route{Name: "环境A", Targets: []string{"172.30.4.0/24"}, Chain: "tun"}); err != nil {
+		t.Fatalf("加环境A失败: %v", err)
+	}
+	dup := Route{Name: "环境B", Targets: []string{"172.30.4.0/24"}, Chain: "tun"}
+	dup.SetEnabled(false)
+	if err := c.AddRoute(dup); err != nil {
+		t.Fatalf("停用的重复规则应允许共存: %v", err)
+	}
+	// 两条都启用时 —— 必须报“目标已被占”
+	if err := c.AddRoute(Route{Name: "环境C", Targets: []string{"172.30.4.0/24"}, Chain: "tun"}); err == nil {
+		t.Error("两条都启用时，重复目标应被拒绝")
+	}
+
+	// 存盘 → 读回：开关要保留，缺省视为启用
+	if err := c.SaveAs(path); err != nil {
+		t.Fatalf("保存失败: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("载入失败: %v", err)
+	}
+	if !got.Routes[0].IsEnabled() {
+		t.Error("第 1 条没写 enabled 应视为启用")
+	}
+	if got.Routes[1].IsEnabled() {
+		t.Error("显式 false 的规则应视为停用")
+	}
+	// 停用的规则不参与匹配（引擎侧由 toRules 过滤，这里验 config 侧的判断）
+	if names := got.EnabledRoutes(); len(names) != 1 || names[0].Name != "环境A" {
+		t.Errorf("启用规则集 = %+v", names)
+	}
+	// 停用当前那条 → 第二条（停用的）不参与“被覆盖/冲突”结论
+	if sh := got.ShadowedTargets(1); len(sh) != 0 {
+		t.Errorf("停用的规则不该被判成被覆盖: %v", sh)
+	}
+	if ov := got.CheckOverlaps(); len(ov) != 0 {
+		t.Errorf("停用的规则之间不该报重叠: %+v", ov)
+	}
+	// 排序：停用的原地不动
+	got.SortRoutesBySpecificity()
+	if got.Routes[1].Name != "环境B" {
+		t.Errorf("停用的规则应保持原位，得到 %+v", []string{got.Routes[0].Name, got.Routes[1].Name})
+	}
+}
+
+// 停用的规则引用不存在的链时允许载入（可以把某环境的规则整套停着放着），
+// 但启用后存盘必须报错（这时候才需要补链）。
+func TestDisabledRuleMissingChain(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	c := Default()
+	c.Chains = []Chain{{Name: "tun", Forward: "socks5://127.0.0.1:1080"}}
+	c.Routes = []Route{{Name: "别的环境", Targets: []string{"10.9.9.0/24"}, Chain: "不存在的链"}}
+	if err := c.SaveAs(path); err != nil {
+		t.Fatalf("保存失败: %v", err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("缺省启用时引用不存在的链，应该报错才对")
+	}
+
+	// 停用后 → 可以载入
+	raw, _ := os.ReadFile(path)
+	_ = os.WriteFile(path, []byte(strings.Replace(string(raw), "chain: 不存在的链",
+		"chain: 不存在的链\n      enabled: false", 1)), 0o600)
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("停用后引用不存在的链应允许: %v", err)
+	}
+	if got.Routes[0].IsEnabled() {
+		t.Fatal("这条应该是停用的")
+	}
+	// 直接把它启用再校验 → 必须报错
+	got.Routes[0].SetEnabled(true)
+	if err := got.Validate(); err == nil {
+		t.Error("启用后引用不存在的链，校验必须报错")
+	}
+}
+
+// 自动排序：把“本机自身/环回”（127.0.0.0/8）排到最底下，其余按最具体优先。
+func TestSortPutsLoopbackLast(t *testing.T) {
+	c := Default()
+	c.Chains = []Chain{{Name: "tun", Forward: "socks5://127.0.0.1:1080"}}
+	c.Routes = []Route{
+		{Name: "Localhost", Targets: []string{"127.0.0.1/32"}, Chain: DirectChain},
+		{Name: "大网段", Targets: []string{"10.0.0.0/8"}, Chain: "tun"},
+		{Name: "窄段", Targets: []string{"10.1.2.0/24"}, Chain: "tun"},
+		{Name: "环回段", Targets: []string{"127.0.0.0/8"}, Chain: DirectChain},
+	}
+	if !c.SortRoutesBySpecificity() {
+		t.Fatal("应该需要重排")
+	}
+	got := []string{}
+	for _, r := range c.Routes {
+		got = append(got, r.Name)
+	}
+	want := []string{"窄段", "大网段", "Localhost", "环回段"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("排序结果 = %v，期望 %v", got, want)
+		}
+	}
+	// 已经排好 → 再点一次不该有改动
+	if c.SortRoutesBySpecificity() {
+		t.Error("已经排好时不该报有改动（否则按钮每次都说“整理过了”）")
+	}
+}

@@ -172,6 +172,13 @@ type Route struct {
 	Ports   []string `yaml:"ports,omitempty"` // 端口/区间，可多个；留空 = 任意端口
 	Chain   string   `yaml:"chain"`           // 动作：走哪条链，或 direct / block
 
+	// Enabled 规则开关（缺省 = 启用，兼容老配置）。
+	// 为什么要它：一台机器上常常堆着十几个内网环境的规则（不同客户、不同网段），
+	// 但同时只应有少数几条生效 —— 停用的规则**不进过滤器也不进匹配**，
+	// 于是既不会互相冲突，也不会白白把包拉进用户态（零开销，不是“匹配到再忽略”）。
+	// 用指针：区分"没写"（= 启用）与"写了 false"（= 停用）。
+	Enabled *bool `yaml:"enabled,omitempty"`
+
 	// LocalNets 仅当本机的网卡地址落在这些网段里时，这条规则才生效（A16）。
 	// 空 = 总是生效。用于“公司网走隧道、家里直连”这类场景，不用手动改配置。
 	LocalNets []string `yaml:"local_nets,omitempty"`
@@ -188,6 +195,12 @@ type Route struct {
 
 // IsDirect 这条规则的动作是不是直连（不走代理）。
 func (r Route) IsDirect() bool { return r.Chain == DirectChain }
+
+// IsEnabled 规则是否生效（没写 Enabled = 启用）。
+func (r Route) IsEnabled() bool { return r.Enabled == nil || *r.Enabled }
+
+// SetEnabled 改开关（nil 指针 → 明确写成 true/false，保证存盘后状态确定）。
+func (r *Route) SetEnabled(on bool) { v := on; r.Enabled = &v }
 
 // IsBlock 这条规则的动作是不是阻断（丢弃）。
 func (r Route) IsBlock() bool { return r.Chain == BlockChain }
@@ -417,7 +430,11 @@ func (c *Config) Validate() error {
 		}
 	}
 	for i, r := range c.Routes {
-		if r.NeedsChain() && !seen[r.Chain] {
+		// 停用的规则：只查“写法对不对”，不查链是否存在 ——
+		// 这样就允许把“某客户环境”的规则整套停着放着（链删了也先不管），
+		// 以后真要启用它时再存盘会报错，那时再补链。
+		enabled := r.IsEnabled()
+		if enabled && r.NeedsChain() && !seen[r.Chain] {
 			return fmt.Errorf("第 %d 条规则%s: 引用了不存在的链 %q", i+1, r.Describe(), r.Chain)
 		}
 		if len(r.Targets) == 0 && len(r.Apps) == 0 {
@@ -995,6 +1012,9 @@ func (c *Config) ShadowedTargets(i int) []string {
 		return nil
 	}
 	rt := c.Routes[i]
+	if !rt.IsEnabled() {
+		return nil // 停用的规则谈不上“被覆盖”
+	}
 	var out []string
 	for _, t := range rt.Targets {
 		tn := targetNet(t)
@@ -1004,6 +1024,9 @@ func (c *Config) ShadowedTargets(i int) []string {
 		covered := false
 		for j := 0; j < i && !covered; j++ {
 			r := c.Routes[j]
+			if !r.IsEnabled() {
+				continue // 前面那条本来就是关着的，盖不住谁
+			}
 			if !PortsCover(r.Ports, rt.Ports) {
 				continue // 端口没被盖住，那这条还有活干
 			}
@@ -1046,15 +1069,37 @@ func netContains(outer, inner *net.IPNet) bool {
 
 // SortRoutesBySpecificity 按“最具体优先”重排：前缀长（/32 → /24）的靠前，
 // 同前缀时带端口条件的靠前；同具体程度保持原有相对顺序。
+//
+// 两个例外（都是**不改变行为**的整理）：
+//   - “本机自身/环回”类（127.0.0.0/8）**永远排到最后** —— 它的语义是兜底
+//     （“别把我们自己的流量拿去代理”），而不是“最具体的例外”；
+//     只覆盖环回地址，与任何内网网段不重叠，所以挪到最后不会抢谁的位置。
+//   - 停用的规则原地不动（用户摆在那里就是“备着用”）。
+//
 // 返回是否有改动。
 func (c *Config) SortRoutesBySpecificity() bool {
 	type key struct {
 		prefix int
 		ports  int
+		self   bool // “本机自身/环回”类 → 永远排最后
 	}
 	keys := make([]key, len(c.Routes))
 	sorted := true
+	var live []int // 参与排序的（启用的、非兜底类）规则下标；停用的原地不动
+	var self []int // “本机自身/环回”类：永远排最后
+	var liveAll []int
 	for i, r := range c.Routes {
+		if !r.IsEnabled() {
+			keys[i] = key{-1, -1, false}
+			continue
+		}
+		liveAll = append(liveAll, i)
+		if selfRule(r) {
+			self = append(self, i)
+			keys[i] = key{-1, -1, true}
+			continue
+		}
+		live = append(live, i)
 		best := 0
 		for _, t := range r.Targets {
 			if j := strings.IndexByte(t, '/'); j >= 0 {
@@ -1063,35 +1108,67 @@ func (c *Config) SortRoutesBySpecificity() bool {
 				}
 			}
 		}
-		keys[i] = key{best, len(r.Ports)}
-		if i > 0 {
-			p, q := keys[i-1], keys[i]
-			if q.prefix > p.prefix || (q.prefix == p.prefix && q.ports > 0 && p.ports == 0) {
+		keys[i] = key{best, len(r.Ports), false}
+	}
+	for k := 1; k < len(liveAll); k++ {
+		p, q := keys[liveAll[k-1]], keys[liveAll[k]]
+		if q.self != p.self {
+			if !q.self { // 非兜底类跑到兜底类后面了 → 需要把兜底类挪到后面
 				sorted = false
+				break
 			}
+			continue // 兜底类已在后面 → 正是我们要的顺序
+		}
+		if q.self {
+			continue // 兜底类之间保持原顺序
+		}
+		if q.prefix > p.prefix || (q.prefix == p.prefix && q.ports > 0 && p.ports == 0) {
+			sorted = false
+			break
 		}
 	}
 	if sorted {
 		return false
 	}
-	idx := make([]int, len(c.Routes))
-	for i := range idx {
-		idx[i] = i
-	}
-	sort.SliceStable(idx, func(a, b int) bool {
-		ka, kb := keys[idx[a]], keys[idx[b]]
+	// slots = 启用规则原来占的位置（升序）；order = 排好后依次填进去的规则下标
+	slots := append([]int{}, liveAll...)
+	order := append([]int{}, live...)
+	sort.SliceStable(order, func(a, b int) bool {
+		ka, kb := keys[order[a]], keys[order[b]]
 		if ka.prefix != kb.prefix {
 			return ka.prefix > kb.prefix
 		}
 		return ka.ports > 0 && kb.ports == 0
 	})
+	order = append(order, self...) // 兜底类接在最后
 	out := make([]Route, len(c.Routes))
-	for i, j := range idx {
-		out[i] = c.Routes[j]
+	copy(out, c.Routes)
+	for k := range slots {
+		out[slots[k]] = c.Routes[order[k]]
 	}
 	c.Routes = out
 	return true
 }
+
+// selfRule 这条规则是不是“本机自身/环回”类（目标全在 127.0.0.0/8 里）。
+func selfRule(r Route) bool {
+	if len(r.Targets) == 0 {
+		return false
+	}
+	for _, t := range r.Targets {
+		n := targetNet(t)
+		if n == nil || !loopbackNet.Contains(n.IP) {
+			return false
+		}
+	}
+	return true
+}
+
+// loopbackNet 127.0.0.0/8。
+var loopbackNet = func() *net.IPNet {
+	_, n, _ := net.ParseCIDR("127.0.0.0/8")
+	return n
+}()
 
 // Precheck 启动前的体检：返回人话报告（✓ 正常 / ⚠ 提醒 / ✗ 问题）。
 // 不修任何东西，只回答“这份配置能不能干活、有没有埋雷”。
@@ -1246,8 +1323,13 @@ func (c *Config) backupLocked() error {
 // 先宽后窄或先窄后宽都由用户说了算，不拦；同一目标不同端口也不拦
 // （10.0.0.5:443 走一条链、10.0.0.5:5432 走另一条，这是端口维度的正当用法）。
 func (c *Config) checkTargetsFree(rt Route, skip int) error {
+	// 停用的规则不参与“目标被占了”的判断：多个环境用同一段内网地址、
+	// 只是指向不同链，正是要靠开关切换的场景（都算冲突就没法配了）。
+	if !rt.IsEnabled() {
+		return nil
+	}
 	for j, r := range c.Routes {
-		if j == skip {
+		if j == skip || !r.IsEnabled() {
 			continue
 		}
 		for _, t := range rt.Targets {
@@ -1468,3 +1550,17 @@ func (c *Config) BackupNow() error { return c.backupLocked() }
 // 开：直连网段也装进过滤器，我们不改包、只数双向字节（换来一点每包开销）。
 // 需要在「连接」页勾选，改完要重启服务（过滤器在启动时装配）。
 func (c *Config) CountDirectEnabled() bool { return c.Tuning.CountDirect }
+
+// EnabledRoutes 只返回启用的规则（引擎、界面统计用）。
+//
+// 注意：真正的"停用"效果发生在 app.toRules（停用规则根本不进规则集与内核过滤器），
+// 这个函数是给需要显式过滤的调用方用的（比如规则模拟器、体检）。
+func (c *Config) EnabledRoutes() []Route {
+	out := make([]Route, 0, len(c.Routes))
+	for _, r := range c.Routes {
+		if r.IsEnabled() {
+			out = append(out, r)
+		}
+	}
+	return out
+}

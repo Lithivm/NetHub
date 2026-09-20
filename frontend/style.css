@@ -429,7 +429,7 @@ code, .mono { font-family: var(--font-mono); }
 .sim-badge.direct { background: var(--ok-soft, var(--card-strong)); color: var(--ok, var(--ink)); }
 .sim-badge.bad { background: var(--error-soft); color: var(--error); }
 .sim-badge.none { background: var(--card-strong); color: var(--muted); }
-.rule-grid  { grid-template-columns: 46px 170px minmax(200px, 1.5fr) 130px minmax(120px, 1fr) 150px; }
+.rule-grid  { grid-template-columns: 34px 46px 160px minmax(200px, 1.5fr) 130px minmax(120px, 1fr) 150px; }
 .conn-grid  { grid-template-columns: 40px 132px minmax(160px, 1.2fr) 62px 92px 74px 84px 84px 92px; }
 /* 上游健康的小圆点（只探测到代理这一段） */
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; vertical-align: middle; background: var(--muted-soft); }
@@ -671,3 +671,25 @@ code, .mono { font-family: var(--font-mono); }
 .pick-row { display: flex; align-items: center; gap: var(--s2); padding: 3px 4px; border-radius: 4px; cursor: pointer; }
 .pick-row:hover { background: var(--bg-soft); }
 .pick-row .dim { margin-left: auto; font-size: var(--fs-xs); }
+
+/* 规则开关（点一下即存）：只表示"这条规则现在生效吗"，不抢主操作的视觉重量 */
+.rule-switch { width: 30px; height: 16px; border-radius: 9px; border: 1px solid var(--line);
+  background: var(--muted-soft); position: relative; cursor: pointer; padding: 0; }
+.rule-switch::after { content: ''; position: absolute; top: 1px; left: 1px; width: 12px; height: 12px;
+  border-radius: 50%; background: #fff; transition: left .12s ease; }
+.rule-switch.is-on { background: var(--primary); border-color: var(--primary); }
+.rule-switch.is-on::after { left: 15px; }
+.rule-switch:disabled { opacity: .5; cursor: default; }
+/* 停用的规则整行淡化 —— 一眼能看出"现在生效的是哪几条" */
+.trow.is-off { opacity: .45; }
+.trow.is-off .rule-switch { opacity: 1; }
+
+/* 常驻告警条：只在红线问题（内网被别的代理接管）出现，修好自动消失 */
+.noticebar { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap;
+  padding: 6px var(--s4); font-size: var(--fs-sm); border-bottom: 1px solid var(--line); }
+.noticebar.is-error { background: #fdeaea; color: #8a1f1f; border-bottom-color: #f3c9c9; }
+.noticebar.is-warn  { background: #fdf6e3; color: #7a5a12; border-bottom-color: #f0e0b0; }
+.noticebar .nb-title { font-weight: 600; }
+.noticebar .nb-text { flex: 1; min-width: 200px; }
+body.theme-dark .noticebar.is-error { background: #3a1f1f; color: #f0b4b4; border-bottom-color: #5a2b2b; }
+body.theme-dark .noticebar.is-warn  { background: #3a3320; color: #e8d9a8; border-bottom-color: #5a4d2b; }

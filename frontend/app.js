@@ -119,7 +119,7 @@ async function sortRoutes() {
   try {
     await call('SortRoutes');
     await loadRoutes();
-    toast('已整理规则顺序', '越具体（/32、带端口）的排在越前面', 'success');
+    toast('已整理规则顺序', '具体的排前面（/32、带端口），本机自身 / 环回类放最后', 'success');
   } catch (e) { fail(e); }
 }
 
@@ -770,7 +770,7 @@ async function loadRoutes() {
   t.replaceChildren();
 
   const head = el('div', 'trow thead rule-grid');
-  ['#', '规则名', '目标 IP / CIDR', '走哪条链 / 直连', '说明（该链备注）', ''].forEach(h =>
+  ['开', '#', '规则名', '目标 IP / CIDR', '走哪条链 / 直连', '说明（该链备注）', ''].forEach(h =>
     head.appendChild(el('div', 'cell', h)));
   t.appendChild(head);
 
@@ -781,6 +781,32 @@ async function loadRoutes() {
 
   routes.forEach(r => {
     const row = el('div', 'trow rule-grid');
+    if (!r.enabled) row.classList.add('is-off');
+
+    // 规则开关：一下点到位（现场要在多个内网环境之间来回切，不能每次弹表单）
+    const swCell = el('div', 'cell');
+    const sw = el('button', 'rule-switch' + (r.enabled ? ' is-on' : ''));
+    sw.type = 'button';
+    sw.title = r.enabled
+      ? '已启用 —— 点一下停用（停用后不进匹配、不占目标，也不进内核过滤器）'
+      : '已停用 —— 点一下启用';
+    sw.setAttribute('aria-pressed', r.enabled ? 'true' : 'false');
+    sw.onclick = async () => {
+      sw.disabled = true;
+      try {
+        await call('SetRouteEnabled', r.index, !r.enabled);
+        await loadRoutes();
+        toast(r.enabled ? '已停用规则' : '已启用规则',
+          (r.name || '（未命名）') + (r.enabled ? '：不再接管它的目标' : '：现在开始接管'),
+          'success');
+      } catch (e) {
+        sw.disabled = false;
+        fail(e);
+      }
+    };
+    swCell.appendChild(sw);
+    row.appendChild(swCell);
+
     const idxCell = el('div', 'cell');
     idxCell.appendChild(el('span', 'idx', String(r.index + 1)));
     row.appendChild(idxCell);
@@ -1018,8 +1044,58 @@ async function delRoute(i) {
 
 /* ═══════════════ Clash 共存检测 ═══════════════ */
 
+/* 常驻告警条：把"内网可能被 Clash 接管"这种红线从日志提到界面上。
+   它不自动消失 —— 只有检测结果变成 OK 才隐。这样即使人当时不在电脑前，回来也能看到。 */
+function noticeBar(kind, title, text, actionLabel, actionFn) {
+  const bar = document.getElementById('noticeBar');
+  bar.replaceChildren();
+  if (!kind) { bar.hidden = true; return; }
+  bar.hidden = false;
+  bar.className = 'noticebar is-' + kind;
+  bar.appendChild(el('span', 'nb-title', title));
+  if (text) bar.appendChild(el('span', 'nb-text', text));
+  if (actionLabel && actionFn) bar.appendChild(btn(actionLabel, 'btn btn-xs', actionFn));
+  bar.appendChild(btn('详情', 'btn btn-xs', () => {
+    // 直接跳到「诊断」页的 Clash 共存卡，那里有逐条走向与修法
+    showPage('diag');
+    const c = document.getElementById('clashDetail');
+    if (c) c.scrollIntoView({ block: 'center' });
+  }));
+}
+
+/* 内网被交给 Clash 是红线（DNS 外泄/封号），所以用它驱动常驻横幅。 */
+function updateClashBar(v) {
+  if (!v) { noticeBar(null); return; }
+  if (v.coverage && v.coverage.ok === false && (v.coverage.missed || []).length) {
+    const missed = v.coverage.missed;
+    noticeBar('error', '内网可能被其他代理接管（红线）',
+      missed.length + ' 个目标不在系统代理的绕过列表里：' + missed.slice(0, 4).join('; ') +
+        (missed.length > 4 ? ' 等' : '') +
+        '　—— 这几个不在系统代理的绕过列表里，按域名访问内网时**可能**先交给它（它用自己的 DNS 解析，内网域名有出内网的风险）· 实测环境：Clash Verge v2.5.2',
+      '复制要加的网段', async () => {
+        const list = (v.bypassList || missed.join(';'));
+        try {
+          await navigator.clipboard.writeText(list);
+          toast('已复制', '粘到 Clash Verge → 设置 → 系统代理 → 绕过地址：' + list, 'success');
+        } catch (e) {
+          toast('复制失败，请手动复制', list, 'warn');
+        }
+      });
+    return;
+  }
+  noticeBar(null);
+}
+
+
+/* 开机与轮询用：只读注册表的覆盖结果（便宜），驱动常驻告警条。 */
+async function refreshClashBar() {
+  let c;
+  try { c = await call('ClashCoverage'); } catch (e) { return; }
+  updateClashBar({ coverage: c, bypassList: ((c && c.missed) || []).join(';') });
+}
 
 function renderClash(v) {
+  updateClashBar(v);
   const st = document.getElementById('clashState');
   const good = v.allCorrect && v.publicOk;
   st.textContent = (v.headline ? v.headline + '\n' : '') + (v.verdict || '');
@@ -1420,6 +1496,9 @@ async function boot() {
 
   // 状态轮询【先注册】：任何面板加载失败都不能让状态栏冻在启动前的快照上。
   setInterval(refreshState, 1500);
+  // Clash 绕过覆盖：开机就要挂常驻告警条，之后每分钟复核一次（只读注册表，很便宜）
+  refreshClashBar();
+  setInterval(refreshClashBar, 60000);
   // 连接列表只看当前页：不在这一页就不拉，省得白跑
   setInterval(() => {
     const p = document.getElementById('page-conn');
@@ -1515,7 +1594,7 @@ async function checkOverlaps() {
     const c4 = el('div', 'cell dim');
     c4.textContent = o.kind === 'fine'
       ? '不用动：更窄的本来就在前面'
-      : '两种选择：① 就是想让它生效 → 点「按最具体优先排序」；② 就是想让前面那条兜底 → 保持现状即可（这是合法写法）';
+      : '两种选择：① 就是想让它生效 → 点「按优先级排序」；② 就是想让前面那条兜底 → 保持现状即可（这是合法写法）';
     row.appendChild(c4);
     tbl.appendChild(row);
   });

@@ -119,7 +119,7 @@ type ClashItem struct {
 }
 
 // Coverage 绕过覆盖：内网目标（域名 + 网段代表 IP）是否都命中了绕过列表。
-// 未覆盖 = 会被交给 Clash = 红线。
+// 未覆盖 = 可能被交给 Clash = 红线。
 type Coverage struct {
 	Checked []string `json:"checked"`
 	Missed  []string `json:"missed"`
@@ -321,12 +321,19 @@ func wildcardMatch(ent, s string) bool {
 // clashCoverage 轻量巡检：只读注册表 + 本地匹配，**不发任何网络请求**，
 // 所以可以高频跑（后台每 60 秒一次）。
 func (b *Backend) clashCoverage() Coverage {
-	pm := readProxyMode()
+	return coverageFor(b.a.Cfg, readProxyMode())
+}
+
+// coverageFor 是 clashCoverage 的纯函数形式（测试用：不碰真实注册表）。
+//
+// 重要：本机**根本没开系统代理**（没装 Clash、或装了但没开）时 Mode=="none"，
+// 直接返回 OK ——— 不报错、不打日志、不挂横幅。不能把“没装 Clash”也当成风险。
+func coverageFor(cfg *config.Config, pm ProxyMode) Coverage {
 	if pm.Mode == "none" {
 		return Coverage{OK: true} // 没开系统代理 = 没有泄漏面
 	}
 	var c Coverage
-	for _, t := range b.clashTargets() {
+	for _, t := range clashTargets(cfg) {
 		c.Checked = append(c.Checked, t)
 		if !proxyBypassHit(t, pm.BypassRaw) {
 			c.Missed = append(c.Missed, t)
@@ -336,11 +343,11 @@ func (b *Backend) clashCoverage() Coverage {
 	return c
 }
 
-// clashTargets 必须保证不被交给 Clash 的内网目标：
+// clashTargets 必须保证不被交给系统代理的内网目标：
 //   - hosts 里的内网域名（按域名访问时才会踩到 DNS 那道坎）
-//   - 每条规则网段的代表 IP（按 IP 访问同样不能进 Clash）
-func (b *Backend) clashTargets() []string {
-	entries := hostsEntriesFrom(b.a.Cfg)
+//   - 每条**启用**规则网段的代表 IP（按 IP 访问同样不能进代理）
+func clashTargets(cfg *config.Config) []string {
+	entries := hostsEntriesFrom(cfg)
 
 	var out []string
 	seen := map[string]bool{}
@@ -361,7 +368,12 @@ func (b *Backend) clashTargets() []string {
 			add(f[1])
 		}
 	}
-	for _, rt := range b.a.Cfg.Routes {
+	for _, rt := range cfg.Routes {
+		// 停用的规则不参与：那些环境现在不由我们接管，
+		// 也就没有“它该走直连”这一说 —— 否则会把同事的停用环境 IP 也报成红线。
+		if !rt.IsEnabled() {
+			continue
+		}
 		for _, t := range rt.Targets {
 			add(firstUsableHost(t))
 		}
@@ -409,16 +421,16 @@ func (b *Backend) clashWatch() {
 		}
 		wasOK = c.OK
 		if !c.OK {
-			b.a.Bus.Error("⚠ 内网目标会被交给 Clash（DNS 外泄风险）：%s", strings.Join(c.Missed, ", "))
-			b.a.Bus.Error("  修法：把 %s 加进 Clash Verge 的「绕过地址」（设置 → 系统代理 左侧小齿轮）",
+			b.a.Bus.Error("⚠ 内网目标可能被交给 Clash（DNS 外泄风险）：%s", strings.Join(c.Missed, ", "))
+			b.a.Bus.Error("  修法：把 %s 加进系统代理工具的「绕过地址」（Clash Verge：设置 → 系统代理 左侧小齿轮）",
 				strings.Join(c.Missed, ";"))
 			b.emit("notify", NotifyView{
-				Title: "内网可能被 Clash 代理",
+				Title: "内网可能被其他代理接管",
 				Text:  "以下内网目标不在 Clash 绕过列表里，请尽快处理：" + strings.Join(c.Missed, ";"),
 				Kind:  "error",
 			})
 		} else {
-			b.a.Bus.Info("✓ Clash 绕过覆盖已恢复，内网目标不会再交给代理")
+			b.a.Bus.Info("✓ 系统代理的绕过覆盖已恢复，内网目标不会再被它接管")
 			b.emit("notify", NotifyView{Title: "Clash 绕过已恢复", Text: "内网目标不再经过代理", Kind: "info"})
 		}
 	}
@@ -436,6 +448,12 @@ func (b *Backend) clashWatch() {
 // 而它压根无关紧要（浏览器既然走直连，Clash 能不能到内网就不影响任何事），
 // 摆出来只会制造焦虑。路的选择由系统代理设置 + 绕过列表决定。
 // 只有在那条路失败时，才补测另一条路用于定位。
+// ClashCoverage 只读注册表的“绕过覆盖”结果（不发任何网络请求，很便宜）。
+//
+// 存在的理由：界面开机时就要能判断“内网会不会/可能被 Clash 接管”并挂出常驻告警条，
+// 而完整的 ClashCheck 要实测到 HTTP 层（有几秒开销 + 启动瞬间还能误报），不适合轮询。
+func (b *Backend) ClashCoverage() Coverage { return b.clashCoverage() }
+
 func (b *Backend) ClashCheck() ClashCheckView {
 	pm := readProxyMode()
 	v := ClashCheckView{Mode: pm.Mode, Server: pm.Server, PacURL: pm.PacURL}
@@ -576,7 +594,7 @@ func (b *Backend) ClashCheck() ClashCheckView {
 	if len(misrouted) > 0 {
 		v.NeedFix = true
 		v.BypassList = strings.Join(misrouted, ";")
-		base := fmt.Sprintf("有 %d 个内网域名会被交给 Clash（红线：Clash 会用自己的 DNS 解析，内网域名可能出内网）：%s。",
+		base := fmt.Sprintf("有 %d 个内网域名可能被交给 Clash（红线：Clash 会用自己的 DNS 解析，内网域名可能出内网）：%s。",
 			len(misrouted), strings.Join(misrouted, ", "))
 		if pm.Mode == "pac" {
 			v.Verdict = base + "PAC 模式下绕过列表不生效，建议改用普通系统代理，再按下方内容配绕过。"

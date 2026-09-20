@@ -38,6 +38,9 @@ func (c *Config) CheckOverlaps() []Overlap {
 	for i := 0; i < n; i++ {
 		for j := i + 1; j < n; j++ {
 			a, b := c.Routes[i], c.Routes[j]
+			if !a.IsEnabled() || !b.IsEnabled() {
+				continue // 停用的规则不参与“互相影响”的结论
+			}
 			// 端口：两边都要"有交集"才可能互抢
 			if !portsIntersect(a.Ports, b.Ports) {
 				continue
