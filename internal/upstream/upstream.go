@@ -62,6 +62,37 @@ type Upstream struct {
 	ServerName string
 }
 
+// looksMasked 这串是不是脱敏占位符（`***` / `xxx` / `••••` 这类）。
+//
+// 只认“全是同一种占位字符且长≥3”—— 避免把短口令（如 `xx`）误判。
+func looksMasked(s string) bool {
+	s = strings.TrimSpace(s)
+	if len([]rune(s)) < 3 {
+		return false
+	}
+	for _, r := range s {
+		switch r {
+		case '*', 'x', 'X', '•', '·', '▪', '■':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// maskOf 报错里指一下是哪一段被抹了。
+func maskOf(user, pass string) string {
+	switch {
+	case looksMasked(user) && looksMasked(pass):
+		return "账号与口令都是"
+	case looksMasked(pass):
+		return "口令是"
+	case looksMasked(user):
+		return "账号是"
+	}
+	return "凭据是"
+}
+
 // Parse 解析上游 URL。
 func Parse(raw string) (*Upstream, error) {
 	raw = strings.TrimSpace(raw)
@@ -113,6 +144,15 @@ func Parse(raw string) (*Upstream, error) {
 			// HTTP 代理也能用 `:token` 的形式（见 authHeader）。
 			up.Creds.User, up.Creds.Pass = "", s
 		}
+	}
+	// 脱敏占位符不能当凭据用。
+	//
+	// 真实坑：从「导出配置（无凭据）」或文档里拷回来的地址里，口令被抹成 `***` ——
+	// 以前它会原样通过校验，运行时才报“认证被拒”，看起来像上游坏了。
+	// 这属于“配置一看就是错的”，应该在解析时就挡住、并说清楚怎么改。
+	if looksMasked(up.Creds.User) || looksMasked(up.Creds.Pass) {
+		return nil, fmt.Errorf("凭据是脱敏占位符（%s）—— 这是「导出配置（无凭据）」或文档里的写法，"+
+			"请换成真实用户名/口令；若只是想先占位，把 auth= 整段删掉", maskOf(up.Creds.User, up.Creds.Pass))
 	}
 	if q := u.Query(); q.Get("secure") == "true" {
 		up.Verify = true

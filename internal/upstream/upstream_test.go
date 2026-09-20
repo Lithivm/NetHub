@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"io"
 	"math/big"
 	"net"
@@ -265,3 +266,41 @@ func fakeSocks5(t *testing.T, user, pass string) (string, func()) {
 	}()
 	return ln.Addr().String(), func() { ln.Close() }
 }
+
+// 脱敏占位符不能当凭据用。
+//
+// 真实坑：从「导出配置（无凭据）」或文档里拷回来的地址，口令被抹成 `***` ——
+// 以前它原样通过校验，运行时才报"认证被拒"，看起来像上游坏了。
+func TestRejectMaskedCreds(t *testing.T) {
+	bad := []string{
+		"socks5://u:***@1.2.3.4:1080",
+		"socks5://***:***@1.2.3.4:1080",
+		"socks5+tls://1.2.3.4:10080?auth=" + cod("u:***"),
+		"socks5+tls://1.2.3.4:10080?auth=" + cod("****"),
+		"socks5://u:xxxx@1.2.3.4:1080",
+	}
+	for _, raw := range bad {
+		_, err := Parse(raw)
+		if err == nil {
+			t.Errorf("%s 的凭据是占位符，应被拒绝", raw)
+			continue
+		}
+		if !strings.Contains(err.Error(), "占位符") {
+			t.Errorf("%s 的报错要说清是占位符，得到 %v", raw, err)
+		}
+	}
+	// 别误伤：真口令、短口令、无凭据都要照常通过
+	good := []string{
+		"socks5://u:p@1.2.3.4:1080",
+		"socks5://u:xx@1.2.3.4:1080", // 两个字符不算占位符
+		"socks5://u:P@ss**word@1.2.3.4:1080",
+		"socks5://1.2.3.4:1080",
+	}
+	for _, raw := range good {
+		if _, err := Parse(raw); err != nil {
+			t.Errorf("%s 应该能解析，得到 %v", raw, err)
+		}
+	}
+}
+
+func cod(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
