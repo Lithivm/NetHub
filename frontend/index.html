@@ -264,10 +264,10 @@
         </div>
         <div class="card-body form">
           <div class="dial-grid">
-            <label>单次超时（秒）<input type="number" min="1" max="30" step="1" class="input input-sm" id="setDialTimeout"></label>
-            <label>总预算（秒）<input type="number" min="1" max="60" step="1" class="input input-sm" id="setDialBudget"></label>
-            <label>竞速起跑（毫秒）<input type="number" min="0" max="2000" step="50" class="input input-sm" id="setRaceAfter"></label>
-            <label>预热会话<input type="number" min="0" max="8" step="1" class="input input-sm" id="setWarm"></label>
+            <label>单次超时<span class="unit-wrap"><input type="number" min="1" max="30" step="1" class="input input-sm" id="setDialTimeout"><span class="unit">秒</span></span></label>
+            <label>总预算<span class="unit-wrap"><input type="number" min="1" max="60" step="1" class="input input-sm" id="setDialBudget"><span class="unit">秒</span></span></label>
+            <label>竞速起跑<span class="unit-wrap"><input type="number" min="0" max="2000" step="50" class="input input-sm" id="setRaceAfter"><span class="unit">毫秒</span></span></label>
+            <label>预热会话<span class="unit-wrap"><input type="number" min="0" max="8" step="1" class="input input-sm" id="setWarm"></span></label>
             <button class="btn btn-sm" id="btnDialReset">重置为默认</button>
           </div>
           <div class="hint" id="dialHint"></div>        </div>

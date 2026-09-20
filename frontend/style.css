@@ -725,3 +725,15 @@ body.theme-dark .noticebar.is-warn  { background: #3a3320; color: #e8d9a8; borde
 }
 /* 预热会话落在第二行第一列（与“单次超时”同一列，左边缘对齐）；按钮靠右 */
 .dial-grid button { grid-column: 3; justify-self: end; }
+
+/* 无凭据 = 需要你补的“缺东西”，用红色（绿色是“带凭据”的，别混） */
+.cred-tag.is-missing { color: var(--error); }
+
+/* 单位写在输入框里面右侧：这样四个标签都只占 4 个字，输入框能真正对齐 */
+.dial-grid .unit-wrap { position: relative; display: inline-flex; align-items: center; }
+.dial-grid .unit-wrap input { padding-right: 26px; }
+.dial-grid .unit {
+  position: absolute; right: 8px;
+  font-size: var(--fs-xs); color: var(--muted);
+  pointer-events: none;   /* 别挡住点输入框 */
+}

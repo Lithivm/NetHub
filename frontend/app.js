@@ -588,7 +588,8 @@ async function loadChains() {
         '要看/改真实地址：点「编辑」，里面就是完整地址。';
       upCell.appendChild(tag);
     } else {
-      const tag = el('span', 'cred-tag', '  无凭据');
+      // 没凭据是“要你补”的状态，不能用跟“带凭据”一样的绿色（用户反馈：看着像好事）
+      const tag = el('span', 'cred-tag is-missing', '  无凭据');
       tag.title = '这条链的上游不需要认证（地址里没有账号口令）';
       upCell.appendChild(tag);
     }
