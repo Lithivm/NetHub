@@ -304,3 +304,131 @@ func TestRejectMaskedCreds(t *testing.T) {
 }
 
 func cod(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+
+// “把域名交给上游”必须在**报文层**真的这样做：SOCKS5 的 ATYP=域名（0x03）。
+// 这条测试是为了防“看起来实现了、其实还是发 IP”（那样上游永远不会自己解析）。
+func TestDialHostSendsDomain(t *testing.T) {
+	got := make(chan string, 1)
+	addr, stop := fakeSocks5Capturing(t, "u", "p", got)
+	defer stop()
+
+	u, err := Parse("socks5://u:p@" + addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := u.DialHost("main.his.com", 8443, 3*time.Second)
+	if err != nil {
+		t.Fatalf("DialHost 失败: %v", err)
+	}
+	defer conn.Close()
+
+	select {
+	case req := <-got:
+		// 请求形如：VER=5 CMD=1 RSV=0 ATYP=3 LEN name PORT(2)
+		if len(req) < 5 {
+			t.Fatalf("CONNECT 请求太短: %x", req)
+		}
+		if req[0] != 0x05 || req[1] != 0x01 {
+			t.Errorf("VER/CMD 不对: %x", req[:2])
+		}
+		if req[3] != 0x03 {
+			t.Fatalf("ATYP 应为 0x03（域名），实际 0x%02x —— 说明还是把 IP 发给上游了", req[3])
+		}
+		if n := int(req[4]); len(req) < 5+n+2 {
+			t.Fatalf("域名长度字段与实际不符: %x", req)
+		} else if string(req[5:5+n]) != "main.his.com" {
+			t.Errorf("域名应为 main.his.com，实际 %q", string(req[5:5+n]))
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("没收到 CONNECT 请求")
+	}
+}
+
+// fakeSocks5Capturing 与 fakeSocks5 相同，但把 CONNECT 请求原文送回 got。
+func fakeSocks5Capturing(t *testing.T, user, pass string, got chan<- string) (string, func()) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("起假上游失败: %v", err)
+	}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				buf := make([]byte, 512)
+				if _, err := c.Read(buf); err != nil {
+					return
+				}
+				if _, err := c.Write([]byte{0x05, 0x02}); err != nil {
+					return
+				}
+				head := make([]byte, 2)
+				if _, err := io.ReadFull(c, head); err != nil {
+					return
+				}
+				uname := make([]byte, head[1])
+				if _, err := io.ReadFull(c, uname); err != nil {
+					return
+				}
+				plen := make([]byte, 1)
+				if _, err := io.ReadFull(c, plen); err != nil {
+					return
+				}
+				passwd := make([]byte, plen[0])
+				if _, err := io.ReadFull(c, passwd); err != nil {
+					return
+				}
+				if string(uname) != user || string(passwd) != pass {
+					_, _ = c.Write([]byte{0x01, 0x01})
+					return
+				}
+				if _, err := c.Write([]byte{0x01, 0x00}); err != nil {
+					return
+				}
+				// CONNECT 请求：读头 4 字节（VER CMD RSV ATYP）再按 ATYP 读地址
+				h := make([]byte, 4)
+				if _, err := io.ReadFull(c, h); err != nil {
+					return
+				}
+				full := append([]byte{}, h...)
+				switch h[3] {
+				case 0x03:
+					l := make([]byte, 1)
+					if _, err := io.ReadFull(c, l); err != nil {
+						return
+					}
+					full = append(full, l[0])
+					host := make([]byte, l[0])
+					if _, err := io.ReadFull(c, host); err != nil {
+						return
+					}
+					full = append(full, host...)
+				case 0x01:
+					b := make([]byte, 4)
+					if _, err := io.ReadFull(c, b); err != nil {
+						return
+					}
+					full = append(full, b...)
+				default:
+					return
+				}
+				port := make([]byte, 2)
+				if _, err := io.ReadFull(c, port); err != nil {
+					return
+				}
+				full = append(full, port...)
+				select {
+				case got <- string(full):
+				default:
+				}
+				_, _ = c.Write([]byte{0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0x1f, 0x90})
+				_, _ = c.Read(buf)
+			}(c)
+		}
+	}()
+	return ln.Addr().String(), func() { ln.Close() }
+}

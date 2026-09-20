@@ -82,7 +82,16 @@ func (b *Backend) OnStartup(ctx context.Context) {
 		b.a.Bus.Info("开始自动启动服务…")
 		if err := b.a.Start(); err != nil {
 			b.a.Bus.Error("自动启动失败（可在界面上手动重试）: %v", err)
+			return
 		}
+		// 启动成功后自动跑一次链路自检：
+		// 打开软件就该知道“哪条链能用、哪条不能”，而不是等人去点按钮。
+		// 稍等一下再跑，避开引擎刚起来那几秒（过滤器/relay 正在装配）。
+		time.Sleep(1200 * time.Millisecond)
+		if b.a.Engine == nil || !b.a.Engine.Running() {
+			return
+		}
+		b.SelfTest()
 	}()
 }
 
@@ -1219,6 +1228,10 @@ func (b *Backend) SelfTest() {
 				if r.AuthOK {
 					live = append(live, u)
 					lastProbe = r
+				} else if r.Err != nil {
+					// 失败也要把**原始错误**留着 —— 否则下面只能报一句
+					// “连不上上游”，现场把日志发给 agent 时就没信息了。
+					lastProbe = r
 				}
 			}
 			if len(live) == 0 {
@@ -1226,7 +1239,10 @@ func (b *Backend) SelfTest() {
 				if lastProbe.Err != nil {
 					errText = lastProbe.Err.Error()
 				}
-				b.a.Bus.Error("[%s] ✗ 代理段不可用：%s（先解决这个，再谈内网目标）", ch.Name, errText)
+				b.a.Bus.Error("[%s] ✗ 代理段不可用（先解决这个，再谈内网目标）", ch.Name)
+				for _, line := range strings.Split(errText, "\n") {
+					b.a.Bus.Error("    %s", line)
+				}
 				bad++
 				b.emit("selftest", ProbeView{Target: ch.Name, OK: false, Err: "代理段不可用：" + errText})
 				continue

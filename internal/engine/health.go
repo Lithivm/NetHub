@@ -222,6 +222,15 @@ func (e *Engine) healthLoop() {
 	defer tk.Stop()
 	e.bus.Info("健康探测已启动：%d 条链，粒度 5s", len(e.cfg.Chains))
 	last := map[string]time.Time{}
+	// 先立即探一轮：否则刚打开界面的那几十秒里，链路页全是“未探过”的灰点，
+	// 用户会以为没生效（实际只是还在等第一个 tick）。
+	for _, ch := range e.cfg.Chains {
+		if ch.ProbeInterval() == 0 {
+			continue
+		}
+		last[ch.Name] = time.Now()
+		e.probeChain(ch)
+	}
 	for {
 		select {
 		case <-e.done:

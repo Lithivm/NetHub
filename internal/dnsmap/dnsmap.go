@@ -196,3 +196,12 @@ func normalizeHost(h string) string {
 	h = strings.TrimSuffix(h, ".")
 	return strings.ToLower(h)
 }
+
+// NewWithLookup 用自定义解析函数建表（测试用：不碰真实 DNS）。
+func NewWithLookup(fn func(string) ([]string, error)) *Map {
+	m := New()
+	if fn != nil {
+		m.lookup = fn
+	}
+	return m
+}
