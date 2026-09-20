@@ -149,10 +149,11 @@
           <h2>链路自检</h2>
           <span class="hint">逐条链去探真实的 hosts 主机（443/80/5432/6446/5000/9056 依次试），回答「这条链现在能不能通」</span>
           <div class="spacer"></div>
+          <button class="btn btn-sm" id="btnSelfTestCopy">复制结果</button>
           <button class="btn btn-sm btn-primary" id="btnSelfTest">开始自检</button>
         </div>
         <div class="card-body form">
-          <pre class="explain-out" id="selfTestOut">点「开始自检」；结果会同时写进运行日志。</pre>
+          <pre class="explain-out" id="selfTestOut">点「开始自检」；结果直接显示在这里（打开软件时也会自动跑一次）。</pre>
         </div>
       </div>
 
@@ -262,16 +263,11 @@
           <span class="hint">一条上游不响应时，等多久换下一条</span>
         </div>
         <div class="card-body form">
-          <div class="input-row">
-            <label style="margin:0">单次超时（秒）</label>
-            <input type="number" min="1" max="30" step="1" class="input input-sm" id="setDialTimeout" style="width:80px">
-            <label style="margin:0 0 0 var(--s3)">总预算（秒）</label>
-            <input type="number" min="1" max="60" step="1" class="input input-sm" id="setDialBudget" style="width:80px">
-            <label style="margin:0 0 0 var(--s3)">竞速起跑（毫秒）</label>
-            <input type="number" min="0" max="2000" step="50" class="input input-sm" id="setRaceAfter" style="width:80px">
-            <label style="margin:0 0 0 var(--s3)">预热会话</label>
-            <input type="number" min="0" max="8" step="1" class="input input-sm" id="setWarm" style="width:64px">
-            <div class="spacer"></div>
+          <div class="dial-grid">
+            <label>单次超时（秒）<input type="number" min="1" max="30" step="1" class="input input-sm" id="setDialTimeout"></label>
+            <label>总预算（秒）<input type="number" min="1" max="60" step="1" class="input input-sm" id="setDialBudget"></label>
+            <label>竞速起跑（毫秒）<input type="number" min="0" max="2000" step="50" class="input input-sm" id="setRaceAfter"></label>
+            <label>预热会话<input type="number" min="0" max="8" step="1" class="input input-sm" id="setWarm"></label>
             <button class="btn btn-sm" id="btnDialReset">重置为默认</button>
           </div>
           <div class="hint" id="dialHint"></div>        </div>

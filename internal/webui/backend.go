@@ -45,6 +45,10 @@ type Backend struct {
 	tray     *Tray
 	quitting bool
 
+	// 最近一次链路自检的结果：界面直接看，不用再翻日志（打开设置页也能看到上次的）。
+	selfTestMu   sync.RWMutex
+	selfTestLast SelfTestReport
+
 	// 自启状态缓存：schtasks 是外部进程，不能在 GetState（前端每 1.5s 调一次）里跑，
 	// 否则会不断创建进程；而且 GUI 子系统没控制台，会表现为窗口一直闪、抢焦点。
 	autoMu      sync.RWMutex
@@ -241,6 +245,29 @@ type ProbeView struct {
 	Port   int    `json:"port"` // 命中的端口，0 = 没连上
 	OK     bool   `json:"ok"`
 	Err    string `json:"err"`
+}
+
+// SelfTestChain 一条链的自检结果。
+// Detail 里是**原始**的报错/说明（一行一条），故意不做“翻译”——现场是把这几行
+// 整段复制给 agent 的，翻成人话就把底层信息抹掉了。
+type SelfTestChain struct {
+	Name   string   `json:"name"`
+	OK     bool     `json:"ok"`
+	Detail []string `json:"detail"`
+}
+
+type SelfTestReport struct {
+	At     string          `json:"at"`
+	Total  int             `json:"total"`
+	Bad    int             `json:"bad"`
+	Chains []SelfTestChain `json:"chains"`
+}
+
+// LastSelfTest 取最近一次自检结果（空 At = 还没跑过）。
+func (b *Backend) LastSelfTest() SelfTestReport {
+	b.selfTestMu.RLock()
+	defer b.selfTestMu.RUnlock()
+	return b.selfTestLast
 }
 
 func logView(l logbus.Line) LogView {
@@ -1215,6 +1242,22 @@ func (b *Backend) SelfTest() {
 
 	go func() {
 		b.a.Bus.Info("=== 链路自检开始（%d 条链）===", len(chains))
+		report := SelfTestReport{Total: len(chains)}
+		// 每条链的结果除了写日志，也攒起来给界面：以前只写日志，界面上一句
+		// “详见上方日志”——可现场根本不知道去哪里看，等于没回答。
+		add := func(name string, ok bool, detail ...string) {
+			report.Chains = append(report.Chains, SelfTestChain{Name: name, OK: ok, Detail: detail})
+			if !ok {
+				report.Bad++
+			}
+		}
+		defer func() {
+			report.At = time.Now().Format("15:04:05")
+			b.selfTestMu.Lock()
+			b.selfTestLast = report
+			b.selfTestMu.Unlock()
+			b.emit("selftest-report", report)
+		}()
 		// 最近真的被访问过的目标：自检优先探它们（端口是真的）
 		recent := b.a.Engine.RecentTargets(64)
 		bad := 0
@@ -1246,11 +1289,14 @@ func (b *Backend) SelfTest() {
 				if lastProbe.Err != nil {
 					errText = lastProbe.Err.Error()
 				}
-				b.a.Bus.Error("[%s] ✗ 代理段不可用（先解决这个，再谈内网目标）", ch.Name)
+				b.a.Bus.Error("[%s] ✗ 代理段不可用", ch.Name)
+				lines := []string{"代理段不可用"}
 				for _, line := range strings.Split(errText, "\n") {
 					b.a.Bus.Error("    %s", line)
+					lines = append(lines, line)
 				}
 				bad++
+				add(ch.Name, false, lines...)
 				b.emit("selftest", ProbeView{Target: ch.Name, OK: false, Err: "代理段不可用：" + errText})
 				continue
 			}
@@ -1310,6 +1356,7 @@ func (b *Backend) SelfTest() {
 				ip = probeIPForChain(b.a.Cfg, ch.Name)
 				if ip == nil {
 					b.a.Bus.Warn("[%s] 找不到可探测的真实主机（hosts 为空且还没有内网连接），跳过", ch.Name)
+					add(ch.Name, true, "跳过：找不到可探测的真实主机（hosts 为空且还没有内网连接）", "代理段本身正常，只是没东西可探")
 					continue
 				}
 				for _, port := range []uint16{443, 80, 5432, 6446, 5000, 9054, 9056} {
@@ -1324,18 +1371,22 @@ func (b *Backend) SelfTest() {
 			if hit > 0 {
 				if guessed {
 					b.a.Bus.Info("[%s] ✓ 端到端可达：%s → %s:%d（端口是从常见端口里试出来的，不代表业务端口）", ch.Name, desc, ip, hit)
+					add(ch.Name, true, fmt.Sprintf("端到端可达：→ %s:%d（端口是猜的，不代表业务端口）", ip, hit), "上游："+desc)
 				} else {
 					b.a.Bus.Info("[%s] ✓ 端到端可达：%s → %s:%d", ch.Name, desc, ip, hit)
+					add(ch.Name, true, fmt.Sprintf("端到端可达：→ %s:%d（最近真的访问过）", ip, hit), "上游："+desc)
 				}
 				b.emit("selftest", ProbeView{Target: ip.String(), Port: hit, OK: true})
 			} else if guessed {
 				// 端口是猜的：不下结论，也不计入“有问题”（以前误报的来源）
 				b.a.Bus.Info("[%s] 代理段与认证都正常；%s 的常见端口没通 —— 内网目标要有过访问记录才测得准，现在不下结论",
 					ch.Name, ip)
+				add(ch.Name, true, "代理段与认证正常；但常见端口都没通", "内网目标要有过访问记录才测得准，现在不下结论")
 				b.emit("selftest", ProbeView{Target: ch.Name, OK: true})
 			} else {
 				b.a.Bus.Error("[%s] ✗ 经该链连不上 %s 的任何端口（上游挂了？上游限制了目标？）", ch.Name, ip)
 				bad++
+				add(ch.Name, false, fmt.Sprintf("经该链连不上 %s 的任何端口", ip), "上游挂了？还是上游限制了目标？")
 				b.emit("selftest", ProbeView{Target: ip.String(), OK: false, Err: "经该链不可达"})
 			}
 		}
@@ -1343,8 +1394,8 @@ func (b *Backend) SelfTest() {
 			b.a.Bus.Info("=== 链路自检通过：%d 条链全部可用 ===", len(chains))
 			b.emit("notify", NotifyView{Title: "链路自检通过", Text: fmt.Sprintf("%d 条链全部可用", len(chains)), Kind: "info"})
 		} else {
-			b.a.Bus.Error("=== 链路自检结束：%d 条链有问题（详见上方日志）===", bad)
-			b.emit("notify", NotifyView{Title: "链路自检有问题", Text: fmt.Sprintf("%d 条链不可用，请看日志", bad), Kind: "error"})
+			b.a.Bus.Error("=== 链路自检结束：%d 条链有问题（结果已显示在「链路自检」框里）===", bad)
+			b.emit("notify", NotifyView{Title: "链路自检有问题", Text: fmt.Sprintf("%d 条链不可用", bad), Kind: "error"})
 		}
 	}()
 }

@@ -703,3 +703,25 @@ body.theme-dark .noticebar.is-warn  { background: #3a3320; color: #e8d9a8; borde
 
 /* 表头与开关列的居中（表头文字默认左对齐，会和居中的开关错开一格） */
 .trow .cell.center { text-align: center; }
+
+/* ── 上游拨号：四个输入框等宽、前三+预热会话一行三个 ─────────────────
+   以前是 input-row 里内联写死 80px/64px 再靠 margin 顶，宽度不齐、第四个还会被挤到截断。 */
+.dial-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--s2) var(--s4);
+  align-items: center;
+}
+.dial-grid label {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  white-space: nowrap;   /* 标签不许拆行，否则输入框会错位 */
+  margin: 0;
+}
+.dial-grid input {
+  flex: 0 0 auto;
+  width: 88px;           /* 四个框同一个宽度 */
+}
+/* 预热会话落在第二行第一列（与“单次超时”同一列，左边缘对齐）；按钮靠右 */
+.dial-grid button { grid-column: 3; justify-self: end; }

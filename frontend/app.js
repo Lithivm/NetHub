@@ -110,7 +110,7 @@ function showPage(name) {
   document.querySelectorAll('.page').forEach(p => p.classList.toggle('is-active', p.id === 'page-' + name));
   if (name === 'log') scrollLogToEnd();
   if (name === 'conn') { loadConns(); loadCountDirect(); }
-  if (name === 'diag') { precheckConfig(true); loadTargetHealth(); loadPatrol(); }
+  if (name === 'diag') { precheckConfig(true); loadTargetHealth(); loadPatrol(); loadLastSelfTest(); }
 }
 
 /* ═══════════════ 规则智能：最具体优先 / 命中查询 ═══════════════ */
@@ -1331,9 +1331,16 @@ function wire() {
   document.getElementById('btnOpenLog').onclick = () => call('OpenLogDir').catch(fail);
   document.getElementById('btnSelfTest').onclick = () => {
     const out = document.getElementById('selfTestOut');
-    if (out) { out.textContent = '正在自检…（逐条链探真实内网主机）'; out.dataset.started = ''; }
+    if (out) out.textContent = '正在自检…（逐条链探真实内网主机）';
     pushLog({ time: now(), level: 'INFO', text: '开始链路自检…' });
     call('SelfTest').catch(fail);
+  };
+  const btnSelfTestCopy = document.getElementById('btnSelfTestCopy');
+  if (btnSelfTestCopy) btnSelfTestCopy.onclick = async () => {
+    const out = document.getElementById('selfTestOut');
+    if (!out || !out.dataset.report) return;
+    try { await navigator.clipboard.writeText(out.dataset.report); toast('已复制', '自检结果已复制到剪贴板', 'success'); }
+    catch { toast('复制失败', '请手动选中复制', 'warn'); }
   };
 
   // 连接页
@@ -1491,17 +1498,34 @@ function wire() {
   R().EventsOn('selftest', p => {
     const text = p.ok ? ('自检通过：' + p.target + ':' + p.port) : ('自检失败：' + p.target + ' ' + (p.err || ''));
     pushLog({ time: now(), level: p.ok ? 'INFO' : 'ERROR', text });
-    appendSelfTest(text);
   });
+  // 自检的整体结果：直接渲染在「链路自检」框里（不用回日志里找）
+  R().EventsOn('selftest-report', r => renderSelfTest(r));
 }
 
-/* 自检结果追加到诊断页的输出框（同时也写运行日志）。 */
-function appendSelfTest(text) {
+/* 自检结果渲染到诊断页的输出框（原样列出每条链，方便整段复制给 agent）。 */
+function renderSelfTest(r) {
   const out = document.getElementById('selfTestOut');
-  if (!out) return;
-  const line = now() + '  ' + text;
-  out.textContent = out.dataset.started ? (out.textContent + '\n' + line) : line;
-  out.dataset.started = '1';
+  if (!out || !r) return;
+  const lines = [];
+  const head = r.bad === 0
+    ? `✓ ${r.total} 条链全部可用（${r.at}）`
+    : `✗ ${r.bad}/${r.total} 条链有问题（${r.at}）`;
+  lines.push(head);
+  for (const c of (r.chains || [])) {
+    lines.push((c.ok ? '  ✓ ' : '  ✗ ') + c.name);
+    for (const d of (c.detail || [])) lines.push('      ' + d);
+  }
+  out.textContent = lines.join('\n');
+  out.dataset.report = lines.join('\n');
+}
+
+/* 打开设置页时把上次结果补上（开机自动跑过一次，不必重复点）。 */
+async function loadLastSelfTest() {
+  try {
+    const r = await call('LastSelfTest');
+    if (r && r.at) renderSelfTest(r);
+  } catch { /* 拿不到就算了，不影响手动自检 */ }
 }
 
 function now() {
