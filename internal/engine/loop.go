@@ -186,7 +186,7 @@ func (e *Engine) chainUpstreams(name string) []string {
 		return nil
 	}
 	if ch, ok := e.cfg.ChainByName(name); ok {
-		return ch.Upstreams()
+		return e.cfg.UpstreamsResolved(ch)
 	}
 	return nil
 }

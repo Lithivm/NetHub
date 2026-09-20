@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -184,4 +185,50 @@ func ensurePathInFile(raw []byte, _ string) []byte {
 		return raw
 	}
 	return []byte("# NetHub 配置 —— 由「导入配置」写入\n" + s)
+}
+
+// ImportConfigFromURL 从 URL 拉一份配置导入（集中更新配置的最小形态）。
+//
+// 刻意只做"手动触发"：自动轮询会引入"谁在什么时候把什么推到我机器上"的问题，
+// 现场排障时最怕这种说不清的变化。要集中管理就先发个链接，让人点一下。
+func (b *Backend) ImportConfigFromURL(rawURL string) (string, error) {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return "", fmt.Errorf("请填配置地址（http/https）")
+	}
+	if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
+		return "", fmt.Errorf("只支持 http/https 地址")
+	}
+	body, err := httpGet(rawURL)
+	if err != nil {
+		return "", err
+	}
+	if _, err := b.importConfigFromRaw(rawURL, body); err != nil {
+		return "", err
+	}
+	if err := b.a.Restart(); err != nil {
+		return rawURL, fmt.Errorf("配置已导入，但重启服务失败：%w", err)
+	}
+	return rawURL, nil
+}
+
+// httpGet 简单拉取（限时 20s、限 4MB）。
+func httpGet(u string) ([]byte, error) {
+	cl := &http.Client{Timeout: 20 * time.Second}
+	resp, err := cl.Get(u)
+	if err != nil {
+		return nil, fmt.Errorf("下载失败：%w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("下载失败：HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return nil, fmt.Errorf("读取失败：%w", err)
+	}
+	if len(body) == 0 {
+		return nil, fmt.Errorf("下载到的是空文件")
+	}
+	return body, nil
 }

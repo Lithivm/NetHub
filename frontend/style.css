@@ -627,3 +627,6 @@ code, .mono { font-family: var(--font-mono); }
   :root { --titlebar-h: 32px; }
   .page { padding: var(--s3); }
 }
+
+/* 规则重叠检查结果 */
+.ov-grid { grid-template-columns: minmax(160px, 1.1fr) minmax(140px, 1fr) minmax(200px, 1.4fr) minmax(220px, 1.4fr); }

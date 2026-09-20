@@ -39,7 +39,7 @@ type ChainHealthView struct {
 // healthOf 取某条链的健康表（下标与 Upstreams() 对齐）。
 // 上游列表变过（用户改了配置）就重建，旧的观测作废。
 func (e *Engine) healthOf(ch config.Chain) []*upHealth {
-	ups := ch.Upstreams()
+	ups := e.cfg.UpstreamsResolved(ch)
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.health == nil {
@@ -170,7 +170,7 @@ func fnv32a(s string) uint32 {
 // probeChain 探一条链的所有上游（顺序做；只测到代理这一段，不碰业务目标）。
 func (e *Engine) probeChain(ch config.Chain) {
 	e.healthOf(ch) // 先确保健康表存在（markUp 依赖它）
-	for i, raw := range ch.Upstreams() {
+	for i, raw := range e.cfg.UpstreamsResolved(ch) {
 		u, err := upstream.Parse(raw)
 		if err != nil {
 			e.markUp(ch.Name, i, false, 0, err.Error())
@@ -240,7 +240,7 @@ func (e *Engine) ChainHealth() []ChainHealthView {
 			Probe:    ch.ProbeInterval().String(),
 		}
 		hs := e.healthOf(ch)
-		for i, raw := range ch.Upstreams() {
+		for i, raw := range e.cfg.UpstreamsResolved(ch) {
 			uv := UpHealthView{URL: maskUpstream(raw)}
 			if i < len(hs) && hs[i] != nil && !hs[i].checked.IsZero() {
 				uv.Known = true

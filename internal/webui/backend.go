@@ -149,6 +149,8 @@ type ChainView struct {
 	Strategy string   `json:"strategy"`
 	Probe    string   `json:"probe"`
 	Note     string   `json:"note"`
+	// Secret 口令存在 DPAPI 保险箱里（界面显示“凭据已加密”，而不是把口令显示出来）
+	Secret bool `json:"secret"`
 }
 
 type RouteView struct {
@@ -546,7 +548,14 @@ func (b *Backend) RestoreBackup(name string) error {
 	if err != nil {
 		return err
 	}
-	*b.a.Cfg = *cur // 同一个指针：引擎/规则看到的就是新配置（path 也一并带过来）
+	*b.a.Cfg = *cur
+	// 导入进来的口令是明文的（导出件为了“一个文件就能用”必须带明文），
+	// 在本机落地时立即封进 DPAPI 保险箱 —— 之后盘上就不再有明文口令了。
+	if cur.SealEnabled() {
+		if err := b.a.Cfg.Save(); err != nil {
+			b.a.Bus.Warn("导入的配置已生效，但封存凭据失败（口令仍是明文）: %v", err)
+		}
+	} // 同一个指针：引擎/规则看到的就是新配置（path 也一并带过来）
 	b.a.Bus.Warn("已回滚配置：%s（当前配置已自动备份）", name)
 	return b.a.Restart()
 }
@@ -1211,7 +1220,7 @@ func (b *Backend) ExportConfig() (string, error) {
 	if !strings.HasSuffix(strings.ToLower(path), ".yaml") && !strings.HasSuffix(strings.ToLower(path), ".yml") {
 		path += ".yaml"
 	}
-	if err := b.a.Cfg.SaveAs(path); err != nil {
+	if err := b.a.Cfg.ExportPlain(path); err != nil {
 		return "", err
 	}
 	b.a.Bus.Info("设置已导出到 %s（含上游凭据，请通过安全渠道分发）", path)
@@ -1306,5 +1315,85 @@ func (b *Backend) OpenCaptureDir() error {
 		dir = "."
 	}
 	openPath(filepath.Join(dir, "pcap"))
+	return nil
+}
+
+// ───────── 规则重叠检查（用户点按钮才跑）─────────
+
+// OverlapView 一处重叠（给人看的）。
+type OverlapView struct {
+	Kind        string   `json:"kind"` // dead | shadowed | fine
+	Earlier     int      `json:"earlier"`
+	Later       int      `json:"later"`
+	EarlierName string   `json:"earlierName"`
+	LaterName   string   `json:"laterName"`
+	Targets     []string `json:"targets"`
+	Ports       []string `json:"ports"`
+	Resolution  string   `json:"resolution"`
+	Action      string   `json:"action"`
+	LaterAction string   `json:"laterAction"`
+}
+
+// OverlapResult 一次重叠检查的结果。
+type OverlapResult struct {
+	Rows    []OverlapView `json:"rows"`
+	Summary string        `json:"summary"`
+}
+
+// CheckOverlaps 检查规则重叠。刻意做成"按钮触发"：重叠不一定错
+// （宽兜底 + 窄例外是常见写法），我们只摆事实，不替用户改顺序。
+func (b *Backend) CheckOverlaps() OverlapResult {
+	ov := b.a.Cfg.CheckOverlaps()
+	res := OverlapResult{Rows: make([]OverlapView, 0, len(ov)), Summary: config.OverlapSummary(ov)}
+	for _, o := range ov {
+		res.Rows = append(res.Rows, OverlapView{
+			Kind: o.Kind, Earlier: o.Earlier + 1, Later: o.Later + 1,
+			EarlierName: o.EarlierName, LaterName: o.LaterName,
+			Targets: o.Targets, Ports: o.Ports, Resolution: o.Resolution,
+			Action: o.ActionText, LaterAction: o.LaterAction,
+		})
+	}
+	return res
+}
+
+// ───────── 凭据加密开关（A18）─────────
+
+// SecretsSetting 凭据是否加密保存。
+type SecretsSetting struct {
+	On      bool     `json:"on"`
+	Path    string   `json:"path"`
+	Names   []string `json:"names"`
+	Pending int      `json:"pending"` // 还有几条链的口令是明文（保存一次即封存）
+	Err     string   `json:"err"`
+}
+
+// GetSecretsSetting 当前凭据加密设置与保险箱状态。
+func (b *Backend) GetSecretsSetting() SecretsSetting {
+	return SecretsSetting{
+		On:      b.a.Cfg.SealEnabled(),
+		Path:    b.a.Cfg.SecretsPath(),
+		Names:   b.a.Cfg.SecretNames(),
+		Pending: b.a.Cfg.PendingPlaintext(),
+		Err:     b.a.Cfg.SecretsError(),
+	}
+}
+
+// SetSecrets 开关凭据加密。打开时立即把现有的明文口令封存进保险箱。
+func (b *Backend) SetSecrets(on bool) error {
+	if on {
+		v := true
+		b.a.Cfg.Tuning.Secrets = &v
+	} else {
+		v := false
+		b.a.Cfg.Tuning.Secrets = &v
+	}
+	if err := b.a.SaveConfig(); err != nil {
+		return err
+	}
+	if on {
+		b.a.Bus.Info("已开启凭据加密：上游口令存进 secrets.dat（Windows DPAPI，换机器解不开）")
+	} else {
+		b.a.Bus.Warn("已关闭凭据加密：上游口令会以明文写在 config.yaml 里")
+	}
 	return nil
 }

@@ -30,6 +30,10 @@ type Chain struct {
 	Strategy string   `yaml:"strategy,omitempty"` // failover(默认) | round | random
 	Probe    string   `yaml:"probe,omitempty"`    // 健康探测间隔（30s / 1m / off），默认 30s
 	Note     string   `yaml:"note,omitempty"`
+
+	// Secret 口令在 secrets.dat（DPAPI 加密）里的名字（A18）。
+	// 有它时 forward 里不含凭据，运行时由 UpstreamsResolved 还原。
+	Secret string `yaml:"secret,omitempty"`
 }
 
 // 上游选择策略。
@@ -341,21 +345,40 @@ func (c *Config) Save() error {
 	if c.path == "" {
 		return fmt.Errorf("配置路径未设置")
 	}
+	return c.writeTo(c.path, true)
+}
+
+// writeTo 落盘。seal=true 时先把明文口令挪进 DPAPI 保险箱（A18）。
+// 导出一份“给人拿去新机器用”的配置时传 false —— 那份必须是明文，否则新机器用不了。
+func (c *Config) writeTo(path string, seal bool) error {
+	var sealErr error
+	if seal {
+		_, sealErr = c.sealLocked()
+	}
 	b, err := yaml.Marshal(c)
 	if err != nil {
 		return err
 	}
-	header := "# NetHub 配置 —— 由程序读写，手工改也生效\n" +
-		"# forward 里的凭据是本机敏感信息，不要外传、不要提交进 git。\n"
+	header := "# NetHub 配置 —— 由程序读写，手工改也生效\n"
+	switch {
+	case !seal:
+		header += "# 这份是导出件（含明文口令），给新机器「导入配置」用。\n"
+	case sealErr == nil && c.SealEnabled():
+		header += "# 上游口令存在同目录 secrets.dat（Windows DPAPI 加密，换机器解不开）。\n"
+	case sealErr != nil:
+		header += "# ⚠ 这次没能把口令存进保险箱（" + sealErr.Error() + "），下面仍是明文。\n"
+	default:
+		header += "# forward 里的凭据是本机敏感信息，不要外传、不要提交进 git。\n"
+	}
 	// 覆盖前先备份一份（backups/ 目录，只留最新 3 份），改坏了能回滚
 	if err := c.backupLocked(); err != nil {
 		return fmt.Errorf("备份旧配置失败: %w", err)
 	}
-	tmp := c.path + ".tmp"
+	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, append([]byte(header), b...), 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, c.path)
+	return os.Rename(tmp, path)
 }
 
 // Validate 结构校验：链名唯一、路由引用的链存在、地址格式合法。
@@ -644,6 +667,8 @@ type Tuning struct {
 	RaceAfter string `yaml:"race_after,omitempty"`
 	// CountDirect 是否把直连流量也纳入统计（默认 false：直连不进内核过滤器，完全零开销）。
 	CountDirect bool `yaml:"count_direct,omitempty"`
+	// Secrets 上游凭据是否加密保存（默认 true；显式写 false 才关）。
+	Secrets *bool `yaml:"secrets_encrypted,omitempty"`
 	// WarmSessions 每条上游预热几条"已握手、只差 CONNECT"的会话（默认 2；0 = 关）。
 	// 实测每条能省 193～258ms 的等待（TCP+TLS+招呼那三段）。
 	WarmSessions string `yaml:"warm_sessions,omitempty"`

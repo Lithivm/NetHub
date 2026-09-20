@@ -1025,6 +1025,7 @@ async function loadSettings() {
   // 那会抛 TypeError 把 boot() 整个搞挂，导致状态轮询都注册不上）
   setChecked('setHostsManage', s.hostsManage);
   setValue('setHostsEntries', (s.hostsEntries || []).join('\n'));
+  loadSecretsSetting();
   setValue('setDialTimeout', s.dialTimeout || 5);
   setValue('setDialBudget', s.dialBudget || 10);
   setValue('setRaceAfter', s.raceAfter === 0 ? 0 : (s.raceAfter || 150));
@@ -1128,6 +1129,7 @@ function wire() {
 
   // 规则页
   document.getElementById('btnRuleSort').onclick = sortRoutes;
+  document.getElementById('btnRuleOverlap').onclick = checkOverlaps;
   document.getElementById('btnExplain').onclick = explainTarget;
   document.getElementById('explainIp').onkeydown = e => {
     // Ctrl/⌘+Enter 触发（普通 Enter 要能换行，因为现在是多行输入）
@@ -1201,6 +1203,14 @@ function wire() {
       const p = await call('ExportConfigRedacted');
       if (p) toast('已导出无凭据配置', p + '　（同样可导入，但需补上游口令；可安全发送）', 'success');
     } catch (e) { fail(e); }
+  };
+  document.getElementById('btnImportURL').onclick = importConfigFromURL;
+  document.getElementById('setSecrets').onchange = async (ev) => {
+    try {
+      await call('SetSecrets', ev.target.checked);
+      toast('已保存', ev.target.checked ? '现有明文口令已封存进 secrets.dat' : '口令会以明文写在 config.yaml 里', 'success');
+      await loadSecretsSetting();
+    } catch (e) { fail(e); ev.target.checked = !ev.target.checked; }
   };
   document.getElementById('btnImportCfg').onclick = async () => {
     const ok = await confirmBox('导入配置',
@@ -1339,4 +1349,104 @@ async function loadCountDirect() {
       ? '当前：开。直连流量的 ↑↓ 都会有数字（每包多一点开销）。'
       : '当前：关。直连的字节数只有出方向的一点点（过滤器不碰直连流量，这是默认的零开销姿势）。';
   }
+}
+
+/* 规则重叠检查（用户点按钮才跑：重叠不一定错，只摆事实） */
+async function checkOverlaps() {
+  let r;
+  try { r = await call('CheckOverlaps'); } catch (e) { return fail(e); }
+
+  const box = el('div', 'sim-box');
+  const sum = el('div', 'sim-summary');
+  sum.textContent = r.summary || '';
+  box.appendChild(sum);
+
+  if (!r.rows || !r.rows.length) {
+    const p = el('div', 'hint');
+    p.style.padding = '12px 16px';
+    p.textContent = '所有规则的目标与端口都不重叠 —— 顺序怎么放都不会互相影响。';
+    box.appendChild(p);
+    modal.open('规则重叠检查', [box], null);
+    return;
+  }
+
+  const tbl = el('div', 'table');
+  const th = el('div', 'trow thead ov-grid');
+  ['规则对', '重叠范围', '实际归谁', '怎么办'].forEach(h => th.appendChild(el('div', 'cell', h)));
+  tbl.appendChild(th);
+
+  r.rows.forEach(o => {
+    const row = el('div', 'trow ov-grid');
+    // 规则对
+    const c1 = el('div', 'cell');
+    c1.appendChild(el('span', 'dim', '前 ' + o.earlier + ' '));
+    c1.appendChild(el('span', null, o.earlierName || '（未命名）'));
+    c1.appendChild(el('span', 'dim', '  ↔  后 ' + o.later + ' '));
+    c1.appendChild(el('span', null, o.laterName || '（未命名）'));
+    row.appendChild(c1);
+    // 重叠范围
+    const c2 = el('div', 'cell mono dim');
+    c2.textContent = (o.targets || []).join('  ') + ((o.ports && o.ports.length) ? '  端口 ' + o.ports.join(',') : '');
+    c2.title = (o.targets || []).join('\n');
+    row.appendChild(c2);
+    // 实际归谁
+    const c3 = el('div', 'cell');
+    const badge = el('span', 'sim-badge ' + (o.kind === 'dead' ? 'bad' : o.kind === 'shadowed' ? 'none' : 'direct'));
+    badge.textContent = o.kind === 'dead' ? '永远轮不到' : o.kind === 'shadowed' ? '部分被抢' : '正常';
+    c3.appendChild(badge);
+    c3.appendChild(el('span', 'dim', '  ' + o.resolution));
+    row.appendChild(c3);
+    // 怎么办（只给选择，不下命令）
+    const c4 = el('div', 'cell dim');
+    c4.textContent = o.kind === 'fine'
+      ? '不用动：更窄的本来就在前面'
+      : '两种选择：① 就是想让它生效 → 点「按最具体优先排序」；② 就是想让前面那条兜底 → 保持现状即可（这是合法写法）';
+    row.appendChild(c4);
+    tbl.appendChild(row);
+  });
+  box.appendChild(tbl);
+  modal.open('规则重叠检查', [box], null);
+}
+
+/* 凭据加密开关（A18） */
+async function loadSecretsSetting() {
+  const cb = document.getElementById('setSecrets');
+  const info = document.getElementById('secretsInfo');
+  if (!cb) return;
+  let v = null;
+  try { v = await call('GetSecretsSetting'); } catch (e) { return; }
+  if (!v) return;
+  cb.checked = !!v.on;
+  if (!info) return;
+  if (v.err) {
+    info.className = 'export-warn';
+    info.textContent = '⚠ 凭据保险箱有问题：' + v.err;
+    return;
+  }
+  info.className = 'hint';
+  if (!v.on) {
+    info.textContent = '当前：明文。上游口令就写在 config.yaml 的 forward 里。';
+  } else if (v.pending > 0) {
+    info.className = 'export-warn';
+    info.textContent = '当前：加密已开，但配置文件里还有 ' + v.pending + ' 条明文口令 —— 点一下「保存设置」（或随便改个设置保存）就会封存进 secrets.dat。';
+  } else {
+    info.textContent = '当前：加密。口令存在 ' + (v.path || 'secrets.dat') +
+      (v.names && v.names.length ? '（已封存 ' + v.names.length + ' 条：' + v.names.join('、') + '）' : '（暂时没有需要封存的口令）');
+  }
+}
+
+/* 从 URL 导入配置（团队统一下发的最小形态） */
+async function importConfigFromURL() {
+  const el = document.getElementById('importURL');
+  const url = (el && el.value || '').trim();
+  if (!url) { toast('先填地址', '例如 https://内网地址/nethub-config.yaml', 'warn'); return; }
+  if (!await confirmBox('从地址导入配置',
+      '会先下载并做一次完整校验，通过后自动备份当前配置再生效并重启服务。确定继续？', false, '下载并导入')) return;
+  try {
+    const p = await call('ImportConfigFromURL', url);
+    if (p) {
+      toast('已从地址导入配置并重启', p, 'success');
+      await loadAll();
+    }
+  } catch (e) { fail(e); }
 }

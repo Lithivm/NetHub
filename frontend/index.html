@@ -90,6 +90,7 @@
         <span class="hint">自上而下匹配，命中即停；一条规则可含多个目标。改动即时保存，点「重启」生效</span>
         <div class="spacer"></div>
         <button class="btn btn-sm" id="btnRuleSort">按最具体优先排序</button>
+        <button class="btn btn-sm" id="btnRuleOverlap">检查重叠</button>
         <button class="btn btn-sm btn-primary" id="btnRuleAdd">添加规则</button>
       </div>
       <div class="card-body form">
@@ -297,6 +298,16 @@
             <button class="btn btn-sm" id="btnExportDoc">导出配置（无凭据）</button>
             <button class="btn btn-sm" id="btnImportCfg">导入配置</button>
           </div>
+          <div class="input-row">
+            <input type="text" id="importURL" class="input mono" placeholder="也可以填一个 http(s) 地址，从那里拉配置（团队统一下发）">
+            <button class="btn btn-sm" id="btnImportURL">从地址导入</button>
+          </div>
+          <label class="check">
+            <input type="checkbox" id="setSecrets">
+            <span>上游口令加密保存<em>默认开：口令存进同目录 secrets.dat（Windows DPAPI，绑定本机与本用户）—— config.yaml 被拷走也不等于口令泄露。
+              导出配置时会还原成明文（否则新机器解不开），所以导出件仍要私发。</em></span>
+          </label>
+          <div class="hint" id="secretsInfo">—</div>
           <div class="hint">
             <b>导出配置（含凭据）</b>：完整的 config.yaml（链路、上游、规则、设置）。
             装好程序的新机器上点「导入配置」选它 —— 一键开箱即用。<br>

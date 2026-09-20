@@ -398,7 +398,7 @@ func (e *Engine) dialUpstream(ch config.Chain, dst net.IP, dport uint16) (net.Co
 // 链的策略是 hash 时，同一个键永远落到同一条上游 —— 需要"对方按来源 IP 做白名单/会话"
 // 的场景就靠它（A17）。
 func (e *Engine) dialUpstreamKeyed(ch config.Chain, dst net.IP, dport uint16, key string) (net.Conn, error) {
-	raws := ch.Upstreams()
+	raws := e.cfg.UpstreamsResolved(ch) // A18：还原 DPAPI 保险箱里的口令
 	if len(raws) == 0 {
 		return nil, fmt.Errorf("链 %s 没有配置上游", ch.Name)
 	}

@@ -94,7 +94,7 @@ func (p *warmPool) refill(ch config.Chain, idx int, target int, cfg *config.Conf
 	if p == nil || target <= 0 || !healthy {
 		return
 	}
-	raws := ch.Upstreams()
+	raws := cfg.UpstreamsResolved(ch)
 	if idx < 0 || idx >= len(raws) {
 		return
 	}
@@ -228,7 +228,7 @@ func (e *Engine) dialWarm(ch config.Chain, idx int, dst net.IP, dport uint16) (n
 	if e.pool == nil || e.cfg.WarmTarget() <= 0 {
 		return nil, false
 	}
-	raws := ch.Upstreams()
+	raws := e.cfg.UpstreamsResolved(ch)
 	if idx < 0 || idx >= len(raws) {
 		return nil, false
 	}
