@@ -1287,6 +1287,30 @@ const HELP = {
       '开机自启建议二选一：计划任务（登录后静默启动，能看托盘）或本服务（无人登录也能跑）；两个都开反而会有两份。',
     ],
   },
+  clash: {
+    title: '与其它代理共存：它依据什么判断、怎么修',
+    paras: [
+      '检测依据是 Windows 的「系统代理设置」（注册表里的代理服务器 / 绕过列表）——不限于 Clash，任何装到系统代理上的工具都一样适用。',
+      '实测环境：Clash Verge v2.5.2。',
+      '如果这台机器压根没启用系统代理，本页会直接判定正常。',
+      '要修的时候：把内网网段和域名填进那个工具的「绕过地址」，让它别把内网请求也接过去；',
+      '填完可以用同处的「当前绕过」核对是不是真的写进去了。',
+      '不修也能用，但如果工具把域名解析也接走（DNS 外泄），我们可能拿不到真实的 IP。',
+      '为什么不帮你自动填：这份配置由那个工具自己维护，它每次应用系统代理都会重写该值 —— 实测我们写进去 5 秒内就被冲掉。',
+      '两个程序抢一个全局设置，得不偿失。',
+    ],
+  },
+  hosts: {
+    title: '系统 hosts 接管：我们会动哪一部分',
+    paras: [
+      '我们只写自己那一段（文件里带 NetHub 标记的那几行），块外的内容（Docker、微信 pin 之类）一个字都不碰。',
+      '第一次写入前会把原文件备份成 hosts.nethub.bak，只备一次，不覆盖最初的版本。',
+      '块外如果已经有一条同名记录，会被我们接管（挪进我们的段）——因为 Windows 取第一条匹配，不处理的话我们写的不会生效。',
+      '写完会刷一次 DNS 缓存，否则系统可能继续用缓存里的旧解析。',
+      '这个文件别的程序也会改（杀软、微信、Clash、VPN 都会写）；被改掉后我们每 60 秒会自检并改回来，日志里会说明原因。',
+      '日志里出现“hosts 被其他程序改动了…已自动恢复”就是这件事，不是报错。',
+    ],
+  },
 };
 
 function showHelp(key) {
@@ -1390,6 +1414,8 @@ function wire() {
   const bind = (id, key) => { const b = document.getElementById(id); if (b) b.onclick = () => showHelp(key); };
   bind('btnHelpDial', 'dial');
   bind('btnHelpService', 'service');
+  bind('btnHelpClash', 'clash');
+  bind('btnHelpHosts', 'hosts');
 
   // 连接页
   document.getElementById('btnConnRefresh').onclick = () => loadConns();

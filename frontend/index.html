@@ -101,7 +101,7 @@
             placeholder="一批目标：一行一个（也支持逗号/分号分隔、# 注释），如&#10;10.0.0.5:5432&#10;172.16.0.0/24&#10;10.20.0.99:80   # 影像库"></textarea>
           <button class="btn btn-sm btn-primary" id="btnExplain">模拟</button>
         </div>
-        <div class="hint">也可以直接写域名（main.his.com）或 IP 通配（10.100.100.*）。只填一个时给出详细解释。</div>
+        <div class="hint">也可以直接写域名（main.his.com）或 IP 通配（10.100.100.*）。</div>
       </div>
       <div class="table" id="ruleTable"></div>
     </div>
@@ -159,22 +159,18 @@
       <div class="card">
         <div class="card-head">
           <h2>与其它代理共存</h2>
-          <span class="hint">看内网数据会走哪、走得对不对（只读，不改任何设置）· 实测环境：Clash Verge v2.5.2</span>
+          <span class="hint">看内网数据会走哪、走得对不对（只读，不改任何设置）</span>
           <div class="spacer"></div>
           <button class="btn btn-sm" id="btnClashCheck">重新检测</button>
+          <button class="info-btn" id="btnHelpClash" title="它依据什么判断、怎么修">i</button>
         </div>
         <div class="card-body form">
           <div class="clash-state" id="clashState">尚未检测。点右上角「重新检测」。</div>
           <div id="clashDetail"></div>
           <div class="hint" id="loopInfo">环路检测：—</div>
-          <div class="hint">检测依据是 Windows 的**系统代理设置**（注册表里的"代理服务器/绕过列表"）——
-            不限于 Clash，任何装到系统代理上的工具都一样适用；实测与 Clash Verge v2.5.2 一致。
-            如果这台机器压根没启用系统代理，本页会直接判定正常。</div>
           <div class="field" id="clashFixWrap" hidden>
             <label>把下面这段填进 Clash Verge 的「绕过地址」
-              <em>入口：Clash Verge → 设置 → 系统代理 那一行【左侧的小齿轮】→ 「代理绕过设置」。
-                填完可用同处的「当前绕过」核对是否真的写进去了。
-                为什么要你手动填：这份配置由 Clash Verge 自己维护，它每次应用系统代理都会重写该值 —— 实测我们写进去 5 秒内就被冲掉。两个程序抢一个全局设置，得不偿失。</em>
+              <em>入口：设置 → 系统代理 那一行【左侧的小齿轮】→「代理绕过设置」。<b>「i」</b>里有原因。</em>
             </label>
             <div class="input-row">
               <input type="text" id="clashBypass" class="input mono" readonly>
@@ -234,7 +230,11 @@
       </div>
 
       <div class="card">
-        <div class="card-head"><h2>系统 hosts 接管</h2></div>
+        <div class="card-head">
+          <h2>系统 hosts 接管</h2>
+          <div class="spacer"></div>
+          <button class="info-btn" id="btnHelpHosts" title="我们会动 hosts 的哪一部分、什么时候会改回去">i</button>
+        </div>
         <div class="card-body form">
           <label class="check">
             <input type="checkbox" id="setHostsManage">
@@ -279,7 +279,7 @@
           <button class="info-btn" id="btnHelpService" title="服务的细节">i</button>
         </div>
         <div class="card-body form">
-          <div class="hint">以 LocalSystem 跑、没有界面；配置与日志与界面版共用（都在程序目录）。开机自启建议<b>二选一</b>：计划任务或本服务。</div>
+          <div class="hint">以 LocalSystem 跑、没有界面；配置与日志与界面版共用。<b>「i」</b>里有细节。</div>
           <div class="input-row">
             <button class="btn btn-sm btn-primary" id="btnSvcInstall">安装服务</button>
             <button class="btn btn-sm" id="btnSvcStart">启动</button>
@@ -304,10 +304,7 @@
             <input type="text" id="importURL" class="input mono" placeholder="也可以填一个 http(s) 地址，从那里拉配置（团队统一下发）">
             <button class="btn btn-sm" id="btnImportURL">从地址导入</button>
           </div>
-          <div class="hint">
-            配置就是普通文本，上游口令在里面是**明文**（和 gost 脚本一样）。
-            <span class="clash-no">别把它提交进 git、别发到群里</span>；要发给别人看配置就用「导出配置（抹掉口令）」。
-          </div>
+          <div class="hint">口令是**明文**写在里面（和 gost 脚本一样）：<span class="clash-no">别提交进 git、别发到群里</span>；发配置给别人看就用「导出配置（抹掉口令）」。</div>
           <div class="input-row"><span class="hint">—— 自动备份（每次保存前备一份，最多留 3 份）——</span></div>
           <div id="backupList" class="hint">—</div>
         </div>
