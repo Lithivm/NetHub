@@ -1257,3 +1257,54 @@ func (b *Backend) SetCountDirect(on bool) error {
 	}
 	return b.a.Restart()
 }
+
+// CaptureView 抓包状态（界面用）。
+type CaptureView struct {
+	On      bool   `json:"on"`
+	Path    string `json:"path"`
+	Bytes   int64  `json:"bytes"`
+	Packets uint64 `json:"packets"`
+	Reason  string `json:"reason"`
+}
+
+// GetCaptureStatus 抓包状态。
+func (b *Backend) GetCaptureStatus() CaptureView {
+	if b.a.Engine == nil {
+		return CaptureView{}
+	}
+	on, path, n, pkts, reason := b.a.Engine.CaptureStatus()
+	return CaptureView{On: on, Path: path, Bytes: n, Packets: pkts, Reason: reason}
+}
+
+// StartCapture 开始抓包（写到程序目录的 pcap/nethub-capture.pcap）。
+func (b *Backend) StartCapture() (CaptureView, error) {
+	if b.a.Engine == nil {
+		return CaptureView{}, fmt.Errorf("引擎未初始化")
+	}
+	dir := dirOf(b.a.Cfg.Path())
+	if err := b.a.Engine.StartCapture(dir, 64); err != nil {
+		return CaptureView{}, err
+	}
+	b.a.Bus.Warn("已开始抓包（写 %s/pcap/nethub-capture.pcap，上限 64MB；抓到的东西含内网数据，别随便外发）", dir)
+	return b.GetCaptureStatus(), nil
+}
+
+// StopCapture 停止抓包。
+func (b *Backend) StopCapture() CaptureView {
+	if b.a.Engine != nil {
+		if reason := b.a.Engine.StopCapture(); reason != "" {
+			b.a.Bus.Info("已停止抓包")
+		}
+	}
+	return b.GetCaptureStatus()
+}
+
+// OpenCaptureDir 打开抓包所在目录（方便用 Wireshark 打开）。
+func (b *Backend) OpenCaptureDir() error {
+	dir := dirOf(b.a.Cfg.Path())
+	if dir == "" {
+		dir = "."
+	}
+	openPath(filepath.Join(dir, "pcap"))
+	return nil
+}

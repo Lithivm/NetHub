@@ -10,6 +10,8 @@
 package webui
 
 import (
+	"fmt"
+	"os"
 	"runtime"
 	"syscall"
 	"unsafe"
@@ -332,4 +334,82 @@ func copyUTF16(dst []uint16, s string) {
 	if n > 0 {
 		dst[n-1] = 0
 	}
+}
+
+// ───────── 优雅退出（给重启脚本用）─────────
+//
+// 为什么需要它：进程被 taskkill 强杀时来不及 NIM_DELETE，Windows 会把托盘图标
+// 留成"僵尸"，直到鼠标扫过它才清理掉 —— 开发时反复重启会看到一串图标堆在托盘里
+// （用户视角就是"图标越攒越多"）。
+//
+// 所以给一个正规的退出通道：找到我们自己的托盘窗口，投一条"退出"命令，
+// 让程序走正常退出路径（停服务 → 移除图标 → 关窗）。
+const trayClassName = "nethubTrayWnd"
+
+// QuitRunningInstance 请求正在运行的界面版优雅退出。
+// 返回 true 表示确实找到了运行中的实例并已发出退出请求。
+func QuitRunningInstance() bool {
+	pFindWindowW := user32.NewProc("FindWindowW")
+	name, err := syscall.UTF16PtrFromString(trayClassName)
+	if err != nil {
+		return false
+	}
+	hwnd, _, _ := pFindWindowW.Call(uintptr(unsafe.Pointer(name)), 0)
+	if hwnd == 0 {
+		return false
+	}
+	// 与托盘菜单的"退出"走同一条路径（onQuit → Backend.Quit → 移除图标 → 关窗）。
+	// 注：WM_CLOSE 会被“点 X 收进托盘”的逻辑吃掉，所以必须发菜单那条命令，
+	// 否则看起来“请求了退出但程序还在跑”。
+	r, _, callErr := pPostMessageW.Call(hwnd, wmCommand, uintptr(idQuit), 0)
+	if r == 0 {
+		fmt.Fprintf(os.Stderr, "PostMessage 失败: %v\n", callErr)
+		return false
+	}
+	return true
+}
+
+// ───────── 优雅退出的信号通道 ─────────
+//
+// 为什么不用窗口消息：nethub 自己是**提权进程**，普通权限的进程给它投 WM_* 会被
+// Windows 的 UIPI 拦掉（实测 "Access is denied"）。而命名事件是内核对象，不受 UIPI 限制，
+// 同一用户的两个进程（一个提权一个不提权）可以互相通知。
+//
+// 用途：重启脚本先 `nethub.exe -quit` 让旧实例走正常退出路径（停服务 → NIM_DELETE 摘掉
+// 托盘图标），而不是直接 Kill —— 强杀会留下"僵尸图标"，鼠标扫过才消失。
+const quitEventName = `Local\NetHubQuitRequest`
+
+// WatchQuitSignal 起一个等待线程：收到退出请求就调 onQuit（返回 stop 用于收尾）。
+// 只在界面版调用；服务/无界面模式没有托盘，不该被这条通道关掉。
+func WatchQuitSignal(onQuit func()) (stop func()) {
+	name, err := windows.UTF16PtrFromString(quitEventName)
+	if err != nil {
+		return func() {}
+	}
+	h, err := windows.CreateEvent(nil, 0 /* 自动 reset */, 0, name)
+	if err != nil {
+		return func() {}
+	}
+	go func() {
+		// 等一次就够：这个事件只用于"请退出"
+		windows.WaitForSingleObject(h, windows.INFINITE)
+		if onQuit != nil {
+			onQuit()
+		}
+	}()
+	return func() { windows.CloseHandle(h) }
+}
+
+// RequestQuit 请求正在运行的界面版优雅退出；返回是否真的找到了运行中的实例。
+func RequestQuit() bool {
+	name, err := windows.UTF16PtrFromString(quitEventName)
+	if err != nil {
+		return false
+	}
+	h, err := windows.OpenEvent(windows.EVENT_MODIFY_STATE, false, name)
+	if err != nil {
+		return false // 没人在跑（事件不存在）
+	}
+	defer windows.CloseHandle(h)
+	return windows.SetEvent(h) == nil
 }

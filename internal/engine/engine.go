@@ -205,6 +205,9 @@ type Engine struct {
 	// loop 环路检测（A14）：与其它代理共存时发现自己打转
 	loop *loopGuard
 
+	// cap 抓包（A19）：按需把包写成 pcap
+	cap *capturer
+
 	// pool 预热连接池（A11）：养着“已握手、只差 CONNECT”的会话
 	pool *warmPool
 	done chan struct{}
@@ -223,6 +226,7 @@ func New(bus *logbus.Bus, rs *rules.Set, cfg *config.Config) *Engine {
 		done:        make(chan struct{}),
 		pool:        newWarmPool(),
 		loop:        newLoopGuard(),
+		cap:         newCapturer(),
 	}
 }
 
@@ -708,6 +712,7 @@ func (e *Engine) packetLoop() {
 			st.packets.Add(1)
 			st.down.Add(uint64(len(pkt)))
 		}
+		e.cap.note(pkt)
 		if _, err := h.Send(pkt, addr); err != nil {
 			e.bus.Warn("注入失败: %v", err)
 		}
@@ -746,6 +751,8 @@ func (e *Engine) rewriteOutbound(h *divert.Handle, pkt []byte, addr *divert.Addr
 	if isSyn(flags) {
 		// A14：新建连接时判一次环（目标=上游自己 / 源=目标 / 同目标疯狂重连）
 		e.checkLoop(src, dst, dport, chain)
+		// A19：抓包写“改写前”的形态（目标还是内网地址）——拿 Wireshark 看就是一段正常会话
+		e.cap.note(pkt)
 		e.mu.Lock()
 		_, existed := e.conns[sport]
 		st := &connState{
@@ -798,6 +805,8 @@ func (e *Engine) rewriteInbound(h *divert.Handle, pkt []byte, addr *divert.Addre
 	copy(pkt[offDstIP:offDstIP+4], st.app.To4())
 	putBE16(pkt, t+offDstPort, st.appPort)
 	divert.CalcChecksums(pkt, addr, divert.ChecksumDefault)
+	// A19：入方向写“改写后”的形态（看起来就是从内网目标回来的）
+	e.cap.note(pkt)
 	if _, err := h.Send(pkt, addr); err != nil {
 		e.bus.Warn("注入失败: %v", err)
 	}
@@ -848,6 +857,8 @@ func (e *Engine) passThrough(h *divert.Handle, pkt []byte, addr *divert.Address,
 		}
 		return // 阻断：包丢掉
 	}
+	// A19：直连的包原样写进抓包（能证实“这个目标确实没走隧道”）
+	e.cap.note(pkt)
 	_, _ = h.Send(pkt, addr)
 }
 

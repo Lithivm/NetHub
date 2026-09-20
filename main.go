@@ -57,9 +57,23 @@ func main() {
 	svcInstall := flag.Bool("service-install", false, "安装为 Windows 服务（自动启动，需管理员），随后退出")
 	svcUninstall := flag.Bool("service-uninstall", false, "卸载 Windows 服务，随后退出")
 	svcState := flag.Bool("service-state", false, "打印 Windows 服务状态，随后退出")
+	doQuit := flag.Bool("quit", false, "请已在运行的界面版优雅退出（会先停服务、移除托盘图标），随后退出")
 	clashCheck := flag.Bool("clash-check", false, "只检测系统代理/Clash 会不会把内网送进代理，然后退出（不需管理员）")
 	upTest := flag.Bool("test-upstream", false, "直接实测原生上游链路（不经 gost），然后退出（不需管理员）")
 	flag.Parse()
+
+	// -quit：请运行中的界面版优雅退出（重启脚本用）。
+	// 强杀进程会让托盘图标变成“僵尸”，鼠标扫过才会消失；走这条路就没有。
+	if *doQuit {
+		if webui.RequestQuit() {
+			fmt.Println("已请求正在运行的 NetHub 退出（等服务真正停稳再启动下一个）")
+		} else if winsvc.State() == "RUNNING" {
+			fmt.Println("没有界面版在跑；Windows 服务正在运行，请用 nethub.exe -service-stop 或 net stop " + winsvc.Name)
+		} else {
+			fmt.Println("没有在运行的 NetHub")
+		}
+		return
+	}
 
 	// 服务安装/卸载/查状态：不需要配置，也不需要界面
 	if *svcInstall || *svcUninstall || *svcState {
@@ -206,6 +220,13 @@ func runGUI(a *app.App, bus *logbus.Bus, cfgPath string) {
 		func(m string) { a.Bus.Info("托盘: %s", m) },
 	)
 	b.SetTray(tray)
+	// 优雅退出通道：重启脚本用 `nethub.exe -quit` 通知旧实例走正常退出（摘掉托盘图标），
+	// 而不是强杀 —— 强杀会留下“僵尸图标”。
+	stopWatch := webui.WatchQuitSignal(func() {
+		a.Bus.Info("收到外部退出请求（-quit），正在优雅退出")
+		b.Quit()
+	})
+	defer stopWatch()
 
 	theme := wopts.Light
 	bg := uint32(0xffffffff)
