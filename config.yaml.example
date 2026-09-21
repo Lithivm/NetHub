@@ -51,9 +51,12 @@ routes:
     chain: proxy-b
 
 hosts:
-  manage: false             # true = 由本程序维护 hosts 里的标记区块（你的手写内容不受影响）
+  manage: false             # 默认 false：true = 由本程序维护 hosts 里的标记区块（你的手写内容不受影响）
   entries:                  # 每行一条：内网IP 域名
     - 10.0.0.10 app.example.com
+
+patrol:
+  interval: "off"           # 业务目标巡检，**默认关闭**。需要时写 5m / 30s；只探“最近真被访问过”的目标
 
 ui:
   theme: light              # light | dark

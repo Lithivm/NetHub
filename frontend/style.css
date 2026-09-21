@@ -755,3 +755,15 @@ body.theme-dark .noticebar.is-warn  { background: #3a3320; color: #e8d9a8; borde
 .help-p:last-child { margin-bottom: 0; }
 /* 域名规则解析不到 = 这条规则什么都没拦，得看得见 */
 .resolve-bad { color: var(--error); }
+
+/* 绕过覆盖明细：默认收起（检测什么就显示什么，但不占地方） */
+.clash-cov { margin-top: var(--s2); }
+.clash-cov > summary {
+  cursor: pointer; user-select: none; list-style: none;
+  color: var(--muted); font-size: var(--fs-xs);
+}
+.clash-cov > summary::-webkit-details-marker { display: none; }
+.clash-cov > summary::before { content: '▸ '; }
+.clash-cov[open] > summary::before { content: '▾ '; }
+.clash-cov > summary:hover { color: var(--fg); }
+.clash-cov .clash-table { margin-top: var(--s2); }

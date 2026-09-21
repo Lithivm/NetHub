@@ -304,6 +304,11 @@ func Default() *Config {
 			{Name: "proxy-a", Note: "示例链路 —— 把 forward 换成你自己的上游"},
 		},
 		Routes: nil,
+		// 默认关掉两个“会動别人东西 / 会发多余流量”的开关：
+		//   hosts 接管 —— 会改系统 hosts（那是别人也在改的文件）
+		//   巡检 —— 会定期向业务目标发真实连接
+		// 两者都在设置里一键可开，默认值不替用户做主。
+		Patrol: Patrol{Interval: "off"},
 		Hosts:  HostsCfg{Manage: false},
 		UI:     UICfg{Theme: "dark"}, // 默认深色：这程序多数时间在盯日志/连接表，深色看久了不刺眼
 	}
@@ -756,14 +761,18 @@ type Patrol struct {
 	Count    int    `yaml:"count,omitempty"`    // 每轮最多探几个目标（默认 8，上限 32）
 }
 
-// PatrolInterval 归一化后的巡检间隔（0 = 关闭）。默认 5 分钟。
+// PatrolInterval 归一化后的巡检间隔（0 = 关闭）。**默认关闭**（空值 = 关）。
 func (c *Config) PatrolInterval() time.Duration {
 	s := strings.ToLower(strings.TrimSpace(c.Patrol.Interval))
 	switch s {
 	case "off", "none", "0":
 		return 0
 	case "":
-		return 5 * time.Minute
+		// 空 = 默认关（与 Default() 里写的一致）。
+		//
+		// 实测考虑：巡检会定期向业务目标发起真实连接（相当于模拟业务流量），
+		// 对客户内网来说这是“多余的动作”—— 需要时在设置里显式打开。
+		return 0
 	}
 	if d, err := time.ParseDuration(s); err == nil && d > 0 {
 		return d

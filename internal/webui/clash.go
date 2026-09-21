@@ -666,10 +666,20 @@ func PrintClashCheck(cfg *config.Config) {
 		fmt.Printf("  %-24s %-22s %s\n", it.Host, path, verdict)
 	}
 	if len(v.Coverage.Checked) > 0 {
-		fmt.Printf("\n  绕过覆盖：%d/%d 命中（含内网网段代表 IP）\n",
+		fmt.Printf("\n  绕过覆盖：%d/%d 命中（下列目标逐个核对过）\n",
 			len(v.Coverage.Checked)-len(v.Coverage.Missed), len(v.Coverage.Checked))
-		if len(v.Coverage.Missed) > 0 {
-			fmt.Printf("  ✗ 未覆盖：%s\n", strings.Join(v.Coverage.Missed, ";"))
+		// 把核对过的目标逐个列出来：不列的话，“我加了网段但检测没变” 会被看成
+		// 检测写死了 —— 其实它一直在按配置算，只是看不见。检测什么就显示什么。
+		miss := map[string]bool{}
+		for _, m := range v.Coverage.Missed {
+			miss[m] = true
+		}
+		for _, c := range v.Coverage.Checked {
+			if miss[c] {
+				fmt.Printf("    ✗ %s  ← 不在绕过列表里，内网可能被交给代理\n", c)
+			} else {
+				fmt.Printf("    ✓ %s\n", c)
+			}
 		}
 	}
 

@@ -137,12 +137,16 @@ func Parse(raw string) (*Upstream, error) {
 		if i := strings.Index(s, ":"); i >= 0 {
 			up.Creds.User, up.Creds.Pass = s[:i], s[i+1:]
 		} else {
-			// 只给了一个 token（没有 user:pass 的写法）。
-			// 真实客户里就有这种（gost 的 `auth=base64(token)`，同事的 snzyy 链），
-			// 当时直接报错"没冒号"，等于这类上游根本用不了。
-			// 约定：整串当口令，用户名为空 —— SOCKS5 的 RFC1929 允许 ULEN=0，
-			// HTTP 代理也能用 `:token` 的形式（见 authHeader）。
-			up.Creds.User, up.Creds.Pass = "", s
+			// 只给了一个值（没有 user:pass 的写法）—— gost 对这种情况的含义是：
+			// **整个值就是用户名，口令为空**（服务端通常也只查用户名）。
+			//
+			// 实测依据（2026-09-21，同事的 snzyy 链 124.115.74.246:10084，
+			// auth 解出来是 38 字节二进制、没有冒号）：
+			//   空用户 + 整串当口令  → 认证被拒
+			//   整串作用户 + 空口令  → 通过（整串同时当口令也通过 → 服务端只查用户名）
+			// 所以这里必须跟 gost 一致：User = 整串，Pass = ""。
+			// 以前猜成“整串当口令、用户名为空”，等于这类上游根本用不了。
+			up.Creds.User, up.Creds.Pass = s, ""
 		}
 	}
 	// 脱敏占位符不能当凭据用。

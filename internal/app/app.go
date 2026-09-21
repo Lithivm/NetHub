@@ -204,8 +204,6 @@ func (a *App) Start() error {
 		a.startHostsWatch()
 	}
 
-	a.Bus.Info("上游为原生实现（无需 gost 子进程）")
-
 	// 2) 拦截
 	if err := a.Engine.Start(); err != nil {
 		a.Bus.Error("%v", err)

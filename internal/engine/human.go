@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -33,4 +34,13 @@ func humanDur(d time.Duration) string {
 	default:
 		return fmt.Sprintf("%dh%02dm", s/3600, (s%3600)/60)
 	}
+}
+
+// firstLine 取多行错误的第一行 —— 只给“不打 ERROR”的降级日志用
+// （那条日志是 INFO，塞多行会把 INFO 的形态破坏掉；完整报错在别处照常打）。
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
 }

@@ -881,13 +881,24 @@ function targetsCell(list, ports, shadowed, localNets, inactive, apps, resolves,
   // 那意味着这条规则现在什么都不拦（没观察到 DNS 应答就看不出名字）。
   for (const w of (wildcards || [])) {
     const ips = w.ips || [];
+    // "没学到 IP" 有两种截然不同的意思，不能混着说：
+    //  接管开着（w.takeover）：这条规则**在工作** —— 命中它的名字我们在 DNS 阶段就回了假 IP
+    //    直接拦下来了，只是那些名字的真实 IP 我们还不知道（不需要知道）；
+    //  接管关着：那就真的什么都不拦（只能等嗅探到明文 DNS 应答）。
     const s = el('span', ips.length ? 'dim' : 'resolve-bad',
-      ips.length ? '  → 已覆盖 ' + ips.length + ' 个 IP' : '  ⚠ 还没学到任何 IP');
+      ips.length ? '  → 已覆盖 ' + ips.length + ' 个 IP'
+        : (w.takeover ? '  ✓ 接管中（还没学到 IP）' : '  ⚠ 还没学到任何 IP'));
     s.title = ips.length
       ? w.pattern + ' 现在覆盖：\n' + ips.join('\n') +
         (w.updated && w.updated !== '—' ? '\n（最后一次更新：' + w.updated + ' 前）' : '')
-      : w.pattern + ' 目前没匹配到任何 IP。\n原因：通配域名只能靠“观察应用自己的 DNS 应答”知道 IP，' +
-        '还没看到任何名字落到这个后缀下（应用还没访问过，或用了加密 DNS/DoH，那样我们看不见）。';
+      : w.takeover
+        ? w.pattern + ' 正在接管：命中它的域名在 DNS 阶段就被回了假 IP（我们自己的地址），\n' +
+          '连到假 IP 会被拦下、换回真实 IP 再走这条规则指定的链 —— 所以这条规则已经在工作。\n' +
+          '“还没学到 IP”只表示：这些名字的真实 IP 我们还没有记录（没访问过，或它走的是加密 DNS）。\n' +
+          '记录会在第一次真正连上之后出现（那是“名字 → 真实 IP”），同时也是给“应用第二次用\n' +
+          '缓存里的真实 IP 直连”用的。'
+        : w.pattern + ' 目前没匹配到任何 IP。\n原因：通配域名只能靠“观察应用自己的 DNS 应答”知道 IP，' +
+          '还没看到任何名字落到这个后缀下（应用还没访问过，或用了加密 DNS/DoH，那样我们看不见）。';
     c.appendChild(s);
   }
   ports = ports || [];
@@ -1186,14 +1197,31 @@ function renderClash(v) {
   }
 
   if (v.coverage && v.coverage.checked && v.coverage.checked.length) {
-    const hit = v.coverage.checked.length - ((v.coverage.missed || []).length);
+    const missed = v.coverage.missed || [];
+    const hit = v.coverage.checked.length - missed.length;
     const c = el('div', 'hint');
-    c.textContent = '绕过覆盖：' + hit + '/' + v.coverage.checked.length + ' 命中（含内网网段代表 IP）';
-    if (v.coverage.missed && v.coverage.missed.length) {
-      c.textContent += '　✗ 未覆盖：' + v.coverage.missed.join(';');
-      c.className = 'hint clash-no';
-    }
+    c.textContent = '绕过覆盖：' + hit + '/' + v.coverage.checked.length + ' 命中（下列目标逐个核对过）';
+    c.className = hit === v.coverage.checked.length ? 'hint' : 'hint clash-no';
     det.appendChild(c);
+
+    // 检测什么就显示什么：把**实际核对过的每一个目标**列出来（不列的话，
+    // 加了网段而数字没变，会让人以为这项检测是写死的）。默认收起，点一下展开。
+    const box = el('details', 'clash-cov');
+    const sum = el('summary', 'hint');
+    sum.textContent = '查看核对明细（' + v.coverage.checked.length + ' 项）';
+    box.appendChild(sum);
+    const tbl = el('div', 'clash-table');
+    ['核对目标', '绕过列表', '判定'].forEach(h => tbl.appendChild(el('div', null, h)));
+    const missSet = new Set(missed);
+    v.coverage.checked.forEach(t0 => {
+      const bad = missSet.has(t0);
+      tbl.appendChild(el('div', 'mono', t0));
+      tbl.appendChild(el('div', bad ? 'clash-no' : null, bad ? '✗ 没命中' : '✓ 命中'));
+      tbl.appendChild(el('div', bad ? 'clash-no' : 'clash-ok',
+        bad ? '会被交给 Clash（内网有外泄风险）' : '不会进代理'));
+    });
+    box.appendChild(tbl);
+    det.appendChild(box);
   }
 
   if (v.mode !== 'none') {
@@ -1324,9 +1352,11 @@ const HELP = {
       '域名（main.his.com）：启动时以及每 5 分钟解析一次，拿解析到的 IP 去匹配；解析到 IP 后会把它交给上游去解析（内网域名往往只有客户网内的 DNS 才解得开）。',
       '解析不到的域名规则：什么都不拦（不猜、也不退化成拦全部），日志与规则页都会标出来。',
       '通配域名（*.his.com）：不包含 his.com 本身，包含任意层级（a.b.his.com 也算），大小写不敏感。',
-      '通配域名没法提前解析，只能靠“观察应用自己的 DNS 应答”知道名字→IP；所以我们只读噢探 DNS（不改任何包）。',
-      '规则页里“已覆盖 N 个 IP”就是这个观察的结果；“还没学到任何 IP”说明这条规则现在什么都不拦。',
-      '观察不到的情形：应用用了加密 DNS（DoH/DoT）、或自己实现了解析器 → 那时通配规则不生效。',
+      '通配域名没法提前解析，只能靠“观察应用自己的 DNS 应答”知道名字→IP；所以我们只读嗅探 DNS（不改任何包）。',
+      'DNS 接管（默认开）是更稳的那条路：命中通配规则的名字，我们在 DNS 阶段就回一个假 IP 拦下来，\n连上来时再换回真实 IP —— 名字在连接之前就到手了，不依赖嗅探。',
+      '规则页的“已覆盖 N 个 IP”来自观察结果；显示“接管中（还没学到 IP）”表示这条规则已经在工作，\n只是那些名字的真实 IP 还没被记录下来（第一次连上之后就有了）。',
+      '接管关掉时“还没学到任何 IP”才是真的什么都不拦。',
+      '观察不到的情形：应用用了加密 DNS（DoH/DoT）、或自己实现了解析器 → 那时靠嗅探的通配规则不生效\n（接管开着的话仍然生效）。',
       '一个 IP 被多个域名共用时：命中任一匹配的名字即可（同一个 IP 属于通配覆盖范围就算命中）。',
       '想要“更稳”的写法：把关键内网域名同时写一条具体域名规则，不依赖观察。',
     ],

@@ -65,13 +65,29 @@ func TestUpstream(cfg *config.Config) {
 	}
 
 	fmt.Printf("\n=== 结果：%d 条链通，%d 条不通 ===\n", pass, fail)
-	if pass > 0 && fail == 0 {
-		fmt.Println("原生实现可行：上游能力已内置，不再需要 gost.exe。")
-	}
 }
 
 // realHostsByChain 从 hosts 条目里取出每个链网段内的真实主机 IP。
 func realHostsByChain(cfg *config.Config) map[string][]net.IP {
+	// ① 规则里写死的单个 IP（裸 IP 或 /32）就是真实目标，先收进来 ——
+	// 与界面自检用同一套口径（见 probeIPsForChain），否则会出现
+	// “界面能探活、命令行却说找不到主机”的不一致。
+	out := map[string][]net.IP{}
+	for _, rt := range cfg.Routes {
+		for _, t := range rt.Targets {
+			t = strings.TrimSpace(t)
+			if ip := net.ParseIP(t); ip != nil && ip.To4() != nil {
+				out[rt.Chain] = append(out[rt.Chain], ip.To4())
+				continue
+			}
+			if ip, n, err := net.ParseCIDR(t); err == nil && ip.To4() != nil {
+				if ones, _ := n.Mask.Size(); ones == 32 {
+					out[rt.Chain] = append(out[rt.Chain], ip.To4())
+				}
+			}
+		}
+	}
+
 	type cidr struct {
 		chain string
 		n     *net.IPNet
@@ -87,7 +103,6 @@ func realHostsByChain(cfg *config.Config) map[string][]net.IP {
 		}
 	}
 
-	out := map[string][]net.IP{}
 	seen := map[string]bool{}
 	for _, e := range hostsEntriesFrom(cfg) {
 		f := strings.Fields(e)

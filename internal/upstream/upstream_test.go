@@ -34,8 +34,11 @@ func TestParseSchemes(t *testing.T) {
 		{"https://proxy:8443", "http", true, "", "", "proxy:8443"},
 		{"http://u:p@proxy:8080", "http", false, "u", "p", "proxy:8080"},
 		{"socks5+tls://u:p@1.2.3.4:443", "socks5", true, "u", "p", "1.2.3.4:443"},
-		// 只有 token、没有 user:pass（真实客户里有：同行的 snzyy 链就是这种）
-		{"socks5+tls://1.2.3.4:10080?auth=dG9rZW4tb25seQ==", "socks5", true, "", "token-only", "1.2.3.4:10080"},
+		// 只有 token、没有 user:pass：gost 的含义是“整个值 = 用户名、口令空”
+		// （实测：同事的 snzyy 链就是这种，见 upstream.go 里的注释）
+		{"socks5+tls://1.2.3.4:10080?auth=dG9rZW4tb25seQ==", "socks5", true, "token-only", "", "1.2.3.4:10080"},
+		// 真实的 snzyy：auth 解出来是 38 字节二进制（含非 ASCII），也得原样当用户名
+		{"socks5+tls://1.2.3.4:10084?auth=SHQxN3FjVDBydEtRb2JHekVWUUcxV2t3a0xSUHlQQTZZS3FXVUg=", "socks5", true, "Ht17qcT0rtKQobGzEVQG1WkwkLRPyPA6YKqWUH", "", "1.2.3.4:10084"},
 	}
 	for _, c := range cases {
 		up, err := Parse(c.raw)

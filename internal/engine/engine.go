@@ -353,13 +353,18 @@ func (e *Engine) Start() error {
 
 	// 域名规则：先把域名解析成 IP（供匹配与过滤器用），再装配过滤器。
 	// 必须在 buildFilter 之前 —— 否则这些 IP 不在过滤器里，包根本不到我们手上。
+	// （实测 0ms：域名规则本来就少，hosts 里的名字还是直接查文件的）
 	e.resolveHostTargets(false)
+
 	// 启动时读一次 Windows DNS 客户端缓存：把“NetHub 启动之前就解析过”的名字
 	// 也灌进名字表（顺带覆盖系统级 DoH —— 那种场景看不到明文报文，但缓存照写）。
+	//
+	// ⚠ 必须放**后台**：本机实测这一步要 16.3 秒（缓存条目多 + 逐条 DnsQuery_A），
+	// 而它只补“按名字匹配的覆盖面”，不影响服务立即可用 —— 以前“服务已就绪”
+	// 就被它噎住 16 秒（点完启动半天没反应）。它只动名字表，结果经
+	// applyHostIPs → 动态过滤器补上（先开新句柄再关旧的，零丢包）。
 	if e.rules.HasWildcards() {
-		if n := e.dnsCacheSeed(); n > 0 {
-			e.bus.Info("dns.seed: names=%d source=windows-dns-cache", n)
-		}
+		go e.seedDNSCache()
 	}
 
 	// DNS 接管（发假 IP）：池子在这里建，它覆盖的**整段**假 IP 要进主过滤器 ——
@@ -821,6 +826,11 @@ func (e *Engine) handleConn(c net.Conn) {
 		if real != nil {
 			st.realDst = real
 			st.dst = real
+			// 把“名字 → 真实 IP”记进名字表。两个作用：
+			//  ① 界面上的通配规则能显示“已覆盖 N 个 IP”（否则接管过的名字永远是空的，
+			//     看起来像“这条规则什么都不拦”—— 而它刚刚才拦过）；
+			//  ② 应用第二次直接用缓存里的**真实 IP** 连过来时，也能按名字命中这条规则。
+			e.noteRealIP(name, real)
 			e.bus.Info("DNS 接管：假 IP %s → %s 的真实 IP %s", st.fakeName, name, real)
 		} else {
 			e.bus.Info("DNS 接管：假 IP %s → %s 本机解不开，交给上游解析", st.dst, name)
@@ -866,12 +876,21 @@ func (e *Engine) handleConn(c net.Conn) {
 		// 原始报错一字不改地打出来（现场是把日志整段复制给 agent 看的，
 		// 任何“翻译成人话”都会把底层信息抹掉）。这里只补几项我们才知道的上下文：
 		// 命中哪条链、谁发起的、以及这条链试过哪些上游。
-		who := st.procName
-		if who == "" {
-			who = "未知进程"
+		//
+		// 进程定位不到时（系统服务的短连接、受保护进程、连接已消失）：
+		// **不进 ERROR**，只打一行 INFO。两个原因：
+		//  ① 对用户可操作的信息 = 0（它多半是系统的后台连接，如 Windows 传递优化连局域网邻居）；
+		//  ② 以前这里会打 “PID 0” —— PID 0 在 Windows 上是空闲进程、永远不会拥有 TCP 连接，
+		//     那只是我们“查不到”的哨兵值，打在日志里纯属误导（用户以为多了个进程）。
+		if st.procName == "" {
+			e.bus.Info("tunnel.down: chain=%s target=%s:%d proc=unknown src_port=%d err=%s",
+				st.chain, st.dst, st.dport, sport, firstLine(err.Error()))
+			st.fail(err.Error())
+			e.finish(st)
+			return
 		}
 		e.bus.Error("[%s] 隧道建立失败 %s:%d（进程 %s，PID %d，源端口 %d）",
-			st.chain, st.dst, st.dport, who, st.pid, sport)
+			st.chain, st.dst, st.dport, st.procName, st.pid, sport)
 		for _, line := range strings.Split(err.Error(), "\n") {
 			e.bus.Error("    %s", line)
 		}
@@ -1329,6 +1348,10 @@ type WildcardStat struct {
 	Pattern string
 	IPs     []string
 	Updated string // 距上次更新多久（人读）
+
+	// Takeover：DNS 接管是否开着。开着时“还没学到 IP”**不等于**“什么都不拦”
+	// —— 接管路径直接按名字回假 IP 拦下来了，只是那些真实 IP 我们还不知道。
+	Takeover bool
 }
 
 // WildcardStats 通配域名规则当前各覆盖到哪些 IP。
@@ -1348,7 +1371,7 @@ func (e *Engine) WildcardStats() []WildcardStat {
 			}
 			sort.Strings(ips)
 			seen[w] = ips
-			out = append(out, WildcardStat{Pattern: w, IPs: ips})
+			out = append(out, WildcardStat{Pattern: w, IPs: ips, Takeover: e.cfg.DNSTakeoverEnabled()})
 		}
 	}
 	if len(out) == 0 {
@@ -1843,6 +1866,9 @@ func (e *Engine) realResolver() *net.Resolver {
 }
 
 // resolveReal 把一个域名在本机解析成**真实 IP**（绕开我们自己的假 IP）。
+//
+// 拿到后调用方应该把它记进名字表（见 noteRealIP）—— 假 IP 只是为了让包能被拦到，
+// 真实 IP 才是“这个名字现在实际用哪个地址”，它同时也是界面统计的数据源。
 func (e *Engine) resolveReal(name string) net.IP {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
@@ -1856,6 +1882,25 @@ func (e *Engine) resolveReal(name string) net.IP {
 		}
 	}
 	return nil
+}
+
+// noteRealIP 记下“我们代理自己解出来的真实 IP”（DNS 接管路径专用）。
+//
+// 优先级用 PrioObserved（和嗅到的 DNS 应答同级）：dnsmap 是“只升不降”，所以
+// 配置里 hosts/域名规则写死的映射（PrioRule）不会被这里覆盖 —— 那是用户明写的意图。
+// TTL 与假 IP 同寿命（dnsFakeTTL）：过期自然回收，不会长期留着旧 IP。
+func (e *Engine) noteRealIP(name string, ip net.IP) {
+	v4 := ip.To4()
+	if v4 == nil || e.names == nil {
+		return
+	}
+	before := e.names.IPsFor(name)
+	e.names.SetWithTTL(name, []string{v4.String()}, dnsmap.PrioObserved, dnsFakeTTL)
+	if !sameStrSet(before, e.names.IPsFor(name)) {
+		// 通了新 IP → 让内核过滤器把目标换进来（否则包到不了我们手里）
+		e.applyHostIPs()
+		e.onWildcardsChanged()
+	}
 }
 
 // dnsCanaries 自检用的“不相干名字”（不属于任何通配规则，必须能解析出**真实 IP**）。
@@ -2239,7 +2284,7 @@ func (e *Engine) checkUnrelayed() {
 		}
 		who := b.proc
 		if who == "" {
-			who = "未知进程"
+			who = "未定位到进程（系统服务/已退出）"
 		}
 		e.bus.Error("   %s （链 %s，%s，已等 %.1fs）", b.dst, b.chain, who, b.since.Seconds())
 	}

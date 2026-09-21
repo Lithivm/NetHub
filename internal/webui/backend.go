@@ -1381,17 +1381,29 @@ func (b *Backend) SelfTest() {
 			ip := net.ParseIP(hitIP)
 			if hit == 0 {
 				guessed = true
-				ip = probeIPForChain(b.a.Cfg, ch.Name)
-				if ip == nil {
-					b.a.Bus.Warn("[%s] 找不到可探测的真实主机（hosts 为空且还没有内网连接），跳过", ch.Name)
-					add(ch.Name, true, "跳过：找不到可探测的真实主机（hosts 为空且还没有内网连接）", "代理段本身正常，只是没东西可探")
+				// 一条链的规则里可能写了多个单 IP，逐个试到底（第一个可能恰好没开）。
+				cands := probeIPsForChain(b.a.Cfg, ch.Name)
+				if len(cands) == 0 {
+					// 不是问题，只是这条链暂时没东西可探 —— 用 INFO，别用 WARN
+					// （WARN 在界面日志里是警告色，会让人以为链路有问题）
+					b.a.Bus.Info("selftest.skip: chain=%s reason=no-probe-target", ch.Name)
+					add(ch.Name, true,
+						"跳过：这条链的网段里还没有可探的真实主机",
+						"代理段本身正常，只是没东西可探。给它一条 hosts 条目（IP 域名），"+
+							"或者先正常访问一次它的内网目标，之后自检就会自动把它纳入探活。")
 					continue
 				}
-				for _, port := range []uint16{443, 80, 5432, 6446, 5000, 9054, 9056} {
-					conn, derr := dial(ip, port)
-					if derr == nil {
-						conn.Close()
-						hit = int(port)
+				for _, cand := range cands {
+					ip = cand
+					for _, port := range []uint16{443, 80, 5432, 6446, 5000, 9054, 9056} {
+						conn, derr := dial(ip, port)
+						if derr == nil {
+							conn.Close()
+							hit = int(port)
+							break
+						}
+					}
+					if hit > 0 {
 						break
 					}
 				}
@@ -1440,7 +1452,34 @@ func targetIPv4(target string) net.IP {
 
 // probeIPForChain 取该链网段内的一个【真实主机 IP】用于探测。
 // 不用网段的 .1 —— 那不是真主机，会得到 host unreachable 而误判为“链路不通”。
-func probeIPForChain(cfg *config.Config, chainName string) net.IP {
+func probeIPsForChain(cfg *config.Config, chainName string) []net.IP {
+	var out []net.IP
+	// ① 规则里写死的**单个 IP**（裸 IP 或 /32）就是真实目标，最该拿来探活。
+	//
+	// 真实例子：xaby-dev 那条规则的网段里全是大网段，但目标里有 172.16.20.172/32、
+	// 219.145.88.134/32、39.103.146.155/32 —— 以前只去 hosts 里找，找不到就报“跳过”，
+	// 而目标其实就摆在眼前。多个时全部返回（调用方逐个试到底：第一个可能恰好没开）。
+	for _, rt := range cfg.Routes {
+		if rt.Chain != chainName {
+			continue
+		}
+		for _, t := range rt.Targets {
+			t = strings.TrimSpace(t)
+			if ip := net.ParseIP(t); ip != nil && ip.To4() != nil {
+				out = append(out, ip.To4())
+				continue
+			}
+			if ip, n, err := net.ParseCIDR(t); err == nil && ip.To4() != nil {
+				if ones, _ := n.Mask.Size(); ones == 32 {
+					out = append(out, ip.To4())
+				}
+			}
+		}
+	}
+	if len(out) > 0 {
+		return out
+	}
+
 	var nets []*net.IPNet
 	for _, rt := range cfg.Routes {
 		if rt.Chain != chainName {
@@ -1465,11 +1504,12 @@ func probeIPForChain(cfg *config.Config, chainName string) net.IP {
 		}
 		for _, n := range nets {
 			if n.Contains(ip) {
-				return ip.To4()
+				out = append(out, ip.To4())
+				break
 			}
 		}
 	}
-	return nil
+	return out
 }
 
 // ───────────────────────── 打开文件/目录 ─────────────────────────

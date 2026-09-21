@@ -97,6 +97,17 @@ func (e *Engine) dnsCacheSeed() int {
 	return n
 }
 
+// seedDNSCache 后台读一次 Windows DNS 缓存并灌进名字表。
+//
+// 为什么不直接在 Start 里同步做：本机实测这一步要 16.3 秒（缓存条目多 +
+// 逐条 DnsQuery_A），而它只补“按名字匹配的覆盖面”—— 旧实现把“服务已就绪”
+// 噎在它后面十几秒，代价远大于收益。
+func (e *Engine) seedDNSCache() {
+	t0 := time.Now()
+	n := e.dnsCacheSeed()
+	e.bus.Info("dns.seed: names=%d source=windows-dns-cache ms=%d", n, time.Since(t0).Milliseconds())
+}
+
 // dnsCacheLookupA 只从缓存里取这个名字的 A 记录（不发网络请求）。
 func dnsCacheLookupA(name string) []string {
 	p, err := windows.UTF16PtrFromString(name)
