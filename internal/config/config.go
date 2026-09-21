@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 
+	"nethub/internal/dnsmap"
 	"nethub/internal/netx"
 	"os"
 	"path/filepath"
@@ -478,7 +479,7 @@ func (c *Config) Validate() error {
 //	· IP 会变（多 A 记录/备用机房），写死的 IP 很快就是错的
 //	· 运行时我们同时准备了两条路：本机解析（供匹配）+ 把域名交给上游去解析
 //
-// 通配域名（*.x.com）暂时拒绝，但错误信息要说清楚现状与替代方案。
+// 通配域名（*.x.com）会在运行时靠“观察到的 DNS 应答”匹配（见 rules 包与 engine 的 dnsWatch）。
 func NormalizeTarget(s string) (string, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -492,6 +493,18 @@ func NormalizeTarget(s string) (string, error) {
 		}
 		s = cidr
 	}
+	// 以 * 开头的（通配域名）先走通配域名校验：那里的报错最具体
+	// （“只支持 *.域名”、或哪个标签有问题），比后面的 IP 提示更贴切。
+	if strings.HasPrefix(s, "*") {
+		suffix, err := dnsmap.WildcardSuffix(s)
+		if err != nil {
+			return "", err
+		}
+		if isAllDigits(strings.TrimPrefix(suffix, ".")) {
+			return "", fmt.Errorf("通配域名后面得是域名，%q 看起来是 IP —— IP 请写 10.100.100.*（整段）或 CIDR", s)
+		}
+		return "*" + suffix, nil
+	}
 	// 还剩 * 且不是域名（如 10.*.100.5）→ 直接说清改写方式，
 	// 别拖到最后报一句没有信息量的“解析失败”。
 	if strings.Contains(s, "*") && !isHostname(s) {
@@ -502,8 +515,13 @@ func NormalizeTarget(s string) (string, error) {
 		s += "/32"
 	} else if isHostname(s) {
 		if strings.Contains(s, "*") {
-			return "", fmt.Errorf("通配域名还没支持（要偷看 DNS 才能匹配）—— 先写具体域名，" +
-				"或者用这些域名实际所在的 IP 段")
+			// 通配域名：原样保留，校验交给 dnsmap（它也是匹配那一端的唯一实现，
+			// 两边用同一个校验器，不会出现“配置能过、规则不认”）。
+			suffix, err := dnsmap.WildcardSuffix(s)
+			if err != nil {
+				return "", err
+			}
+			return "*" + suffix, nil
 		}
 		if !validHostname(s) {
 			return "", fmt.Errorf("不是合法的域名")
@@ -531,6 +549,19 @@ func isHostname(s string) bool {
 		return false
 	}
 	return strings.ContainsAny(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+}
+
+// isAllDigits 字符串是否只由数字和点组成（用来看“通配域名后面跟的其实是 IP”）。
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if (s[i] < '0' || s[i] > '9') && s[i] != '.' {
+			return false
+		}
+	}
+	return true
 }
 
 // validHostname 粗校域名（不追求 RFC 完备：拦下空格/下划线以外明显不对的写法）。

@@ -187,6 +187,8 @@ type RouteView struct {
 	Apps []string `json:"apps"`
 	// 域名目标：解析到哪、什么时候解析的、解析不到的原因（规则页直接显示）
 	HostResolves []engine.HostResolveView `json:"hostResolves"`
+	// Wildcards 通配域名（*.his.com）当前覆盖到哪些 IP（学习自观察到的 DNS 应答）
+	Wildcards []engine.WildcardStat `json:"wildcards"`
 	// 规则开关（默认开）；停用的规则不进匹配、不占目标
 	Enabled bool `json:"enabled"`
 }
@@ -424,6 +426,7 @@ func (b *Backend) GetRoutes() []RouteView {
 	for _, c := range b.a.Cfg.Chains {
 		note[c.Name] = c.Note
 	}
+	wildcardStats := b.a.Engine.WildcardStats()
 	out := make([]RouteView, 0, len(b.a.Cfg.Routes))
 	for i, r := range b.a.Cfg.Routes {
 		note := note[r.Chain]
@@ -443,6 +446,17 @@ func (b *Backend) GetRoutes() []RouteView {
 				mine = append(mine, hr)
 			}
 		}
+		// 通配域名（*.his.com）没有“解析结果”，但有“已经学到哪些 IP”——
+		// 不显示的话，界面上看不到它到底覆盖了什么，跟“静默失效”没区别。
+		var wild []engine.WildcardStat
+		for _, st := range wildcardStats {
+			for _, t := range r.Targets {
+				if strings.EqualFold(strings.TrimSpace(t), st.Pattern) {
+					wild = append(wild, st)
+					break
+				}
+			}
+		}
 		out = append(out, RouteView{
 			Index: i, Name: r.Name, Targets: r.Targets, Ports: r.Ports,
 			Chain: r.Chain, Direct: r.IsDirect(), Block: r.IsBlock(), Note: note,
@@ -452,6 +466,7 @@ func (b *Backend) GetRoutes() []RouteView {
 			Apps:         r.Apps,
 			Enabled:      r.IsEnabled(),
 			HostResolves: mine,
+			Wildcards:    wild,
 		})
 	}
 	return out

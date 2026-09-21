@@ -843,7 +843,7 @@ async function loadRoutes() {
     idxCell.appendChild(el('span', 'idx', String(r.index + 1)));
     row.appendChild(idxCell);
     row.appendChild(el('div', 'cell' + (r.name ? ' strong' : ' dim'), r.name || '（未命名）'));
-    row.appendChild(targetsCell(r.targets || [], r.ports || [], r.shadowed || [], r.localNets || [], r.inactive, r.apps || [], r.hostResolves || []));
+    row.appendChild(targetsCell(r.targets || [], r.ports || [], r.shadowed || [], r.localNets || [], r.inactive, r.apps || [], r.hostResolves || [], r.wildcards || []));
     row.appendChild(el('div', 'cell' + (r.direct || r.block ? ' dim' : ''), actionLabel(r)));
     row.appendChild(el('div', 'cell dim', r.note || ''));
 
@@ -859,7 +859,7 @@ async function loadRoutes() {
 
 /* 目标列：一条规则可以挂十几个目标，列表里只给摘要，全量放 title，悬停能看全。
    带端口条件时在末尾追一个暗淡的“· 端口 …”标签。 */
-function targetsCell(list, ports, shadowed, localNets, inactive, apps, resolves) {
+function targetsCell(list, ports, shadowed, localNets, inactive, apps, resolves, wildcards) {
   const cap = 3;
   const c = el('div', 'cell mono');
   c.textContent = list.slice(0, cap).join(' ') +
@@ -875,6 +875,19 @@ function targetsCell(list, ports, shadowed, localNets, inactive, apps, resolves)
         '或者在「设置 → 系统 hosts 接管」里写一条 IP 域名映射。'
       : hr.host + ' 解析到 ' + (hr.ips || []).join(', ') +
         (hr.age ? '（' + hr.age + ' 前解析' + (hr.stale ? '，已过期，正在刷新' : '') + '）' : '');
+    c.appendChild(s);
+  }
+  // 通配域名（*.his.com）：显示“已经学到哪些 IP”。学到 0 个要标出来 ——
+  // 那意味着这条规则现在什么都不拦（没观察到 DNS 应答就看不出名字）。
+  for (const w of (wildcards || [])) {
+    const ips = w.ips || [];
+    const s = el('span', ips.length ? 'dim' : 'resolve-bad',
+      ips.length ? '  → 已覆盖 ' + ips.length + ' 个 IP' : '  ⚠ 还没学到任何 IP');
+    s.title = ips.length
+      ? w.pattern + ' 现在覆盖：\n' + ips.join('\n') +
+        (w.updated && w.updated !== '—' ? '\n（最后一次更新：' + w.updated + ' 前）' : '')
+      : w.pattern + ' 目前没匹配到任何 IP。\n原因：通配域名只能靠“观察应用自己的 DNS 应答”知道 IP，' +
+        '还没看到任何名字落到这个后缀下（应用还没访问过，或用了加密 DNS/DoH，那样我们看不见）。';
     c.appendChild(s);
   }
   ports = ports || [];
@@ -1300,6 +1313,21 @@ const HELP = {
       '两个程序抢一个全局设置，得不偿失。',
     ],
   },
+  rule: {
+    title: '目标写 IP 还是写域名？通配域名靠什么匹配',
+    paras: [
+      'IP / CIDR：最好懂 —— 包里就是 IP，写到哪拦到哪，不依赖任何解析。',
+      'IP 通配（10.100.100.*）：写法是整段（等于 /24），方便照搬 Proxifier 里已有的规则。',
+      '域名（main.his.com）：启动时以及每 5 分钟解析一次，拿解析到的 IP 去匹配；解析到 IP 后会把它交给上游去解析（内网域名往往只有客户网内的 DNS 才解得开）。',
+      '解析不到的域名规则：什么都不拦（不猜、也不退化成拦全部），日志与规则页都会标出来。',
+      '通配域名（*.his.com）：不包含 his.com 本身，包含任意层级（a.b.his.com 也算），大小写不敏感。',
+      '通配域名没法提前解析，只能靠“观察应用自己的 DNS 应答”知道名字→IP；所以我们只读噢探 DNS（不改任何包）。',
+      '规则页里“已覆盖 N 个 IP”就是这个观察的结果；“还没学到任何 IP”说明这条规则现在什么都不拦。',
+      '观察不到的情形：应用用了加密 DNS（DoH/DoT）、或自己实现了解析器 → 那时通配规则不生效。',
+      '一个 IP 被多个域名共用时：命中任一匹配的名字即可（同一个 IP 属于通配覆盖范围就算命中）。',
+      '想要“更稳”的写法：把关键内网域名同时写一条具体域名规则，不依赖观察。',
+    ],
+  },
   hosts: {
     title: '系统 hosts 接管：我们会动哪一部分',
     paras: [
@@ -1416,6 +1444,7 @@ function wire() {
   bind('btnHelpService', 'service');
   bind('btnHelpClash', 'clash');
   bind('btnHelpHosts', 'hosts');
+  bind('btnHelpRule', 'rule');
 
   // 连接页
   document.getElementById('btnConnRefresh').onclick = () => loadConns();

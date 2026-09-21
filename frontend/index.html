@@ -94,6 +94,7 @@
         <button class="btn btn-sm" id="btnRuleSort" title="前缀长的（/32 比 /24 具体）排前面，带端口条件的更靠前；本机自身 / 环回（127.0.0.0/8）类规则放最后——它是兜底，不跟内网网段抢位置；停用的规则原地不动">按优先级排序</button>
         <button class="btn btn-sm" id="btnRuleOverlap">检查重叠</button>
         <button class="btn btn-sm btn-primary" id="btnRuleAdd">添加规则</button>
+        <button class="info-btn" id="btnHelpRule" title="域名与通配域名是怎么匹配上的">i</button>
       </div>
       <div class="card-body form">
         <div class="input-row" style="align-items:flex-start">
@@ -101,7 +102,7 @@
             placeholder="一批目标：一行一个（也支持逗号/分号分隔、# 注释），如&#10;10.0.0.5:5432&#10;172.16.0.0/24&#10;10.20.0.99:80   # 影像库"></textarea>
           <button class="btn btn-sm btn-primary" id="btnExplain">模拟</button>
         </div>
-        <div class="hint">也可以直接写域名（main.his.com）或 IP 通配（10.100.100.*）。</div>
+        <div class="hint">目标可以是 IP/CIDR、IP 通配（10.100.100.*）、域名（main.his.com）或通配域名（*.his.com）。</div>
       </div>
       <div class="table" id="ruleTable"></div>
     </div>

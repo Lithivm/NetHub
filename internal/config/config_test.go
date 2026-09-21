@@ -863,6 +863,10 @@ func TestTargetAcceptsHostname(t *testing.T) {
 		"10.0.0.0/24":     "10.0.0.0/24",
 		"main-wbzxyy.cn":  "main-wbzxyy.cn",
 		"a1.b2-c3.d4.com": "a1.b2-c3.d4.com",
+		// 通配域名（靠观察到的 DNS 匹配）：归一化成 小写 + 单个前导 *
+		"*.HIS.com":  "*.his.com",
+		"*.his.com.": "*.his.com",
+		"*.corp":     "*.corp",
 	} {
 		got, err := NormalizeTarget(in)
 		if err != nil {
@@ -873,15 +877,24 @@ func TestTargetAcceptsHostname(t *testing.T) {
 			t.Errorf("NormalizeTarget(%q) = %q，期望 %q", in, got, want)
 		}
 	}
-	// 通配：拒绝，但要把"为什么 + 替代方案"说清楚
-	for _, bad := range []string{"main.*.com", "*.his.com"} {
+	// 通配域名里写错位置/写太宽：拒绝，报错要说清只支持 `*.域名`
+	for _, bad := range []string{"main.*.com", "*his.com"} {
 		_, err := NormalizeTarget(bad)
 		if err == nil {
-			t.Errorf("%q 应该被拒绝（通配还没支持）", bad)
+			t.Errorf("%q 应该被拒绝（只支持 *.域名）", bad)
 			continue
 		}
-		if !strings.Contains(err.Error(), "通配") || !strings.Contains(err.Error(), "具体域名") {
-			t.Errorf("%q 的报错要说明现状与替代方案，得到 %v", bad, err)
+		if !strings.Contains(err.Error(), "*.域名") {
+			t.Errorf("%q 的报错要说明支持的写法，得到 %v", bad, err)
+		}
+	}
+	// 其他畸形写法：拒绝即可，但报错不能是空的也不能没有信息量
+	for _, bad := range []string{"*", "*.", "*.a..com", "*.10.0.0.1"} {
+		_, err := NormalizeTarget(bad)
+		if err == nil {
+			t.Errorf("%q 应该被拒绝", bad)
+		} else if strings.TrimSpace(err.Error()) == "" {
+			t.Errorf("%q 的报错是空的", bad)
 		}
 	}
 	// 明显不是域名也不是 IP 的写法仍要被挡
@@ -908,8 +921,8 @@ func TestIPWildcard(t *testing.T) {
 			t.Errorf("NormalizeTarget(%q) = %q，期望 %q", in, got, want)
 		}
 	}
-	// 猜不出范围的写法要拒绝，并且说清怎么写
-	for _, bad := range []string{"10.*.100.5", "10.100.*.5", "*"} {
+	// 猜不出范围的写法要拒绝，并且说清怎么写（单独一个 * 走的是通配域名那条路，在上一组用例里）
+	for _, bad := range []string{"10.*.100.5", "10.100.*.5"} {
 		_, err := NormalizeTarget(bad)
 		if err == nil {
 			t.Errorf("%q 应该被拒绝", bad)

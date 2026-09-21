@@ -43,19 +43,24 @@ func TestCoverageWithSystemProxy(t *testing.T) {
 	}
 	var hasDomain bool
 	for _, m := range c.Missed {
-		if m == "main.his.com" {
+		// hosts 条目的名字不会产生 DNS 查询（系统直接查文件），所以报的是它的 **IP**：
+		// 真正该进绕过列表的也是这个 IP。
+		if m == "172.30.4.217" {
 			hasDomain = true
 		}
 		if m == "219.145.88.134" {
 			t.Error("停用规则的目标不该进检查（会把同事的停用环境误报成红线）")
 		}
+		if m == "main.his.com" {
+			t.Error("hosts 条目应报 IP（它不走 DNS），不该报域名")
+		}
 	}
 	if !hasDomain {
-		t.Error("域名目标（hosts 条目）也要进检查")
+		t.Error("hosts 条目对应的 IP 要进检查")
 	}
 
-	// 绕过列表补上（含域名）→ 恢复 OK
-	pm.BypassRaw = "localhost;127.*;10.*;172.16.*;172.30.*;main.his.com"
+	// 绕过列表补上（含网段）→ 恢复 OK
+	pm.BypassRaw = "localhost;127.*;10.*;172.16.*;172.30.*"
 	if c2 := coverageFor(cfg, pm); !c2.OK {
 		t.Errorf("绕过列表覆盖后应 OK，得到 %+v", c2)
 	}

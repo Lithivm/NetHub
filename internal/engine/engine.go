@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"net"
 	"nethub/internal/dnsmap"
+	"nethub/internal/dnssniff"
 	"nethub/internal/winrun"
 	"os"
 	"path/filepath"
@@ -213,16 +214,29 @@ type Engine struct {
 	rules *rules.Set
 	cfg   *config.Config
 
-	mu      sync.RWMutex
-	handle  *divert.Handle
-	ln      net.Listener
-	relay   string
-	conns   map[uint16]*connState
-	notices map[uint16]noticeSeen    // 直连/阻断日志去重：源端口 → 上次报过的动作+目标
-	health  map[string][]*upHealth   // 每条链的上游健康（与 Upstreams() 下标对齐）
-	targets map[string]*targetHealth // 业务目标巡检结果（按 ip:port 索引）
-	round   int                      // 轮询策略的游标
-	run     bool
+	mu     sync.RWMutex
+	handle *divert.Handle
+	// dynHandle 第二只句柄：只装「通配域名当前覆盖到的 IP」。
+	// 通配域名没法主动解析，只能等观察到应用的 DNS 应答才知道 IP，
+	// 所以它必须可热替换（先开新的、再关旧的，中间不丢包）。
+	dynHandle *divert.Handle
+	dynStop   chan struct{}
+	dynFilter string
+	dynAt     time.Time
+	// dnsSeen / dnsLearn 只读嗅探 DNS 的统计（界面与日志用，见 dnsLoop）。
+	dnsSeen  atomic.Uint64
+	dnsLearn atomic.Uint64
+	// dynDirty/dynLast 动态过滤器的重建节流（见 onWildcardsChanged）。
+	dynDirty chan struct{}
+	dynLast  atomic.Int64
+	ln       net.Listener
+	relay    string
+	conns    map[uint16]*connState
+	notices  map[uint16]noticeSeen    // 直连/阻断日志去重：源端口 → 上次报过的动作+目标
+	health   map[string][]*upHealth   // 每条链的上游健康（与 Upstreams() 下标对齐）
+	targets  map[string]*targetHealth // 业务目标巡检结果（按 ip:port 索引）
+	round    int                      // 轮询策略的游标
+	run      bool
 
 	// 统计
 	statTotal   uint64
@@ -272,6 +286,7 @@ func New(bus *logbus.Bus, rs *rules.Set, cfg *config.Config) *Engine {
 		cap:         newCapturer(),
 		proc:        proc.NewResolver(),
 		names:       dnsmap.New(),
+		dynDirty:    make(chan struct{}, 1),
 	}
 }
 
@@ -336,7 +351,6 @@ func (e *Engine) Start() error {
 		ln.Close()
 		return fmt.Errorf("WinDivert 打开失败: %w", err)
 	}
-
 	e.mu.Lock()
 	e.ln, e.relay, e.handle, e.run = ln, relay, h, true
 	e.mu.Unlock()
@@ -357,15 +371,21 @@ func (e *Engine) Start() error {
 			ch.Name, len(ch.Upstreams()), ch.StrategyName(), ch.ProbeInterval())
 	}
 
-	e.wg.Add(7)
+	e.wg.Add(9)
 	go e.acceptLoop()
-	go e.packetLoop()
+	go e.packetLoop(h, nil)
 	go e.janitor()
 	go e.relayWatch()
 	go e.nameLoop()
 	go e.healthLoop()
 	go e.targetLoop()
 	go e.localNetLoop()
+	// 只读噢探 DNS：只有真的用了通配域名才开（否则一分钱不花）。
+	// 它负责把“应用实际解析到的名字→IP”学回来，并维护动态过滤器。
+	if e.rules.HasWildcards() {
+		go e.dnsLoop()
+		go e.dynFilterLoop()
+	}
 	return nil
 }
 
@@ -395,11 +415,19 @@ func (e *Engine) Stop() {
 
 		e.mu.Lock()
 		h, ln, run := e.handle, e.ln, e.run
+		dyn, dynStop := e.dynHandle, e.dynStop
 		e.handle, e.ln, e.run = nil, nil, false
+		e.dynHandle, e.dynStop = nil, nil
 		e.mu.Unlock()
 
 		if h != nil {
 			h.Close() // 让 packetLoop 的 Recv 立刻返回错误
+		}
+		if dynStop != nil {
+			close(dynStop) // 告诉动态句柄的循环“不是出错，是我们在换它”
+		}
+		if dyn != nil {
+			dyn.Close()
 		}
 		if ln != nil {
 			ln.Close()
@@ -761,12 +789,8 @@ func copyAndClose(dst, src net.Conn, counter *atomic.Uint64) {
 
 // ───────────────────────── 包处理 ─────────────────────────
 
-func (e *Engine) packetLoop() {
+func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}) {
 	defer e.wg.Done()
-
-	e.mu.Lock()
-	h := e.handle
-	e.mu.Unlock()
 
 	buf := make([]byte, divert.MTUMax)
 	addr := new(divert.Address)
@@ -779,7 +803,19 @@ func (e *Engine) packetLoop() {
 			select {
 			case <-e.done:
 				return
+			case <-closedCh(stop):
+				return // 我们在换动态句柄，不是出错
 			default:
+				if stop != nil {
+					// 动态句柄出错不能把整个引擎置成“已中断”：它只管通配域名
+					// 那部分流量，掉了就是“这些包不再被接管”。清掉句柄状态，
+					// 下一次观测到新名字时会重新开（见 rebuildDynFilter）。
+					e.bus.Warn("域名通配：动态过滤器已中断: %v（下次观测到域名时会重建）", err)
+					e.mu.Lock()
+					e.dynHandle, e.dynStop, e.dynFilter = nil, nil, ""
+					e.mu.Unlock()
+					return
+				}
 				e.bus.Error("WinDivert Recv 失败，拦截已中断: %v", err)
 				e.setFatal(err) // 让界面变红「Error」—— 否则状态还说“运行中”，其实一个包都没拦
 				if e.Notify != nil {
@@ -837,6 +873,294 @@ func (e *Engine) packetLoop() {
 			e.bus.Warn("注入失败: %v", err)
 		}
 	}
+}
+
+// ───────────────────────── 域名通配：只读嗅探 DNS ─────────────────────────
+
+// dnsSniffFilter 只读嗅探用的过滤器：只关心 DNS **应答**（源端口 53），UDP 与 TCP 都要。
+//
+// 用 sniff + recv-only：包照常交给系统与应用，我们只看一份拷贝 —— 这一步出
+// 任何问题最多是“没看见”，绝不会把全机 DNS 弄坏（这是选这个方案的前提）。
+const dnsSniffFilter = "(inbound and udp and udp.SrcPort == 53) or (inbound and tcp and tcp.SrcPort == 53)"
+
+// dnsLoop 读 DNS 应答 → 学“名字 ↔ IP” → 按需重建动态过滤器。
+func (e *Engine) dnsLoop() {
+	defer e.wg.Done()
+
+	h, err := divert.Open(dnsSniffFilter, divert.LayerNetwork, divert.PriorityHighest, divert.FlagSniff|divert.FlagRecvOnly)
+	if err != nil {
+		e.bus.Warn("域名通配：无法只读嗅探 DNS（%v）—— 通配域名只能匹配已经观察到的名字", err)
+		return
+	}
+	defer h.Close()
+	e.bus.Info("域名通配：已开始只读嗅探 DNS 应答（只读，不改写任何包）")
+
+	buf := make([]byte, divert.MTUMax)
+	addr := new(divert.Address)
+	for {
+		if _, err := h.Recv(buf, addr); err != nil {
+			select {
+			case <-e.done:
+				return
+			default:
+				e.bus.Warn("域名通配：DNS 嗅探中断: %v（通配域名将不再学到新 IP）", err)
+				return
+			}
+		}
+		e.learnDNS(buf)
+	}
+}
+
+// learnDNS 从一条 DNS 报文里学“名字 → IP”，写进名字表。
+//
+// 为什么全记（不只是能命中通配规则的名字）：同一个 IP 常被多个名字共用，
+// 只记能命中的那些会漏掉“先用另一个名字访问过、然后才轮到通配规则”的情况；
+// 表本身按 TTL 过期（见 dnsmap.Expired），不会无限长。
+func (e *Engine) learnDNS(pkt []byte) {
+	payload := dnsPayload(pkt)
+	if len(payload) == 0 {
+		return
+	}
+	res, err := dnssniff.Parse(payload)
+	if err != nil || len(res.Pairs) == 0 {
+		return
+	}
+	e.dnsSeen.Add(1)
+	byName := map[string][]string{}
+	ttl := map[string]time.Duration{}
+	for _, p := range res.Pairs {
+		byName[p.Name] = append(byName[p.Name], p.IP)
+		if cur, ok := ttl[p.Name]; !ok || (p.TTL > 0 && p.TTL < cur) {
+			ttl[p.Name] = p.TTL
+		}
+	}
+	changed := false
+	for name, ips := range byName {
+		before := e.names.IPsFor(name)
+		e.names.SetWithTTL(name, ips, dnsmap.PrioObserved, ttl[name])
+		e.dnsLearn.Add(1)
+		if !sameStrSet(before, e.names.IPsFor(name)) {
+			changed = true
+		}
+	}
+	if changed {
+		e.applyHostIPs()
+		e.onWildcardsChanged()
+	}
+}
+
+// dnsPayload 从 IP 包里取出 UDP/TCP 负载（DNS 报文）。取不到返回 nil。
+//
+// 只认**源端口 53**（应答）：嗅探过滤器只装了这一个条件，这里再守一道，
+// 免得把别的 TCP 流量当成 DNS 报文去解析（解析器再怎么健壮也不该被白喂）。
+func dnsPayload(pkt []byte) []byte {
+	_, _, ihl, proto, ok := parseIPv4(pkt)
+	if !ok {
+		return nil
+	}
+	switch proto {
+	case 17: // UDP
+		if len(pkt) < ihl+8 {
+			return nil
+		}
+		if be16(pkt, ihl) != 53 {
+			return nil
+		}
+		l := int(be16(pkt, ihl+4)) // UDP 长度（含 8 字节头）
+		end := ihl + l
+		if l < 8 || end > len(pkt) {
+			end = len(pkt)
+		}
+		return pkt[ihl+8 : end]
+	case 6: // TCP
+		if len(pkt) < ihl+20 {
+			return nil
+		}
+		if be16(pkt, ihl) != 53 {
+			return nil
+		}
+		hdr := int(pkt[ihl+12]>>4) * 4 // data offset
+		if hdr < 20 || ihl+hdr > len(pkt) {
+			return nil
+		}
+		return pkt[ihl+hdr:]
+	}
+	return nil
+}
+
+// onWildcardsChanged 发现名字表变了：有必要时立刻重建动态过滤器。
+//
+// 为什么要“立刻”：应用解析完域名后会马上发起连接，而那个包还没进过滤器。
+// 这一小段窗口就是能不能拦住首次连接的关键，所以不能等到下一次 tick。
+// 但也不能每个 DNS 应答都重建（重建要开新句柄），所以节流 200 ms，
+// 节流期间只置脏标记，由 dynFilterLoop 补上。
+func (e *Engine) onWildcardsChanged() {
+	if !e.rules.HasWildcards() {
+		return
+	}
+	now := time.Now().UnixMilli()
+	last := e.dynLast.Load()
+	if now-last >= 200 {
+		e.dynLast.Store(now)
+		e.rebuildDynFilter()
+		return
+	}
+	select {
+	case e.dynDirty <- struct{}{}:
+	default: // 已经有人置脏了
+	}
+}
+
+// dynFilterLoop 把节流期间攒下的“脏”补上（最多滞后 200 ms）。
+func (e *Engine) dynFilterLoop() {
+	defer e.wg.Done()
+	tk := time.NewTicker(200 * time.Millisecond)
+	defer tk.Stop()
+	for {
+		select {
+		case <-e.done:
+			return
+		case <-tk.C:
+			select {
+			case <-e.dynDirty:
+				e.dynLast.Store(time.Now().UnixMilli())
+				e.rebuildDynFilter()
+			default:
+			}
+		}
+	}
+}
+
+// rebuildDynFilter 重建动态过滤器（第二只句柄，只装通配域名当前覆盖到的 IP）。
+//
+// 热替换的做法：**先开新句柄、再关旧句柄**，中间不丢包（两只都开着的那一瞬，
+// 同一个包只会被其中一只收到，两边的处理逻辑完全一样）。
+func (e *Engine) rebuildDynFilter() {
+	rs := e.rules.WildcardRanges(e.cfg.CountDirectEnabled())
+	filter := ""
+	if len(rs) > 0 {
+		filter = buildFilter(rs, portOf(e.RelayAddr()))
+	}
+
+	e.mu.Lock()
+	oldH, oldStop, oldFilter := e.dynHandle, e.dynStop, e.dynFilter
+	if filter == oldFilter {
+		e.mu.Unlock()
+		return // 没变化，不要白白换句柄
+	}
+	if filter == "" {
+		e.dynHandle, e.dynStop, e.dynFilter = nil, nil, ""
+		e.mu.Unlock()
+		if oldH != nil {
+			if oldStop != nil {
+				close(oldStop)
+			}
+			oldH.Close()
+			e.bus.Info("域名通配：当前没有命中任何通配规则的 IP，动态过滤器已撤下")
+		}
+		return
+	}
+
+	nh, err := divert.Open(filter, divert.LayerNetwork, divert.PriorityDefault, divert.FlagDefault)
+	if err != nil {
+		e.mu.Unlock()
+		e.bus.Warn("域名通配：动态过滤器打开失败: %v", err)
+		return
+	}
+	if !e.run {
+		// 已经停在停止过程中了：不要把协程加进 WaitGroup（Add 与 Wait 并发是错的）
+		e.mu.Unlock()
+		nh.Close()
+		return
+	}
+	stop := make(chan struct{})
+	e.dynHandle, e.dynStop, e.dynFilter, e.dynAt = nh, stop, filter, time.Now()
+	e.wg.Add(1)
+	e.mu.Unlock()
+
+	go e.packetLoop(nh, stop)
+	if oldH != nil {
+		if oldStop != nil {
+			close(oldStop)
+		}
+		oldH.Close()
+	}
+	e.bus.Info("域名通配：过滤器已更新 —— 覆盖 %d 个 IP 段｜%s", len(rs), filter)
+}
+
+// WildcardStat 一条通配规则当前的状态（界面/日志看“学到了几个 IP”）。
+type WildcardStat struct {
+	Pattern string
+	IPs     []string
+	Updated string // 距上次更新多久（人读）
+}
+
+// WildcardStats 通配域名规则当前各覆盖到哪些 IP。
+func (e *Engine) WildcardStats() []WildcardStat {
+	var out []WildcardStat
+	seen := map[string][]string{}
+	for _, r := range e.rules.List() {
+		for _, w := range r.WildcardTargets() {
+			if _, done := seen[w]; done {
+				continue
+			}
+			var ips []string
+			for h, list := range e.names.Snapshot() {
+				if dnsmap.MatchWildcard(w, h) {
+					ips = append(ips, list...)
+				}
+			}
+			sort.Strings(ips)
+			seen[w] = ips
+			out = append(out, WildcardStat{Pattern: "*" + w, IPs: ips})
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	e.mu.RLock()
+	at := e.dynAt
+	e.mu.RUnlock()
+	age := "—"
+	if !at.IsZero() {
+		age = humanDur(time.Since(at))
+	}
+	for i := range out {
+		out[i].Updated = age
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Pattern < out[j].Pattern })
+	return out
+}
+
+// DNSStats 只读嗅探的统计（进/出）—— 诊断页用。
+func (e *Engine) DNSStats() (seen, learned uint64) {
+	return e.dnsSeen.Load(), e.dnsLearn.Load()
+}
+
+// closedCh 简单包装：nil 通道永远不关闭。
+func closedCh(ch chan struct{}) <-chan struct{} {
+	if ch == nil {
+		return nil
+	}
+	return ch
+}
+
+// sameStrSet 两个集合是否相等（顺序无关，元素不重复）。
+func sameStrSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	m := make(map[string]int, len(a))
+	for _, s := range a {
+		m[s]++
+	}
+	for _, s := range b {
+		m[s]--
+		if m[s] < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // noticeSeen 直连/阻断日志去重用的一条记录。
@@ -1429,11 +1753,13 @@ func procNewResolver() *proc.Resolver { return proc.NewResolver() }
 // 界面上能看到它没解析出来。warnChange 为真时（定期刷新）把"IP 变了"说出来，
 // 因为过滤器在启动时就装配好了，新 IP 要重启服务才生效。
 func (e *Engine) resolveHostTargets(warnChange bool) {
+	e.seedFromHosts()
 	hosts := e.rules.HostTargets()
 	if len(hosts) == 0 {
+		// 没有具体域名要解析：但可能有通配规则，仍要把观察到的名字交下去
+		e.applyHostIPs()
 		return
 	}
-	byHost := map[string][]*net.IPNet{}
 	var unresolved []string
 	for _, h := range hosts {
 		before := e.names.IPsFor(h)
@@ -1442,19 +1768,12 @@ func (e *Engine) resolveHostTargets(warnChange bool) {
 			unresolved = append(unresolved, h)
 			continue
 		}
-		var nets []*net.IPNet
-		for _, s := range ips {
-			if ip := net.ParseIP(s); ip != nil {
-				nets = append(nets, &net.IPNet{IP: ip.To4(), Mask: net.CIDRMask(32, 32)})
-			}
-		}
-		byHost[h] = nets
-		if warnChange && len(before) > 0 && !sameIPSet(before, ips) {
+		if warnChange && len(before) > 0 && !sameStrSet(before, ips) {
 			e.bus.Warn("域名 %s 的 IP 变了（%v → %v）—— 过滤器在启动时装配，重启服务后新 IP 才生效",
 				h, before, ips)
 		}
 	}
-	e.rules.SetHostIPs(byHost)
+	e.applyHostIPs()
 	if len(unresolved) > 0 {
 		// 解析不到的域名规则 = **一条也不拦**（不猜、也不退化成拦全部）。
 		// 启动时也必须说一声，否则“规则配了、什么都没拦、日志也不说”就是静默失效。
@@ -1466,16 +1785,50 @@ func (e *Engine) resolveHostTargets(warnChange bool) {
 	}
 }
 
-func sameIPSet(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
+// seedFromHosts 把 hosts 托管里的条目先灌进名字表。
+//
+// 为什么要这一步：hosts 里的名字**根本不会产生 DNS 报文**（系统直接查文件），
+// 而我们学名字靠的是嗅探 DNS 应答 —— 不灌的话，“内网域名全靠 hosts 写死”
+// 这种最典型的场景下，通配域名将什么都匹配不到。
+// TTL 给长一点（每轮 nameLoop 都会重新灌一遍，过期清理不会误删）。
+func (e *Engine) seedFromHosts() {
+	if e.cfg == nil || !e.cfg.Hosts.Manage {
+		return
 	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
+	for _, line := range e.cfg.Hosts.Entries {
+		f := strings.Fields(strings.TrimSpace(line))
+		if len(f) < 2 || strings.HasPrefix(f[0], "#") {
+			continue
+		}
+		if net.ParseIP(f[0]).To4() == nil {
+			continue
+		}
+		for _, name := range f[1:] {
+			if dnsmap.IsHostname(name) && !dnsmap.IsWildcard(name) {
+				e.names.SetWithTTL(name, []string{f[0]}, dnsmap.PrioObserved, 12*time.Hour)
+			}
 		}
 	}
-	return true
+}
+
+// applyHostIPs 把“名字表里的全部名字（含观察到的）”交给规则层。
+//
+// 通配域名（*.his.com）就是靠这一步才能命中：规则层从 map 里挑出后缀匹配的名字，
+// 把它们当前解析到的 IP 填进 hostIPs —— 这决定了过滤器会不会拦住这些 IP。
+func (e *Engine) applyHostIPs() {
+	byHost := map[string][]*net.IPNet{}
+	for h, ips := range e.names.Snapshot() {
+		var nets []*net.IPNet
+		for _, s := range ips {
+			if ip := net.ParseIP(s); ip != nil && ip.To4() != nil {
+				nets = append(nets, &net.IPNet{IP: ip.To4(), Mask: net.CIDRMask(32, 32)})
+			}
+		}
+		if len(nets) > 0 {
+			byHost[h] = nets
+		}
+	}
+	e.rules.SetHostIPs(byHost)
 }
 
 // nameLoop 定期刷新域名解析（内网 DNS 记录会变；不刷新就一直是启动那一份）。
@@ -1489,8 +1842,26 @@ func (e *Engine) nameLoop() {
 			return
 		case <-tk.C:
 			e.resolveHostTargets(true)
+			e.pruneNames()
 		}
 	}
+}
+
+// pruneNames 掉过期的**观察结果**（规则里写的域名由 resolveHostTargets 重新解析）。
+//
+// 为什么必须做：观察到的名字对应的 IP 会进动态过滤器，不摘掉的话
+// 过滤器只会越滚越大、而且会把早就不用的域名的旧 IP 一直当成“要接管的目标”。
+func (e *Engine) pruneNames() {
+	exp := e.names.Expired()
+	if len(exp) == 0 {
+		return
+	}
+	for _, h := range exp {
+		e.names.Remove(h)
+	}
+	e.bus.Info("域名通配：%d 个观察到的域名已过期（TTL 到）—— 不再作为匹配依据：%v", len(exp), exp)
+	e.applyHostIPs()
+	e.onWildcardsChanged()
 }
 
 // HostResolveView 域名解析状态（界面/诊断页看"这个域名现在指到哪"）。

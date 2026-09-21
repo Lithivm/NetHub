@@ -36,10 +36,15 @@ func TestSetAndLookup(t *testing.T) {
 	if name, _ := m.NameFor(net.ParseIP("172.30.4.217")); name != "main.his.com" {
 		t.Errorf("规则里的名字应优先，得到 %q", name)
 	}
-	// 反过来：后写的规则优先级更高（规则之间后写覆盖，符合“改配置”的直觉）
+	// 反过来：另一个规则域名解析到同一个 IP（同优先级）—— 名字按字典序取，保证稳定
+	// （以前是“后写胜出”，改成一表重建后变成字典序；两者都能说得通，但可重现更重要：
+	//  同一个 IP 被两个规则域名共用时，不能因为我们内部写入的先后不同而改变行为）
 	m.Set("newer.example", []string{"172.30.4.217"}, PrioRule)
-	if name, _ := m.NameFor(net.ParseIP("172.30.4.217")); name != "newer.example" {
-		t.Errorf("同优先级后写应覆盖，得到 %q", name)
+	if names := m.NamesFor(net.ParseIP("172.30.4.217")); len(names) != 3 {
+		t.Fatalf("同一个 IP 的三个名字都应该记着，得到 %v", names)
+	}
+	if name, _ := m.NameFor(net.ParseIP("172.30.4.217")); name != "main.his.com" {
+		t.Errorf("同级取字典序最小，得到 %q", name)
 	}
 }
 

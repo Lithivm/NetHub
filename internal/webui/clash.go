@@ -365,7 +365,10 @@ func clashTargets(cfg *config.Config) []string {
 		}
 		f := strings.Fields(e)
 		if len(f) >= 2 {
-			add(f[1])
+			// 加**IP**而不是域名：hosts 里的名字不会产生 DNS 查询（系统直接查文件），
+			// 应用实际连的就是这个 IP，该不该绕过也是按 IP 进的。
+			// 报域名会变成假警报（“DNS 外泄”在这里根本不会发生）。
+			add(f[0])
 		}
 	}
 	for _, rt := range cfg.Routes {
