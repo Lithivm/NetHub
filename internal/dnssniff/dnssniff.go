@@ -170,6 +170,42 @@ func Question(msg []byte) (string, bool) {
 	return name, true
 }
 
+// Query 一条查询的关键信息（DNS 接管要原样搬问题段，所以需要 QEnd）。
+type Query struct {
+	ID    uint16
+	Name  string // 小写、无尾点
+	Type  uint16 // 1=A、28=AAAA、12=PTR …
+	Class uint16
+	QEnd  int // 问题段结束位置（相对 DNS 报文头部），用于原样搬运
+}
+
+// ParseQuery 解析一条查询报文的头部与第一个问题。
+//
+// 只从**查询**报文取（QR=0）；应答或畸形报文返回 false —— 接管那边只关心
+// “应用要解析什么”，拿应答当查询处理会回路。
+func ParseQuery(msg []byte) (Query, bool) {
+	var q Query
+	if len(msg) < 12 {
+		return q, false
+	}
+	if binary.BigEndian.Uint16(msg[2:4])&0x8000 != 0 {
+		return q, false // 应答，不是查询
+	}
+	if binary.BigEndian.Uint16(msg[4:6]) != 1 {
+		return q, false // 只处理单问题查询（真实世界就是这样）
+	}
+	q.ID = binary.BigEndian.Uint16(msg[0:2])
+	name, next, err := parseName(msg, 12)
+	if err != nil || next+4 > len(msg) {
+		return q, false
+	}
+	q.Name = name
+	q.Type = binary.BigEndian.Uint16(msg[next : next+2])
+	q.Class = binary.BigEndian.Uint16(msg[next+2 : next+4])
+	q.QEnd = next + 4
+	return q, true
+}
+
 // parseName 解析一个（可能带压缩指针的）域名，返回名字和"下一个字段的偏移"。
 func parseName(msg []byte, off int) (string, int, error) {
 	var sb strings.Builder

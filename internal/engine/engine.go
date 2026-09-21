@@ -14,10 +14,12 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"nethub/internal/dnsmap"
 	"nethub/internal/dnssniff"
+	"nethub/internal/fakeip"
 	"nethub/internal/tlsname"
 	"nethub/internal/winrun"
 	"os"
@@ -66,6 +68,11 @@ type connState struct {
 	// 空串 = 查不到（受保护进程/系统服务/已消失）——界面显示“未知”。
 	procName string
 	pid      uint32
+
+	// fakeName/realDst：DNS 接管相关。目标是我们发的假 IP 时，fakeName 是它对应的
+	// 域名，realDst 是这个域名在本机解析出的**真实 IP**（假 IP 绝不能拿去连）。
+	fakeName string
+	realDst  net.IP
 
 	last    atomic.Int64  // unix nano：最后一次看到包/数据的时间
 	up      atomic.Uint64 // 应用 → 目标 的字节（直连只能统计出方向）
@@ -228,6 +235,12 @@ type Engine struct {
 	dnsSeen  atomic.Uint64
 	dnsLearn atomic.Uint64
 	sniLearn atomic.Uint64
+	// fake/injector/tookOver/tookSeen：DNS 接管（发假 IP）。
+	fake     *fakeip.Pool
+	injector *divert.Handle // filter=false 的“只塞”句柄
+	tookOver atomic.Uint64
+	tookSeen map[string]bool
+	dnsBox   *dnsBlackbox // 排查用：DNS 黑匣子（tuning.dns_blackbox 打开时才有）
 	// dynDirty/dynLast 动态过滤器的重建节流（见 onWildcardsChanged）。
 	dynDirty chan struct{}
 	dynLast  atomic.Int64
@@ -338,8 +351,27 @@ func (e *Engine) Start() error {
 	// 必须在 buildFilter 之前 —— 否则这些 IP 不在过滤器里，包根本不到我们手上。
 	e.resolveHostTargets(false)
 
+	// DNS 接管（发假 IP）：池子在这里建，它覆盖的**整段**假 IP 要进主过滤器 ——
+	// 应用拿到假 IP 后会去连它，那段地址不在过滤器里的话包到不了我们手上。
+	var fakeRange *net.IPNet
+	if e.rules.HasWildcards() && e.cfg.DNSTakeoverEnabled() {
+		pool, perr := fakeip.NewPool(e.cfg.FakeIPRangeOr())
+		if perr != nil {
+			e.bus.Error("DNS 接管：假 IP 段不可用（%v）—— 退回只读嗅探（域名通配仍能用，但首次连接可能漏）", perr)
+		} else {
+			e.fake = pool
+			fakeRange = pool.Range()
+		}
+	}
+
 	// 2) 用规则区间拼内核过滤器（直连规则的目标不进过滤器，见 rules.FilterRanges）
 	rs := e.rules.FilterRanges(e.cfg.CountDirectEnabled())
+	if fakeRange != nil {
+		first := rules.IP2U(fakeRange.IP.To4())
+		mask := rules.IP2U(net.IP(fakeRange.Mask).To4())
+		rs = append(rs, rules.Range{First: first, Last: first | ^mask})
+		e.bus.Info("DNS 接管：假 IP 段 %s 已并入过滤器", fakeRange)
+	}
 	if len(rs) == 0 {
 		ln.Close()
 		return fmt.Errorf("没有需要拦截的规则（只填了直连规则时无事可做）")
@@ -393,6 +425,34 @@ func (e *Engine) Start() error {
 			go e.sniLoop()
 		}
 	}
+	// DNS 接管：不再新开“看”的句柄（实测过：再开一只句柄即使只读，也会把整个 DNS
+	// 搞熄）——看查询复用上面那只早已跑通的 dnsLoop 嗅探句柄；
+	// 这里只新开一只 **filter=false** 的“只塞”句柄（什么也不匹配 → 结构上不可能
+	// 影响任何流量），用来把假 IP 应答注进去。
+	if e.fake != nil {
+		dh, derr := divert.Open("false", divert.LayerNetwork, divert.PriorityDefault, divert.FlagDefault)
+		if derr != nil {
+			e.bus.Warn("DNS 接管：注入句柄打开失败（%v）—— 退回只读嗅探", derr)
+			e.fake = nil
+		} else {
+			e.mu.Lock()
+			if e.run {
+				e.injector = dh
+			} else {
+				dh = nil
+			}
+			e.mu.Unlock()
+			if dh != nil {
+				if e.cfg.DNSBlackboxEnabled() {
+					e.dnsBox = openDNSBlackbox(dnsBlackboxPath(), 4<<20)
+					e.bus.Info("DNS 接管：黑匣子已开启（%s）—— 每个查询/每次回答都记在里面", dnsBlackboxPath())
+				}
+				e.bus.Info("DNS 接管：已开启（复用同一只只读嗅探看查询 + filter=false 的句柄塞假 IP）")
+				e.wg.Add(1)
+				go e.dnsTakeoverGuard()
+			}
+		}
+	}
 	return nil
 }
 
@@ -423,15 +483,19 @@ func (e *Engine) Stop() {
 		e.mu.Lock()
 		h, ln, run := e.handle, e.ln, e.run
 		dyn, dynStop := e.dynHandle, e.dynStop
-
+		inj := e.injector
 		e.handle, e.ln, e.run = nil, nil, false
 		e.dynHandle, e.dynStop = nil, nil
-
+		e.injector = nil
 		e.mu.Unlock()
 
 		if h != nil {
 			h.Close() // 让 packetLoop 的 Recv 立刻返回错误
 		}
+		if inj != nil {
+			inj.Close()
+		}
+		e.dnsBox.Close()
 		if dynStop != nil {
 			close(dynStop) // 告诉动态句柄的循环“不是出错，是我们在换它”
 		}
@@ -712,7 +776,29 @@ func (e *Engine) handleConn(c net.Conn) {
 	//
 	// 实测教训：我们这套环境里 main.his.com 只有客户网内的 DNS 能解答，
 	// 上游是公网中转服务器、解析不到（host unreachable）—— 所以不能默认透传。
-	host, hasName := e.names.NameFor(st.dst)
+	host, hasName := e.nameOf(st.dst)
+	// 目标是我们发的假 IP：绝不能拿它去连（那是个不存在的地址）。
+	// 先换回真实 IP，后续流程与“具体域名”完全一致。
+	if e.isFakeIP(st.dst) {
+		name := host
+		st.fakeName = name
+		if !hasName {
+			// 池子里没这个名字：多半是重启前的旧假 IP（映射不落盘）。说清楚，别让人猜。
+			e.bus.Warn("DNS 接管：连到未登记的假 IP %s:%d（NetHub 重启前发的旧应答？）—— 这一条连不上",
+				st.dst, st.dport)
+			st.fail("假 IP 已过期（NetHub 重启过），请重新访问一次")
+			e.finish(st)
+			return
+		}
+		real := e.resolveReal(name)
+		if real != nil {
+			st.realDst = real
+			st.dst = real
+			e.bus.Info("DNS 接管：假 IP %s → %s 的真实 IP %s", st.fakeName, name, real)
+		} else {
+			e.bus.Info("DNS 接管：假 IP %s → %s 本机解不开，交给上游解析", st.dst, name)
+		}
+	}
 	mode := e.cfg.DomainResolveMode()
 	var up net.Conn
 	var err error
@@ -727,18 +813,26 @@ func (e *Engine) handleConn(c net.Conn) {
 		}
 		return false
 	}
-	switch {
-	case mode == "upstream" && hasName:
-		if !tryName() {
+	// 假 IP 且本机解不开：只能交给上游（不能拿假 IP 当目标）。
+	// 其余情况保持原有语义：按 DomainResolve 配置走 local / upstream / auto。
+	if e.isFakeIP(st.dst) {
+		ebus := e.bus
+		ebus.Info("[%s] 目标 %s 是假 IP（无真实 IP），只能交给上游解析域名 %s", st.chain, st.dst, host)
+		tryName()
+	} else {
+		switch {
+		case mode == "upstream" && hasName:
+			if !tryName() {
+				up, err = e.dialUpstreamKeyed(ch, st.dst, st.dport, st.app.String())
+			}
+		case mode == "upstream":
 			up, err = e.dialUpstreamKeyed(ch, st.dst, st.dport, st.app.String())
-		}
-	case mode == "upstream":
-		up, err = e.dialUpstreamKeyed(ch, st.dst, st.dport, st.app.String())
-	default: // local / auto：先用本机解析出的 IP
-		up, err = e.dialUpstreamKeyed(ch, st.dst, st.dport, st.app.String())
-		if err != nil && mode == "auto" && hasName {
-			e.bus.Info("[%s] 按 IP %s 连不上（%v），改用域名 %s 交给上游再试", st.chain, st.dst, err, host)
-			tryName()
+		default: // local / auto：先用本机解析出的 IP
+			up, err = e.dialUpstreamKeyed(ch, st.dst, st.dport, st.app.String())
+			if err != nil && mode == "auto" && hasName {
+				e.bus.Info("[%s] 按 IP %s 连不上（%v），改用域名 %s 交给上游再试", st.chain, st.dst, err, host)
+				tryName()
+			}
 		}
 	}
 	if err != nil {
@@ -835,6 +929,12 @@ func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}) {
 		}
 		pkt := buf[:n]
 
+		// 我们自己的解析（realResolver 从 53901-53910 发）不能被自己答成假 IP ——
+		// 那就是自己骗自己。用源端口在代码里排掉（过滤器保持最简）。
+		if info, _, ok := udpPayload(pkt); ok && info.sport >= dnsProbePortLo && info.sport <= dnsProbePortHi {
+			continue
+		}
+
 		src, dst, ihl, proto, ok := parseIPv4(pkt)
 		if !ok || proto != 6 || len(pkt) < ihl+20 {
 			_, _ = h.Send(pkt, addr)
@@ -858,7 +958,16 @@ func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}) {
 		procName, procPID := e.flowProc(sport)
 
 		// 方向判定不依赖 addr.Flags 的位布局：目标落在规则内 = 应用发出的包。
-		if chain, act, hit := e.rules.MatchProc(dst, dport, procName); hit {
+		// 名字：通配域名只能靠“这个 IP 是哪个域名”匹配。两个来源：
+		//  ① DNS 接管发的假 IP（池子反查）② 嗅探/解析学到的真 IP（名字表）
+		// 没写通配规则时不做这次查找（每包一次查找，不该白付）。
+		name := ""
+		if e.rules.HasWildcards() {
+			if n, ok := e.nameOf(dst); ok {
+				name = n
+			}
+		}
+		if chain, act, hit := e.rules.MatchName(name, dst, dport, procName); hit {
 			switch act {
 			case rules.ActionDirect, rules.ActionBlock:
 				e.passThrough(h, pkt, addr, t, src, dst, sport, dport, flags, act, procName, procPID)
@@ -890,7 +999,8 @@ func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}) {
 //
 // 用 sniff + recv-only：包照常交给系统与应用，我们只看一份拷贝 —— 这一步出
 // 任何问题最多是“没看见”，绝不会把全机 DNS 弄坏（这是选这个方案的前提）。
-const dnsSniffFilter = "(inbound and udp and udp.SrcPort == 53) or (inbound and tcp and tcp.SrcPort == 53)"
+const dnsSniffFilter = "(inbound and udp and udp.SrcPort == 53) or (inbound and tcp and tcp.SrcPort == 53)" +
+	" or (outbound and udp and udp.DstPort == 53)"
 
 // dnsLoop 读 DNS 应答 → 学“名字 ↔ IP” → 按需重建动态过滤器。
 func (e *Engine) dnsLoop() {
@@ -902,12 +1012,13 @@ func (e *Engine) dnsLoop() {
 		return
 	}
 	defer h.Close()
-	e.bus.Info("域名通配：已开始只读嗅探 DNS 应答（只读，不改写任何包）")
+	e.bus.Info("域名通配：已开始只读嗅探 DNS（应答 + 查询，只读不改写）")
 
 	buf := make([]byte, divert.MTUMax)
 	addr := new(divert.Address)
 	for {
-		if _, err := h.Recv(buf, addr); err != nil {
+		n, err := h.Recv(buf, addr)
+		if err != nil {
 			select {
 			case <-e.done:
 				return
@@ -916,8 +1027,88 @@ func (e *Engine) dnsLoop() {
 				return
 			}
 		}
-		e.learnDNS(buf)
+		pkt := buf[:n]
+		// 出方向的查询：DNS 接管（开了才有动作）—— 命中通配规则的名字塞一条假 IP 应答
+		if e.fake != nil && e.takeoverQuery(pkt, addr) {
+			continue
+		}
+		// 入方向的应答：学“名字 → IP”
+		e.learnDNS(pkt)
 	}
+}
+
+// takeoverQuery 处理一条**出方向** DNS 查询：命中通配规则就额外塞一条假 IP 应答。
+//
+// 返回 true 表示“这是查询，已处理”（不必再当应答解析）。
+//
+// 注意：这是**只读**句柄，我们从头到尾**不消费**这个包 —— 原查询照常发出去，
+// 我们只是多塞一条应答。真应答先到的话，应用就用真 IP，而那条路我们能靠
+// “名字→IP”嗅探照常接管（两条路都能到，不会因此失效）。
+func (e *Engine) takeoverQuery(pkt []byte, addr *divert.Address) bool {
+	info, payload, ok := udpPayload(pkt)
+	if !ok {
+		return false
+	}
+	// 我们自己的解析（realResolver 从 53901-53910 发）不能被自己答成假 IP ——
+	// 那就是自己骗自己。用源端口在代码里排掉（过滤器保持最简）。
+	if info.sport >= dnsProbePortLo && info.sport <= dnsProbePortHi {
+		return true
+	}
+	q, okq := dnssniff.ParseQuery(payload)
+	if !okq {
+		return false
+	}
+	// 黑匣子：这是“到底谁弄坏的”唯一的原始事实
+	if e.dnsBox != nil {
+		e.dnsBox.Writef("查询  %s:%d → %s:%d  id=%#04x %s 类型 %d",
+			info.src, info.sport, info.dst, info.dport, q.ID, q.Name, q.Type)
+	}
+	if !e.rules.WildcardMatch(q.Name) {
+		return true // 不命中：什么都不做（原查询照常）
+	}
+	var ansIP net.IP
+	switch q.Type {
+	case 1:
+		ansIP = e.fake.Assign(q.Name, dnsFakeTTL)
+		if ansIP == nil {
+			e.bus.Warn("DNS 接管：假 IP 池已满，本次不接管：%s", q.Name)
+			return true
+		}
+	case 28:
+		ansIP = nil // AAAA：答“没有这条记录”，否则应用可能走 IPv6 绕过我们
+	default:
+		return true
+	}
+	resp := buildDNSResponse(pkt, info, q, ansIP)
+	if resp == nil {
+		return true
+	}
+	inj := e.injectorHandle()
+	if inj == nil {
+		return true
+	}
+	addr.Flags &^= 0x02 // 清掉 Outbound：回包是**入方向**的
+	divert.CalcChecksums(resp, addr, divert.ChecksumDefault)
+	if _, serr := inj.Send(resp, addr); serr != nil {
+		e.bus.Warn("DNS 接管：注入假应答失败（%v）—— 本次不接管，原查询照常生效", serr)
+		if e.dnsBox != nil {
+			e.dnsBox.Writef("注入失败 %s: %v", q.Name, serr)
+		}
+		return true
+	}
+	e.tookOver.Add(1)
+	if e.dnsBox != nil {
+		e.dnsBox.Writef("已回答 %s → %v（已注入应答）", q.Name, ansIP)
+	}
+	e.noteTookOver(q.Name)
+	return true
+}
+
+// injectorHandle 取“只塞”那只句柄（过滤器是 false，什么也不匹配）。
+func (e *Engine) injectorHandle() *divert.Handle {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.injector
 }
 
 // learnDNS 从一条 DNS 报文里学“名字 → IP”，写进名字表。
@@ -1268,6 +1459,12 @@ func (e *Engine) sniLoop() {
 			}
 		}
 		pkt := buf[:n]
+
+		// 我们自己的解析（realResolver 从 53901-53910 发）不能被自己答成假 IP ——
+		// 那就是自己骗自己。用源端口在代码里排掉（过滤器保持最简）。
+		if info, _, ok := udpPayload(pkt); ok && info.sport >= dnsProbePortLo && info.sport <= dnsProbePortHi {
+			continue
+		}
 		src, dst, _, proto, ok := parseIPv4(pkt)
 		if !ok || proto != 6 {
 			continue
@@ -1342,6 +1539,338 @@ func (e *Engine) learnFromHandshake(res tlsname.Result, dst net.IP) {
 	}
 	e.applyHostIPs()
 	e.onWildcardsChanged()
+}
+
+// ───────────────────────── DNS 接管（发假 IP） ─────────────────────────
+
+// dnsTakeoverFilter 【只看】句柄的过滤器：出方向的 DNS 查询（UDP 53）。
+//
+// 故意保持最简（和探针验证过的那条一模一样）：只用一个目的端口条件。
+// “排掉我们自己的解析查询”不写在这里，而是**在代码里**用源端口判断 ——
+// 过滤器越简，越不容易出“看似合理但把包吃了”这种怪事。
+const dnsTakeoverFilter = "outbound and udp and udp.DstPort == 53"
+
+// 我们自己的 DNS 解析专用源端口段（区间选在这种不常用的高位段）。
+const (
+	dnsProbePortLo = 53901
+	dnsProbePortHi = 53910
+)
+
+// seenKey 用“源端口 + DNS事务ID + 名字”做去重键（重放/乒乓的包会完全一样）。
+func seenKey(pkt []byte) (string, bool) {
+	u, payload, ok := udpPayload(pkt)
+	if !ok || len(payload) < 12 {
+		return "", false
+	}
+	q, okq := dnssniff.ParseQuery(payload)
+	if !okq {
+		return "", false
+	}
+	return fmt.Sprintf("%d/%d/%s", u.sport, q.ID, q.Name), true
+}
+
+// buildFakeAnswer 判断这条查询要不要接管；要就造一条应答。
+//
+// 返回的 resp 需要在调用方清掉 Outbound 位并重算校验和后再注入。
+func (e *Engine) buildFakeAnswer(pkt []byte) (resp []byte, name string, ok bool) {
+	info, payload, okp := udpPayload(pkt)
+	if !okp {
+		return nil, "", false
+	}
+	q, okq := dnssniff.ParseQuery(payload)
+	if !okq {
+		return nil, "", false
+	}
+	if !e.rules.WildcardMatch(q.Name) {
+		return nil, "", false
+	}
+	// 只处理 A（1）与 AAAA（28）：
+	//  AAAA 必须答一个**空的 NOERROR**（不能放行）——
+	//  否则真域名有 AAAA 时应用会走 IPv6 绕过我们（引擎只做 IPv4）。
+	switch q.Type {
+	case 1:
+		ip := e.fake.Assign(q.Name, dnsFakeTTL)
+		if ip == nil {
+			e.bus.Warn("DNS 接管：假 IP 池已满，放行原查询：%s", q.Name)
+			return nil, "", false
+		}
+		return buildDNSResponse(pkt, info, q, ip), q.Name, true
+	case 28:
+		return buildDNSResponse(pkt, info, q, nil), q.Name, true
+	default:
+		return nil, "", false
+	}
+}
+
+// noteTookOver 第一次接管某个名字时说一行（带名字与假 IP），之后静默计数。
+func (e *Engine) noteTookOver(name string) {
+	e.mu.Lock()
+	if e.tookSeen == nil {
+		e.tookSeen = map[string]bool{}
+	}
+	show := !e.tookSeen[name]
+	if show {
+		e.tookSeen[name] = true
+	}
+	e.mu.Unlock()
+	if !show {
+		return
+	}
+	ip, _ := e.fake.IPFor(name)
+	if ip == nil {
+		e.bus.Info("DNS 接管：%s → 答\"没有 IPv6 记录\"（避免应用走 IPv6 绕过）", name)
+		return
+	}
+	e.bus.Info("DNS 接管：%s → 假 IP %s（应用连它时我们就知道要去哪个域名）", name, ip)
+}
+
+// ───────────────────────── 名字反查：假 IP 优先 ─────────────────────────
+
+// nameOf 这个目标属于哪个域名：先查假 IP 池（DNS 接管发的），再查名字表（嗅探/解析来的）。
+func (e *Engine) nameOf(ip net.IP) (string, bool) {
+	if e.fake != nil {
+		if n, ok := e.fake.NameFor(ip); ok {
+			return n, true
+		}
+	}
+	if e.names != nil {
+		return e.names.NameFor(ip)
+	}
+	return "", false
+}
+
+// isFakeIP 这个地址是不是我们发的假 IP。
+func (e *Engine) isFakeIP(ip net.IP) bool {
+	return e.fake != nil && e.fake.Range().Contains(ip)
+}
+
+// sweepFakeIP 回收过期的假 IP（一个名字过期后地址还给池子）。
+func (e *Engine) sweepFakeIP() {
+	if e.fake == nil {
+		return
+	}
+	gone := e.fake.Sweep()
+	if len(gone) == 0 {
+		return
+	}
+	e.mu.Lock()
+	for _, n := range gone {
+		delete(e.tookSeen, n)
+	}
+	e.mu.Unlock()
+	e.bus.Info("DNS 接管：%d 个假 IP 已过期回收：%v", len(gone), gone)
+}
+
+// udpPayload 从 IP 包里取出 UDP 负载，并返回地址/端口（DNS 接管要互换它们）。
+func udpPayload(pkt []byte) (udpInfo, []byte, bool) {
+	var u udpInfo
+	_, _, ihl, proto, ok := parseIPv4(pkt)
+	if !ok || proto != 17 || len(pkt) < ihl+8 {
+		return u, nil, false
+	}
+	u.src = append(net.IP(nil), pkt[12:16]...)
+	u.dst = append(net.IP(nil), pkt[16:20]...)
+	u.sport = be16(pkt, ihl)
+	u.dport = be16(pkt, ihl+2)
+	l := int(be16(pkt, ihl+4)) // UDP 长度（含 8 字节头）
+	end := ihl + l
+	if l < 8 || end > len(pkt) {
+		end = len(pkt)
+	}
+	return u, pkt[ihl+8 : end], true
+}
+
+// udpInfo 一个 UDP 包的地址与端口。
+type udpInfo struct {
+	src, dst     net.IP
+	sport, dport uint16
+}
+
+// dnsFakeTTL 我们发出的假 A 记录的 TTL。
+//
+// 短一点有三个好处：① 假 IP 回收得快，池子不易满；
+// ② 我们重启后应用缓存里的旧假 IP 很快失效（假 IP 映射不落盘）；
+// ③ 名字对应的真实 IP 变化时跟着快。
+const dnsFakeTTL = 60 * time.Second
+
+// buildDNSResponse 造一条 DNS 应答；ip 为 nil 表示“明确告诉它没有这条记录”
+// （用于 AAAA：空 NOERROR，防止应用走 IPv6 绕过我们）。
+//
+// 实测配方（见 KB 决策/2026-09-21-DNS接管已验证可行.md）—— 缺一个就被静默丢弃：
+// 新建缓冲区、问题段逐字节搬、ANCOUNT/NSCOUNT/ARCOUNT 写对（丢掉 EDNS0 OPT）、
+// QR=1 且 RD 跟查询一致、RA=1、IP 与 UDP 的地址/端口互换、长度改对。
+func buildDNSResponse(pkt []byte, u udpInfo, q dnssniff.Query, ip net.IP) []byte {
+	payload, ok := udpPayloadOnly(pkt)
+	if !ok || q.QEnd > len(payload) || len(payload) < 12 {
+		return nil
+	}
+	dns := make([]byte, 0, 12+(q.QEnd-12)+16)
+	hdr := make([]byte, 12)
+	copy(hdr, payload[:12])
+	hdr[2] = 0x80 | (payload[2] & 0x01) // QR=1，RD 跟查询一致
+	hdr[3] = 0x80                       // RA=1，RCODE=0
+	if ip != nil {
+		putBE16(hdr, 6, 1) // ANCOUNT=1
+	} else {
+		putBE16(hdr, 6, 0) // 空应答
+	}
+	putBE16(hdr, 8, 0)  // NSCOUNT=0
+	putBE16(hdr, 10, 0) // ARCOUNT=0（丢掉 EDNS0 OPT，否则计数对不上）
+	dns = append(dns, hdr...)
+	dns = append(dns, payload[12:q.QEnd]...) // 问题段原样
+
+	if ip != nil {
+		ans := []byte{0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01} // 名字指针 + TYPE=A + CLASS=IN
+		ttl := uint32(dnsFakeTTL / time.Second)
+		ans = append(ans, byte(ttl>>24), byte(ttl>>16), byte(ttl>>8), byte(ttl))
+		ans = append(ans, 0x00, 0x04)
+		ans = append(ans, ip.To4()...)
+		dns = append(dns, ans...)
+	}
+
+	// 套回 IP + UDP（源/目标互换）
+	ipLen := 20 + 8 + len(dns)
+	resp := make([]byte, 0, ipLen)
+	head := append([]byte{}, pkt[:20]...)
+	copy(head[12:16], pkt[16:20]) // 源 = 原目标（DNS 服务器）
+	copy(head[16:20], pkt[12:16]) // 目标 = 原来源（本机）
+	putBE16(head, 2, uint16(ipLen))
+	putBE16(head, 10, 0) // IP 校验和交给 CalcChecksums
+	resp = append(resp, head...)
+	resp = append(resp, byte(u.dport>>8), byte(u.dport))
+	resp = append(resp, byte(u.sport>>8), byte(u.sport))
+	ul := 8 + len(dns)
+	resp = append(resp, byte(ul>>8), byte(ul), 0, 0)
+	return append(resp, dns...)
+}
+
+// udpPayloadOnly 只取 UDP 负载（不关心地址）。
+func udpPayloadOnly(pkt []byte) ([]byte, bool) {
+	_, payload, ok := udpPayload(pkt)
+	return payload, ok
+}
+
+// realResolver **绕开我们自己**的解析器：用专用源端口发查询。
+//
+// 为什么需要：DNS 接管会“看”到本机所有出方向 DNS 查询（包括我们自己进程发的）——
+// 而拿到假 IP 后我们要把它换回**真实 IP**，如果那次解析也被自己塞了假 IP，
+// 就是自己骗自己、跳进死循环。所以自己的查询从一个专用端口段发，并在过滤器里排除。
+//
+// 服务器地址仍然由系统配置决定（Go 的 Resolver 会把服务器地址传进来）。
+func (e *Engine) realResolver() *net.Resolver {
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			// 端口被占就往后找一个
+			for p := dnsProbePortLo; p <= dnsProbePortHi; p++ {
+				d := net.Dialer{
+					Timeout:   3 * time.Second,
+					LocalAddr: &net.UDPAddr{Port: p},
+				}
+				c, err := d.DialContext(ctx, "udp", address)
+				if err == nil {
+					return c, nil
+				}
+			}
+			return nil, fmt.Errorf("DNS 探针端口 %d-%d 都被占用", dnsProbePortLo, dnsProbePortHi)
+		},
+	}
+}
+
+// resolveReal 把一个域名在本机解析成**真实 IP**（绕开我们自己的假 IP）。
+func (e *Engine) resolveReal(name string) net.IP {
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	addrs, err := e.realResolver().LookupIP(ctx, "ip4", name)
+	if err != nil {
+		return nil
+	}
+	for _, a := range addrs {
+		if v4 := a.To4(); v4 != nil {
+			return v4
+		}
+	}
+	return nil
+}
+
+// dnsCanaries 自检用的“不相干名字”（不属于任何通配规则，必须能解析出**真实 IP**）。
+//
+// 为什么需要：透明拦截工具最不该做的事是“一开就让人上不了网”。DNS 接管只应该
+// 改变命中通配规则的名字，其余必须照常 —— 这一条不能靠“我觉得对”，要能验、
+// 而且要能自己说出来。
+var dnsCanaries = []string{"www.baidu.com", "www.qq.com"}
+
+// dnsTakeoverSelfCheck 验“除指定域名外的解析照常吗”。
+//
+// **只报警，不自己关**：这个功能就是干这个的，一有问题就自废就没意义了。
+// （唯一会自动退让的情形是“本机还有别的程序也在拦 DNS”导致的乒乓，那是真打架，
+// 见 dnsTakeoverLoop 里的检测。）
+//
+// 判据：canary 名字用**系统解析器**（应用走的那条路）解一遍 —— 至少一个解出
+// 非假 IP 才算通过；全解不出、或全被答成我们自己的假 IP → 大声报。
+func (e *Engine) dnsTakeoverSelfCheck() {
+	good, bad := 0, 0
+	var detail []string
+	for _, name := range dnsCanaries {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ips, err := net.DefaultResolver.LookupIP(ctx, "ip4", name)
+		cancel()
+		if err != nil || len(ips) == 0 {
+			bad++
+			detail = append(detail, fmt.Sprintf("%s 解不出（%v）", name, err))
+			continue
+		}
+		fake := false
+		for _, ip := range ips {
+			if e.isFakeIP(ip) {
+				fake = true
+			}
+		}
+		if fake {
+			bad++
+			detail = append(detail, fmt.Sprintf("%s 被答成了我们自己的假 IP（%v）", name, ips))
+			continue
+		}
+		good++
+	}
+	if good > 0 {
+		e.bus.Info("DNS 接管自检通过：不相干名字照常解析（%v）", dnsCanaries)
+		return
+	}
+	e.bus.Error("DNS 接管自检异常（%d/%d）：%v", bad, len(dnsCanaries), detail)
+	e.bus.Error("  —— 注意：DNS 接管只应该改变**命中通配规则**的名字，其余必须照常。" +
+		"这条已经影响别的名字了，请把上面几行日志发回来（功能不会自动关闭，但这个问题得查）")
+}
+
+// dnsTakeoverGuard 起来后马上自检一次，之后每 10 分钟复查（环境会变）。
+func (e *Engine) dnsTakeoverGuard() {
+	defer e.wg.Done()
+	// 稍微等一下再查：启动瞬间本地 DNS 栈可能还在忙
+	select {
+	case <-e.done:
+		return
+	case <-time.After(3 * time.Second):
+	}
+	e.dnsTakeoverSelfCheck()
+	tk := time.NewTicker(10 * time.Minute)
+	defer tk.Stop()
+	for {
+		select {
+		case <-e.done:
+			return
+		case <-tk.C:
+			if e.dnsTakeoverRunning() {
+				e.dnsTakeoverSelfCheck()
+			}
+		}
+	}
+}
+
+// dnsTakeoverRunning DNS 接管句柄还在不在。
+func (e *Engine) dnsTakeoverRunning() bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.injector != nil
 }
 
 // noticeSeen 直连/阻断日志去重用的一条记录。
@@ -1427,7 +1956,17 @@ func (e *Engine) rewriteOutbound(h *divert.Handle, pkt []byte, addr *divert.Addr
 		}
 		e.mu.Unlock()
 		if !existed {
-			e.bus.Info("[%s] 拦截 %s:%d  → relay", chain, dst, dport)
+			// 目标是假 IP 时，日志里要看到**域名**（否则只能看到一个 198.19.x.x 莫明其妙）
+			if e.isFakeIP(dst) {
+				if n, ok := e.nameOf(dst); ok {
+					st.fakeName = n
+					e.bus.Info("[%s] 拦截 %s（假 IP %s）:%d  → relay", chain, n, dst, dport)
+				} else {
+					e.bus.Info("[%s] 拦截 %s:%d  → relay（未知假 IP）", chain, dst, dport)
+				}
+			} else {
+				e.bus.Info("[%s] 拦截 %s:%d  → relay", chain, dst, dport)
+			}
 		}
 	} else if st := e.flow(sport); st != nil {
 		st.touch()
@@ -2030,6 +2569,7 @@ func (e *Engine) nameLoop() {
 		case <-tk.C:
 			e.resolveHostTargets(true)
 			e.pruneNames()
+			e.sweepFakeIP()
 		}
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"net"
 
 	"nethub/internal/dnsmap"
+	"nethub/internal/fakeip"
 	"nethub/internal/netx"
 	"os"
 	"path/filepath"
@@ -803,6 +804,28 @@ type Tuning struct {
 	//
 	// 关掉它 = 只靠 DNS：零额外开销，但遇到 DoH 就学不到名字。
 	TLSSniffDisabled bool `yaml:"tls_sniff_disabled,omitempty"`
+	// DNSTakeoverDisabled 是否关掉 **DNS 接管（发假 IP）**。默认**开**
+	// （只有写了通配域名规则时才真的干活），写成 dns_takeover_disabled: true 才关。
+	//
+	// 干什么：应用问一个命中通配规则的名字时，我们额外塞一条假 IP 应答（如 198.19.0.7）；
+	// 应用去连这个假 IP，我们一看就知道它要去哪个域名 —— 名字在**连接之前**
+	// 就到了，不需要猜（那是已删的“先接后判”）。
+	//
+	// 重要前提（实测教训）：**除指定域名外的解析必须照常**。
+	// 早期“抢包式”实现（把查询抢走自己答、再把不接管的放回去）在本机有第二个
+	// 拦戴器时会乒乓，把 DNS 拖死 —— 现在改成**只读嗅探 + 额外塞应答**，
+	// 永远不消费包，结构上不可能把别人的 DNS 拖死。
+	// 另：起来之后还会**自检**一次（见 dnsTakeoverSelfCheck）：不相干名字
+	// 解不出或返回假 IP → 自动关掉自己并报错。
+	DNSTakeoverDisabled bool `yaml:"dns_takeover_disabled,omitempty"`
+	// DNSBlackbox 排查用：把 DNS 接管看到的每个查询/每次回答写进
+	// logs/dns-blackbox.log（默认关；排查“DNS 到底是谁弄坏的”时打开）。
+	DNSBlackbox bool `yaml:"dns_blackbox,omitempty"`
+	// FakeIPRange 假 IP 段（默认 198.19.0.0/16，仅在 dns_takeover 打开时用）。
+	//
+	// **不能用 198.18.0.0/16** —— 那是 Clash/mihomo 的 fake-ip 默认段，
+	// 两个程序抢同一段会互相误判（配了会被直接拒绝，见 internal/fakeip）。
+	FakeIPRange string `yaml:"fake_ip_range,omitempty"`
 	// DomainResolve 规则里的域名怎么变成实际连接：
 	//
 	//	local（默认）本机解析出 IP 后按 IP 连 —— 客户内网域名通常只有本机能解答
@@ -1732,6 +1755,20 @@ func (c *Config) CountDirectEnabled() bool { return c.Tuning.CountDirect }
 // TLSSniffEnabled 是否只读嗅探 TLS SNI / HTTP Host（默认开）。
 // 注意：即使开着，没有通配域名规则时也不会开第二只句柄（一分钱不花）。
 func (c *Config) TLSSniffEnabled() bool { return !c.Tuning.TLSSniffDisabled }
+
+// DNSTakeoverEnabled 是否开启 DNS 接管（发假 IP）。默认开，只有通配域名规则时才生效。
+func (c *Config) DNSTakeoverEnabled() bool { return !c.Tuning.DNSTakeoverDisabled }
+
+// DNSBlackboxEnabled 是否开 DNS 黑匣子（排查用，默认关）。
+func (c *Config) DNSBlackboxEnabled() bool { return c.Tuning.DNSBlackbox }
+
+// FakeIPRangeOr 假 IP 段（未配则用 fakeip 包的默认值）。
+func (c *Config) FakeIPRangeOr() string {
+	if s := strings.TrimSpace(c.Tuning.FakeIPRange); s != "" {
+		return s
+	}
+	return fakeip.DefaultRange
+}
 
 // ProbeNetsParsed 已删除（随“先接后判”一起去掉）：域名通配的名字来源现在
 // 只有两条只读通道（明文 DNS 嗅探 + TLS SNI/HTTP Host 嗅探），不再揣测。

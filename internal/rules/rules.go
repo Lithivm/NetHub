@@ -435,6 +435,27 @@ func (s *Set) HasWildcards() bool {
 	return s.hasWildcards
 }
 
+// WildcardMatch 名字是否被某条通配规则命中（不看 IP）—— DNS 接管用它决定要不要答假 IP。
+//
+// 为什么不复用 MatchName：那条路要 IP 与端口，而这里只有“应用要解析的名字”。
+func (s *Set) WildcardMatch(name string) bool {
+	if name == "" {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for i := range s.routes {
+		r := &s.routes[i]
+		if len(r.wildcards) == 0 || !s.active(*r) {
+			continue
+		}
+		if r.matchesWildcard(name) {
+			return true
+		}
+	}
+	return false
+}
+
 // NeedsProc 当前规则里有没有人用进程条件。
 //
 // 没有的话引擎**一个进程都不查**（TCP 表枚举是毫秒级开销，不该白白付给所有人）。
