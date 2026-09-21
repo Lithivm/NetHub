@@ -10,6 +10,7 @@ import (
 	"nethub/internal/dnsmap"
 	"nethub/internal/logbus"
 	"nethub/internal/rules"
+	"nethub/internal/tlsname"
 )
 
 // mkUDPDNS 造一个"IPv4 + UDP(源端口 53) + DNS 应答"的完整包。
@@ -231,3 +232,80 @@ func TestWildcardStats(t *testing.T) {
 }
 
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
+
+// mkTCPData 造一个 TCP 包，带任意负载（SNI 嗅探用）。
+func mkTCPData(payload []byte, dport uint16) []byte {
+	pkt := make([]byte, 20+20+len(payload))
+	pkt[0] = 0x45
+	total := 20 + 20 + len(payload)
+	pkt[2], pkt[3] = byte(total>>8), byte(total)
+	pkt[9] = 6
+	copy(pkt[12:16], []byte{192, 168, 1, 42})
+	copy(pkt[16:20], []byte{203, 0, 113, 9})
+	pkt[20], pkt[21] = 0xd4, 0x31
+	pkt[22], pkt[23] = byte(dport>>8), byte(dport)
+	pkt[32] = 0x50
+	copy(pkt[40:], payload)
+	return pkt
+}
+
+// 从 TLS 握手里学名字 —— 这条路的目的是：就算应用用了加密 DNS（DoH/DoT），
+// 只要它走 TLS，我们仍能从明文 SNI 里知道它要去哪个域名。
+func TestLearnFromHandshake(t *testing.T) {
+	rs := rules.New()
+	if err := rs.Load([]rules.Route{{Name: "w", Targets: []string{"*.his.com"}, Chain: "etyy"}}); err != nil {
+		t.Fatal(err)
+	}
+	e := &Engine{bus: logbus.New(50), cfg: &config.Config{}, rules: rs,
+		names: dnsmap.New(), dynDirty: make(chan struct{}, 1)}
+	e.dynLast.Store(time.Now().UnixMilli())
+
+	// 负载要从 IP 头里取得出来（这条路径与真机完全一致）
+	hello := append([]byte{0x16, 0x03, 0x01, 0x00, 0x05, 0x01, 0x00, 0x00, 0x01, 0x00}, make([]byte, 40)...)
+	if got := tcpPayload(mkTCPData(hello, 443)); len(got) != len(hello) {
+		t.Fatalf("TCP 负载取错了：%d != %d", len(got), len(hello))
+	}
+	// DNS 那段不该把非 53 端口的 TCP 当 DNS
+	if got := dnsPayload(mkTCPData(hello, 443)); got != nil {
+		t.Errorf("443 的 TCP 不该被当成 DNS（源端口不是 53），得到 %d 字节", len(got))
+	}
+
+	e.learnFromHandshake(tlsname.Result{Name: "db.his.com", Kind: "tls"}, net.ParseIP("10.5.5.5"))
+	if ips := e.names.IPsFor("db.his.com"); len(ips) != 1 || ips[0] != "10.5.5.5" {
+		t.Fatalf("握手学到的名字没进名字表: %v", ips)
+	}
+	if chain, _, hit := rs.MatchName("", net.ParseIP("10.5.5.5"), 443, ""); !hit || chain != "etyy" {
+		t.Errorf("握手学到的 IP 应该被通配规则覆盖，得到 %q hit=%v", chain, hit)
+	}
+	if n := len(rs.WildcardRanges(false)); n != 1 {
+		t.Errorf("动态过滤器区间应该跟着出来，得到 %d", n)
+	}
+
+	// ECH：真名看不见，但公开名也要记上（并会打一条警告），不能崩
+	e.learnFromHandshake(tlsname.Result{Name: "public.example", ECH: true, Kind: "tls"}, net.ParseIP("10.6.6.6"))
+	if ips := e.names.IPsFor("public.example"); len(ips) != 1 {
+		t.Errorf("ECH 的公开名也该记上: %v", ips)
+	}
+	// 空名字 / nil IP 直接忽略，不写脏数据
+	e.learnFromHandshake(tlsname.Result{Name: "", Kind: "tls"}, net.ParseIP("10.7.7.7"))
+	e.learnFromHandshake(tlsname.Result{Name: "x.his.com", Kind: "tls"}, nil)
+	if got := e.names.IPsFor("x.his.com"); len(got) != 0 {
+		t.Errorf("空数据不该写进表: %v", got)
+	}
+}
+
+// 嗅探端口白名单：只在这些端口上只读嗅探（代价与覆盖面都要能说清）。
+func TestSNISniffFilterPorts(t *testing.T) {
+	f := sniSniffFilter()
+	for _, p := range []string{"443", "8443", "9443", "6443", "4443", "10443", "80", "8080"} {
+		if !strings.Contains(f, "tcp.DstPort == "+p) {
+			t.Errorf("过滤器里应该有端口 %s: %s", p, f)
+		}
+	}
+	if !strings.HasPrefix(f, "outbound and tcp and ip.Length < 1400 and (") {
+		t.Errorf("只该看出方向的 TCP: %s", f)
+	}
+	if strings.Contains(f, "inbound") {
+		t.Errorf("不该包含入方向（SNI 是客户端先发的）: %s", f)
+	}
+}

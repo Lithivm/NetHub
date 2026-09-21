@@ -795,6 +795,14 @@ type Tuning struct {
 	RaceAfter string `yaml:"race_after,omitempty"`
 	// CountDirect 是否把直连流量也纳入统计（默认 false：直连不进内核过滤器，完全零开销）。
 	CountDirect bool `yaml:"count_direct,omitempty"`
+	// TLSSniff 是否只读噢探 TLS SNI / HTTP Host（默认开，但**只有写了通配域名规则时才真的干活**）。
+	//
+	// 为什么需要：通配域名的名字原本靠“看明文 DNS 应答”学；一旦应用用了加密 DNS
+	// （DoH/DoT）或自带解析器，DNS 层就什么都看不到——那时名字只剩下 SNI / Host
+	// 两个明文可见的地方。这是“防患于未然”：现在的环境没在用 DoH，以后可能会。
+	//
+	// 关掉它 = 只靠 DNS：零额外开销，但遇到 DoH 就学不到名字。
+	TLSSniffDisabled bool `yaml:"tls_sniff_disabled,omitempty"`
 	// DomainResolve 规则里的域名怎么变成实际连接：
 	//
 	//	local（默认）本机解析出 IP 后按 IP 连 —— 客户内网域名通常只有本机能解答
@@ -1720,6 +1728,10 @@ func (c *Config) BackupNow() error { return c.backupLocked() }
 // 开：直连网段也装进过滤器，我们不改包、只数双向字节（换来一点每包开销）。
 // 需要在「连接」页勾选，改完要重启服务（过滤器在启动时装配）。
 func (c *Config) CountDirectEnabled() bool { return c.Tuning.CountDirect }
+
+// TLSSniffEnabled 是否只读噢探 TLS SNI / HTTP Host（默认开）。
+// 注意：即使开着，没有通配域名规则时也不会开第二只句柄（一分钱不花）。
+func (c *Config) TLSSniffEnabled() bool { return !c.Tuning.TLSSniffDisabled }
 
 // EnabledRoutes 只返回启用的规则（引擎、界面统计用）。
 //
