@@ -1348,7 +1348,7 @@ func (e *Engine) WildcardStats() []WildcardStat {
 			}
 			sort.Strings(ips)
 			seen[w] = ips
-			out = append(out, WildcardStat{Pattern: "*" + w, IPs: ips})
+			out = append(out, WildcardStat{Pattern: w, IPs: ips})
 		}
 	}
 	if len(out) == 0 {

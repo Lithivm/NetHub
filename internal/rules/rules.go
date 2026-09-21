@@ -337,11 +337,11 @@ func (s *Set) Load(routes []Route) error {
 			// 由引擎解析成功后通过 SetHostIPs 填进来；解析不到顶多是这条不命中。
 			if dnsmap.IsHostname(t) {
 				if dnsmap.IsWildcard(t) {
-					suffix, werr := dnsmap.WildcardSuffix(t)
+					pattern, werr := dnsmap.WildcardPattern(t)
 					if werr != nil {
 						return fmt.Errorf("第 %d 条规则%s: 目标 %v", i+1, r.Label(), werr)
 					}
-					wildcards = append(wildcards, suffix)
+					wildcards = append(wildcards, pattern)
 					continue
 				}
 				hosts = append(hosts, strings.ToLower(t))

@@ -494,19 +494,22 @@ func NormalizeTarget(s string) (string, error) {
 		}
 		s = cidr
 	}
-	// 以 * 开头的（通配域名）先走通配域名校验：那里的报错最具体
-	// （“只支持 *.域名”、或哪个标签有问题），比后面的 IP 提示更贴切。
-	if strings.HasPrefix(s, "*") {
-		suffix, err := dnsmap.WildcardSuffix(s)
+	// 带 * 的都先当通配域名校验（报错最具体：哪个字符不行、为什么不给过），
+	// 比后面的 IP 提示更贴切。
+	if strings.Contains(s, "*") && isHostname(s) {
+		pattern, err := dnsmap.WildcardPattern(s)
 		if err != nil {
 			return "", err
 		}
-		if isAllDigits(strings.TrimPrefix(suffix, ".")) {
-			return "", fmt.Errorf("通配域名后面得是域名，%q 看起来是 IP —— IP 请写 10.100.100.*（整段）或 CIDR", s)
+		// 纯数字+点的写法（如 10.100.100.*）其实是 IP 通配，更推荐用那个：
+		// 它会被折成 CIDR、在 IP 层匹配，不依赖任何解析。
+		if isAllDigits(strings.ReplaceAll(pattern, "*", "")) {
+			return "", fmt.Errorf("%q 看起来是 IP 通配 —— IP 请写 10.100.100.*（整段）或 CIDR；"+
+				"域名通配用于主机名（如 *.his.com、db-*.his.com）", s)
 		}
-		return "*" + suffix, nil
+		return pattern, nil
 	}
-	// 还剩 * 且不是域名（如 10.*.100.5）→ 直接说清改写方式，
+	// 剩下 * 且不是域名（如 10.*.100.5）→ 直接说清改写方式，
 	// 别拖到最后报一句没有信息量的“解析失败”。
 	if strings.Contains(s, "*") && !isHostname(s) {
 		return "", fmt.Errorf("这种写法猜不出范围 —— 末尾一段才能用 *（如 10.100.100.*）；" +
@@ -515,15 +518,6 @@ func NormalizeTarget(s string) (string, error) {
 	if !strings.Contains(s, "/") && !isHostname(s) {
 		s += "/32"
 	} else if isHostname(s) {
-		if strings.Contains(s, "*") {
-			// 通配域名：原样保留，校验交给 dnsmap（它也是匹配那一端的唯一实现，
-			// 两边用同一个校验器，不会出现“配置能过、规则不认”）。
-			suffix, err := dnsmap.WildcardSuffix(s)
-			if err != nil {
-				return "", err
-			}
-			return "*" + suffix, nil
-		}
 		if !validHostname(s) {
 			return "", fmt.Errorf("不是合法的域名")
 		}

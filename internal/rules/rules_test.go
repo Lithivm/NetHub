@@ -277,9 +277,16 @@ func TestHostnameTarget(t *testing.T) {
 	if !hasHostIP {
 		t.Error("过滤器要包含域名解析出的 IP（否则包根本到不了我们手上）")
 	}
-	// 通配域名：明确拒绝，并把替代方案说出来
-	if err := New().Load([]Route{{Targets: []string{"main.*.com"}, Chain: "tun"}}); err == nil {
-		t.Error("通配域名暂时应被拒绝")
+	// 带星位置随意（前缀/中间/多层都行）：不再拒绝，且要能按名字匹配
+	rs := New()
+	if err := rs.Load([]Route{{Targets: []string{"db-*.his.com", "xx.*.corp"}, Chain: "tun"}}); err != nil {
+		t.Fatalf("通用通配域名应该被接受: %v", err)
+	}
+	if !rs.WildcardMatch("db-01.his.com") || !rs.WildcardMatch("xx.a.corp") {
+		t.Error("通用通配没匹配上")
+	}
+	if rs.WildcardMatch("db-01.other.com") || rs.WildcardMatch("his.com") {
+		t.Error("不该命中的命中了")
 	}
 }
 

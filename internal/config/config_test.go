@@ -877,15 +877,16 @@ func TestTargetAcceptsHostname(t *testing.T) {
 			t.Errorf("NormalizeTarget(%q) = %q，期望 %q", in, got, want)
 		}
 	}
-	// 通配域名里写错位置/写太宽：拒绝，报错要说清只支持 `*.域名`
-	for _, bad := range []string{"main.*.com", "*his.com"} {
-		_, err := NormalizeTarget(bad)
-		if err == nil {
-			t.Errorf("%q 应该被拒绝（只支持 *.域名）", bad)
-			continue
+	// 带星的位置随意（前缀/中间都行），只有“太宽泛或写坏”才拒绝
+	for _, ok := range []string{"db-*.his.com", "xx.*.com", "*.*.his.com"} {
+		got, err := NormalizeTarget(ok)
+		if err != nil || got != ok {
+			t.Errorf("NormalizeTarget(%q) = %q, %v（应该原样接受）", ok, got, err)
 		}
-		if !strings.Contains(err.Error(), "*.域名") {
-			t.Errorf("%q 的报错要说明支持的写法，得到 %v", bad, err)
+	}
+	for _, bad := range []string{"*", "*.a..com"} {
+		if _, err := NormalizeTarget(bad); err == nil {
+			t.Errorf("%q 应该被拒绝", bad)
 		}
 	}
 	// 其他畸形写法：拒绝即可，但报错不能是空的也不能没有信息量

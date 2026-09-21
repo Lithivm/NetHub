@@ -7,18 +7,22 @@ import (
 )
 
 // 通配域名的写法校验：只认 `*.域名`，其余要报错（错误信息要说清收到了什么）。
-func TestWildcardSuffixValidation(t *testing.T) {
+func TestWildcardPatternValidation(t *testing.T) {
 	ok := map[string]string{
-		"*.his.com":      ".his.com",
-		"*.HIS.com":      ".his.com",
-		"*.his.com.":     ".his.com",
-		"  *.his.com  ":  ".his.com",
-		"*.corp":         ".corp",
-		"*.a.b.c.d.com":  ".a.b.c.d.com",
-		"*.his-internal": ".his-internal",
+		"*.his.com":      "*.his.com",
+		"*.HIS.com":      "*.his.com",
+		"*.his.com.":     "*.his.com",
+		"  *.his.com  ":  "*.his.com",
+		"*.corp":         "*.corp",
+		"*.a.b.c.d.com":  "*.a.b.c.d.com",
+		"*.his-internal": "*.his-internal",
+		// 中间/前缀带星也允许（用户要的就是这个）
+		"db-*.his.com": "db-*.his.com",
+		"xx.*.com":     "xx.*.com",
+		"*.*.his.com":  "*.*.his.com",
 	}
 	for in, want := range ok {
-		got, err := WildcardSuffix(in)
+		got, err := WildcardPattern(in)
 		if err != nil {
 			t.Errorf("%q 应该接受: %v", in, err)
 			continue
@@ -29,18 +33,14 @@ func TestWildcardSuffixValidation(t *testing.T) {
 	}
 
 	bad := []string{
-		"*",           // 只有星号
-		"*.",          // 星号后面没东西
-		"his.*.com",   // 星号写在中间
-		"his.com*",    // 星号写在结尾
-		"*his.com",    // 少了点
-		"*.a..com",    // 空标签
-		"*.a/b.com",   // 斜杠
-		"*.a b.com",   // 空格
-		"10.100.*.13", // 想拿它当 IP 通配用（那是另一条路，见 netx）
+		"*",         // 只有星号
+		"*.a..com",  // 空标签
+		"*.a/b.com", // 斜杠
+		"*.a b.com", // 空格
+		"没有星",       // 没有星的通配
 	}
 	for _, in := range bad {
-		if _, err := WildcardSuffix(in); err == nil {
+		if _, err := WildcardPattern(in); err == nil {
 			t.Errorf("%q 应该被拒绝", in)
 		}
 	}
@@ -48,7 +48,7 @@ func TestWildcardSuffixValidation(t *testing.T) {
 
 // 匹配语义：不含裸域名自身、不匹配"尾巴长得像"的域名、多层也认、大小写不敏感。
 func TestMatchWildcard(t *testing.T) {
-	suffix, err := WildcardSuffix("*.his.com")
+	suffix, err := WildcardPattern("*.his.com")
 	if err != nil {
 		t.Fatal(err)
 	}

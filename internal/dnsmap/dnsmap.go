@@ -316,41 +316,84 @@ func IsWildcard(s string) bool { return strings.Contains(s, "*") }
 //
 // **只接受 `*.域名` 这一种写法**：`his.*.com`、`*`、`*.` 这类拒绝并给出原因 ——
 // 规则要能被人工一眼看懂，中间星号的语义（DNS 里星号只代表一个标签）跟直觉差太远。
-func WildcardSuffix(s string) (string, error) {
+// WildcardPattern 校验并归一化一个通配域名，返回可直接用来匹配的模式串。
+//
+// **`*` 可以出现在任意位置**（不再只限 `*.域名` 开头那种写法）：
+//
+//	*.his.com     任何 his.com 的子域（不含 his.com 自身）
+//	db-*.his.com  以 db- 开头的子域
+//	*.*.his.com   两层以上都行
+//	10.20.*       连纯数字段也能用（但那种情况更推荐 IP 通配，见 netx）
+//
+// 语义：一个 `*` 匹配**任意字符（含点）**，所以 `*.his.com` 会命中 a.b.his.com；
+// 这跟证书里的通配不一样，但跟人看规则时的直觉一致（我们宁愿好懂）。
+//
+// 仍然拒绝：空标签（连续点）、空格、斜杠、只有一个 `*`、超长。
+func WildcardPattern(s string) (string, error) {
 	raw := s
 	s = normalizeHost(s)
-	if !strings.HasPrefix(s, "*.") {
-		return "", fmt.Errorf("通配域名只支持 `*.域名` 这种写法（例如 *.his.com），"+
-			"不支持写在中间或只有 * —— 收到的是 %q", strings.TrimSpace(raw))
+	if s == "" {
+		return "", fmt.Errorf("通配域名不能为空")
 	}
-	suffix := s[1:] // 留着前导点：靠它保证 *.his.com 不匹配 his.com 本身
-	rest := suffix[1:]
-	if rest == "" {
-		return "", fmt.Errorf("通配域名 %q 后面没有域名", strings.TrimSpace(raw))
+	if !strings.Contains(s, "*") {
+		return "", fmt.Errorf("通配域名 %q 里没有 *", strings.TrimSpace(raw))
 	}
-	for _, label := range strings.Split(rest, ".") {
+	if s == "*" {
+		return "", fmt.Errorf("只写一个 * 会命中所有域名 —— 请写清后缀，例如 *.his.com")
+	}
+	if len(s) > 253 {
+		return "", fmt.Errorf("通配域名太长（%d 字符）", len(s))
+	}
+	if strings.ContainsAny(s, " /\\") {
+		return "", fmt.Errorf("通配域名 %q 里有空格或斜杠", strings.TrimSpace(raw))
+	}
+	for _, label := range strings.Split(s, ".") {
 		if label == "" {
 			return "", fmt.Errorf("通配域名 %q 里有空的标签（连续的点或多写的点）", strings.TrimSpace(raw))
 		}
-		if strings.ContainsAny(label, "* /\\") {
-			return "", fmt.Errorf("通配域名 %q 的标签 %q 里有非法字符", strings.TrimSpace(raw), label)
-		}
 	}
-	return suffix, nil
+	return s, nil
 }
 
-// MatchWildcard 用 WildcardSuffix 得到的后缀去匹配一个域名。
+// MatchWildcard 通配匹配：`*` 匹配任意字符（含点），其余字符逐字比。
 //
-//	MatchWildcard(".his.com", "a.his.com")     → true
-//	MatchWildcard(".his.com", "a.b.his.com")   → true（多层也认，规则写法要符合直觉）
-//	MatchWildcard(".his.com", "his.com")       → false（不含裸域名自身，与证书通配一致）
-//	MatchWildcard(".his.com", "x.his.com.evil")→ false
-func MatchWildcard(suffix, host string) bool {
-	if suffix == "" {
+//	MatchWildcard("*.his.com", "a.his.com")     → true
+//	MatchWildcard("*.his.com", "his.com")       → false（不含裸域名自身）
+//	MatchWildcard("db-*", "db-01.his.com")     → true
+func MatchWildcard(pattern, host string) bool {
+	p := normalizeHost(pattern)
+	h := normalizeHost(host)
+	if p == "" || h == "" {
 		return false
 	}
-	h := normalizeHost(host)
-	return len(h) > len(suffix) && strings.HasSuffix(h, suffix)
+	if !strings.Contains(p, "*") {
+		return p == h
+	}
+	// 经典的双指针通配匹配（只有一个通配符 `*`）：
+	// 遇到 `*` 就记住回退点，匹配失败时让 `*` 多吃一个字符。
+	var pi, hi, star, mark int
+	star = -1
+	for hi < len(h) {
+		switch {
+		case pi < len(p) && p[pi] == h[hi]:
+			pi++
+			hi++
+		case pi < len(p) && p[pi] == '*':
+			star = pi
+			mark = hi
+			pi++
+		case star >= 0:
+			pi = star + 1
+			mark++
+			hi = mark
+		default:
+			return false
+		}
+	}
+	for pi < len(p) && p[pi] == '*' {
+		pi++
+	}
+	return pi == len(p)
 }
 
 func normalizeHost(h string) string {
