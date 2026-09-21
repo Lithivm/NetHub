@@ -922,7 +922,7 @@ func (b *Backend) SaveRoute(index int, in RouteInput) error {
 		if err := b.a.Cfg.AddRoute(rt); err != nil {
 			return err
 		}
-		return b.save(ruleSaved("添加", rt))
+		return b.saveHint(len(b.a.Cfg.Routes)-1, ruleSaved("添加", rt))
 	}
 	old := ""
 	if rs := b.a.Cfg.Routes; index < len(rs) {
@@ -938,9 +938,9 @@ func (b *Backend) SaveRoute(index int, in RouteInput) error {
 		return err
 	}
 	if old != "" && strings.TrimSpace(in.Name) != "" && old != in.Name {
-		return b.save(fmt.Sprintf("%s→%s（%d 个目标）", old, in.Name, len(rt.Targets)))
+		return b.saveHint(index, fmt.Sprintf("%s→%s（%d 个目标）", old, in.Name, len(rt.Targets)))
 	}
-	return b.save(ruleSaved("修改", rt))
+	return b.saveHint(index, ruleSaved("修改", rt))
 }
 
 // ruleFrom 把界面传来的"一条规则"整理成 config.Route：目标与端口文本都可以一次填多个
@@ -1037,7 +1037,7 @@ func (b *Backend) AddRoute(name, targets, chain, ports, localNets string) error 
 	if err := b.a.Cfg.AddRoute(rt); err != nil {
 		return err
 	}
-	return b.save(ruleSaved("添加", rt))
+	return b.saveHint(len(b.a.Cfg.Routes)-1, ruleSaved("添加", rt))
 }
 
 // UpdateRoute 替换第 index 条规则（同样支持多目标 + 端口条件）。
@@ -1049,7 +1049,7 @@ func (b *Backend) UpdateRoute(index int, name, targets, chain, ports, localNets 
 	if err := b.a.Cfg.UpdateRoute(index, rt); err != nil {
 		return err
 	}
-	return b.save(ruleSaved("更新", rt))
+	return b.saveHint(index, ruleSaved("更新", rt))
 }
 
 func (b *Backend) DeleteRoute(index int) error {
@@ -1533,11 +1533,23 @@ func dirOf(p string) string {
 }
 
 // save 落盘 + 记日志（编辑类操作的统一收尾）。
-func (b *Backend) save(what string) error {
+func (b *Backend) save(what string) error { return b.saveHint(-1, what) }
+
+// saveHint 保存配置，并对第 hintFor 条规则（-1 = 不管）给出“不拦保存”的提示。
+//
+// 放宽校验（2026-09-21）后，“目标被前面的规则盖住”这类东西不再拦保存 ——
+// 但要说一声，否则用户会以为新规则在干活（它可能永远轮不到）。
+// 结论与规则页那一列、「重叠检查」按钮同源（config.RouteHints）。
+func (b *Backend) saveHint(hintFor int, what string) error {
 	if err := b.a.SaveConfig(); err != nil {
 		return err
 	}
 	b.a.Bus.Info("%s（已保存到 config.yaml）", what)
+	if hintFor >= 0 {
+		for _, h := range b.a.Cfg.RouteHints(hintFor) {
+			b.a.Bus.Warn("提示（不拦保存）: %s", h)
+		}
+	}
 	return nil
 }
 

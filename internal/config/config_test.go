@@ -161,13 +161,14 @@ func TestAddRouteMultiTarget(t *testing.T) {
 		t.Errorf("组内重复/空白没处理干净: %q", got)
 	}
 
-	// 跨规则同名目标要拒绝，且报错要点出是哪条规则
-	err := c.AddRoute(Route{Targets: []string{"10.1.1.1"}, Chain: "proxy-a"})
-	if err == nil {
-		t.Fatal("跨规则重复目标应该被拒绝")
+	// 跨规则同名目标现在**允许**（2026-09-21 放开：以前这里拦保存）。
+	// 保存不报错，但 RouteHints 要说清楚是哪条规则盖住了它。
+	if err := c.AddRoute(Route{Name: "重复目标", Targets: []string{"10.1.1.1"}, Chain: "proxy-a"}); err != nil {
+		t.Fatalf("跨规则重复目标不该再拦保存: %v", err)
 	}
-	if !strings.Contains(err.Error(), "「内网主体链路」") {
-		t.Errorf("报错要指出是哪条规则: %v", err)
+	hints := strings.Join(c.RouteHints(len(c.Routes)-1), " ")
+	if !strings.Contains(hints, "内网主体链路") {
+		t.Errorf("重复目标要给出提示（不拦，但要说清是哪条）: %q", hints)
 	}
 
 	// 网段包含（宽里有窄）是 Proxifier 的正常用法，不拦
@@ -338,12 +339,11 @@ func TestPortDupCheck(t *testing.T) {
 	if err := c.AddRoute(Route{Name: "只走 5432", Targets: []string{"10.0.0.5"}, Ports: []string{"5432"}, Chain: "proxy-a"}); err != nil {
 		t.Errorf("同一目标不同端口应该允许: %v", err)
 	}
-	err := c.AddRoute(Route{Name: "重复 443", Targets: []string{"10.0.0.5"}, Ports: []string{"443"}, Chain: "proxy-a"})
-	if err == nil {
-		t.Fatal("端口被上面全覆盖的规则应该被拒")
+	if err := c.AddRoute(Route{Name: "重复 443", Targets: []string{"10.0.0.5"}, Ports: []string{"443"}, Chain: "proxy-a"}); err != nil {
+		t.Fatalf("端口重复不该再拦保存: %v", err)
 	}
-	if !strings.Contains(err.Error(), "443") {
-		t.Errorf("报错要指明是哪个端口: %v", err)
+	if h := strings.Join(c.RouteHints(2), " "); !strings.Contains(h, "443") {
+		t.Errorf("端口重复要给出带端口的提示，实际 %q", h)
 	}
 	// 上面那条留空（任意端口）时，下面再写具体端口就该被拦
 	c2 := &Config{
@@ -353,8 +353,11 @@ func TestPortDupCheck(t *testing.T) {
 	if err := c2.AddRoute(Route{Targets: []string{"10.0.0.5"}, Chain: "proxy-a"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := c2.AddRoute(Route{Targets: []string{"10.0.0.5"}, Ports: []string{"443"}, Chain: "proxy-a"}); err == nil {
-		t.Error("任意端口已覆盖全部端口，这条应该被拒")
+	if err := c2.AddRoute(Route{Name: "只写端口", Targets: []string{"10.0.0.5"}, Ports: []string{"443"}, Chain: "proxy-a"}); err != nil {
+		t.Fatalf("“任意端口”盖住具体端口也不再拦保存: %v", err)
+	}
+	if h := c2.RouteHints(1); len(h) == 0 {
+		t.Error("被前面的“任意端口”规则盖住，应该提示一下")
 	}
 }
 
@@ -714,9 +717,12 @@ func TestRouteEnabled(t *testing.T) {
 	if err := c.AddRoute(dup); err != nil {
 		t.Fatalf("停用的重复规则应允许共存: %v", err)
 	}
-	// 两条都启用时 —— 必须报“目标已被占”
-	if err := c.AddRoute(Route{Name: "环境C", Targets: []string{"172.30.4.0/24"}, Chain: "tun"}); err == nil {
-		t.Error("两条都启用时，重复目标应被拒绝")
+	// 两条都启用 —— 现在允许共存（多环境现场确实这么用），但要提示
+	if err := c.AddRoute(Route{Name: "环境C", Targets: []string{"172.30.4.0/24"}, Chain: "tun"}); err != nil {
+		t.Fatalf("重复目标不该再拦保存: %v", err)
+	}
+	if h := c.RouteHints(2); len(h) == 0 {
+		t.Error("两条都启用且目标相同，应该提示")
 	}
 
 	// 存盘 → 读回：开关要保留，缺省视为启用
@@ -734,15 +740,17 @@ func TestRouteEnabled(t *testing.T) {
 		t.Error("显式 false 的规则应视为停用")
 	}
 	// 停用的规则不参与匹配（引擎侧由 toRules 过滤，这里验 config 侧的判断）
-	if names := got.EnabledRoutes(); len(names) != 1 || names[0].Name != "环境A" {
+	if names := got.EnabledRoutes(); len(names) != 2 || names[0].Name != "环境A" || names[1].Name != "环境C" {
 		t.Errorf("启用规则集 = %+v", names)
 	}
 	// 停用当前那条 → 第二条（停用的）不参与“被覆盖/冲突”结论
 	if sh := got.ShadowedTargets(1); len(sh) != 0 {
 		t.Errorf("停用的规则不该被判成被覆盖: %v", sh)
 	}
-	if ov := got.CheckOverlaps(); len(ov) != 0 {
-		t.Errorf("停用的规则之间不该报重叠: %+v", ov)
+	for _, o := range got.CheckOverlaps() {
+		if o.Earlier == 1 || o.Later == 1 {
+			t.Errorf("停用的规则（第 2 条）不该出现在重叠结论里: %+v", o)
+		}
 	}
 	// 排序：停用的原地不动
 	got.SortRoutesBySpecificity()
@@ -751,9 +759,11 @@ func TestRouteEnabled(t *testing.T) {
 	}
 }
 
-// 停用的规则引用不存在的链时允许载入（可以把某环境的规则整套停着放着），
-// 但启用后存盘必须报错（这时候才需要补链）。
-func TestDisabledRuleMissingChain(t *testing.T) {
+// 引用了不存在的链：保存/载入/校验都**不拦**（引擎运行时会逐条说“链 X 不存在，丢弃 ip:port”）。
+//
+// 2026-09-21 用户反馈后放宽：真实现场常见“先把规则写好、链稍后再建”，
+// 或者整套环境规则停着放着 —— 拦保存只会妨碍干活，而运行时报错足够精确。
+func TestMissingChainIsNotBlocked(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	c := Default()
@@ -762,25 +772,15 @@ func TestDisabledRuleMissingChain(t *testing.T) {
 	if err := c.SaveAs(path); err != nil {
 		t.Fatalf("保存失败: %v", err)
 	}
-	if _, err := Load(path); err == nil {
-		t.Fatal("缺省启用时引用不存在的链，应该报错才对")
-	}
-
-	// 停用后 → 可以载入
-	raw, _ := os.ReadFile(path)
-	_ = os.WriteFile(path, []byte(strings.Replace(string(raw), "chain: 不存在的链",
-		"chain: 不存在的链\n      enabled: false", 1)), 0o600)
 	got, err := Load(path)
 	if err != nil {
-		t.Fatalf("停用后引用不存在的链应允许: %v", err)
+		t.Fatalf("引用不存在的链不该拦载入: %v", err)
 	}
-	if got.Routes[0].IsEnabled() {
-		t.Fatal("这条应该是停用的")
+	if !got.Routes[0].IsEnabled() {
+		t.Fatal("这条默认是启用的")
 	}
-	// 直接把它启用再校验 → 必须报错
-	got.Routes[0].SetEnabled(true)
-	if err := got.Validate(); err == nil {
-		t.Error("启用后引用不存在的链，校验必须报错")
+	if err := got.Validate(); err != nil {
+		t.Errorf("校验也不该因为“链不存在”报错（运行时会报）: %v", err)
 	}
 }
 

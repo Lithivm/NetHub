@@ -437,13 +437,11 @@ func (c *Config) Validate() error {
 		}
 	}
 	for i, r := range c.Routes {
-		// 停用的规则：只查“写法对不对”，不查链是否存在 ——
-		// 这样就允许把“某客户环境”的规则整套停着放着（链删了也先不管），
-		// 以后真要启用它时再存盘会报错，那时再补链。
-		enabled := r.IsEnabled()
-		if enabled && r.NeedsChain() && !seen[r.Chain] {
-			return fmt.Errorf("第 %d 条规则%s: 引用了不存在的链 %q", i+1, r.Describe(), r.Chain)
-		}
+		// 停用的规则：只查“写法对不对”，不查链是否存在。
+		//
+		// 这里**不再**拦“引用了不存在的链”—— 引擎遇到这种情况是优雅处理的：
+		// 每条连接打一行 `链 X 不存在，丢弃 ip:port`，服务照常跑。
+		// 少一条保存时的拦截，就少一个“明明只是先写规则、链稍后建”的死角。
 		if len(r.Targets) == 0 && len(r.Apps) == 0 {
 			return fmt.Errorf("第 %d 条规则%s: 至少要有一个目标（或一个进程条件）", i+1, r.Describe())
 		}
@@ -1501,22 +1499,23 @@ func (c *Config) backupLocked() error {
 	return nil
 }
 
-// checkTargetsFree 检查 rt 的目标有没有落在别的规则里。
-// skip 是正在编辑那条规则的下标（-1 表示新增）。
+// occupiedHint 目标“看起来被前面的规则盖住了”时的提示（**只提示，不拦保存**）。
 //
-// 只拦**完全没用**的规则：目标相同 **且** 端口被上面那条全覆盖（上面那条留空端口
-// 就是全覆盖）。规则自上而下命中即止，被完全覆盖的那条永远轮不到，
-// 留着只会让人以为它生效了。
+// 历史：这里以前是拦截（AddRoute/UpdateRoute 直接报错不让存）。用户反馈“会自己和自己冲突”，
+// 而且真实配置里就是有一堆合法的重叠（同一段内网地址在不同环境指向不同链、先宽后窄做兜底…），
+// 拦下来反而耽误干活。现在改成纯提示：
 //
-// 网段包含关系（10.0.0.0/8 之后再写 10.1.1.0/24）是 Proxifier 的正常用法 ——
-// 先宽后窄或先窄后宽都由用户说了算，不拦；同一目标不同端口也不拦
-// （10.0.0.5:443 走一条链、10.0.0.5:5432 走另一条，这是端口维度的正当用法）。
-func (c *Config) checkTargetsFree(rt Route, skip int) error {
-	// 停用的规则不参与“目标被占了”的判断：多个环境用同一段内网地址、
-	// 只是指向不同链，正是要靠开关切换的场景（都算冲突就没法配了）。
+//   - 规则页那一行会自己标“被前面的规则覆盖”（Shadowed，逐条目标级）
+//   - 「重叠检查」按钮能看到完整结论与建议
+//   - 真出问题日志里也会报（引擎对“链不存在”“永远轮不到”都有交代）
+//
+// 只判断“**完全一样**的目标 + 端口被上面那条全盖住”这一种（即上面空端口、下面任何端口都算），
+// 网段包含关系与不同端口本就该由用户自由组合。
+func (c *Config) occupiedHint(rt Route, skip int) []string {
 	if !rt.IsEnabled() {
 		return nil
 	}
+	var out []string
 	for j, r := range c.Routes {
 		if j == skip || !r.IsEnabled() {
 			continue
@@ -1527,22 +1526,20 @@ func (c *Config) checkTargetsFree(rt Route, skip int) error {
 					continue
 				}
 				if len(r.Ports) == 0 {
-					return fmt.Errorf("目标 %s 已在第 %d 条规则%s 里了（规则自上而下匹配，这一条永远轮不到）", t, j+1, r.Describe())
+					out = append(out, fmt.Sprintf("目标 %s 也在第 %d 条规则%s 里（它在前面，会先命中）", t, j+1, r.Describe()))
+				} else {
+					out = append(out, fmt.Sprintf("目标 %s 的端口 %s 已被第 %d 条规则%s（端口 %s）盖住",
+						t, PortText(rt.Ports), j+1, r.Describe(), PortText(r.Ports)))
 				}
-				return fmt.Errorf("目标 %s 的端口 %s 已被第 %d 条规则%s（端口 %s）全部覆盖（规则自上而下匹配，这一条永远轮不到）",
-					t, PortText(rt.Ports), j+1, r.Describe(), PortText(r.Ports))
 			}
 		}
 	}
-	return nil
+	return out
 }
 
 // AddRoute 追加一条规则：名字/目标/链都会归一化，组内重复目标去掉。
 func (c *Config) AddRoute(rt Route) error {
 	if _, _, err := rt.normalize(); err != nil {
-		return err
-	}
-	if err := c.checkTargetsFree(rt, -1); err != nil {
 		return err
 	}
 	c.Routes = append(c.Routes, rt)
@@ -1553,15 +1550,21 @@ func (c *Config) AddRoute(rt Route) error {
 	return nil
 }
 
+// RouteHints 保存后“值得知道但不拦”的提示（目标被前面的规则盖住之类）。
+// 调用方（界面）把它们记进日志即可，不影响保存成功。
+func (c *Config) RouteHints(i int) []string {
+	if i < 0 || i >= len(c.Routes) {
+		return nil
+	}
+	return c.occupiedHint(c.Routes[i], i)
+}
+
 // UpdateRoute 替换第 i 条规则。
 func (c *Config) UpdateRoute(i int, rt Route) error {
 	if i < 0 || i >= len(c.Routes) {
 		return fmt.Errorf("规则下标越界")
 	}
 	if _, _, err := rt.normalize(); err != nil {
-		return err
-	}
-	if err := c.checkTargetsFree(rt, i); err != nil {
 		return err
 	}
 	old := c.Routes[i]

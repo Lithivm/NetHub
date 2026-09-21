@@ -86,7 +86,11 @@ func TestUpdateRouteMultiTarget(t *testing.T) {
 	}
 }
 
-// 空目标 / 非法目标 / 跨规则重复：都要报错，且配置一点都不能变。
+// 空目标 / 非法目标：要报错，且配置一点都不能变。
+//
+// 跨规则重复目标、引用了不存在的链：2026-09-21 起**不再拦**
+// （用户反馈：“会自己跟自己冲突”；真实现场也确实要先把规则写好、链稍后再建）。
+// 保存照过，但界面会把提示记进日志（config.RouteHints），运行时的日志也会说清楚。
 func TestAddRouteRejects(t *testing.T) {
 	b, cfg := newRoutesBackend(t)
 	if err := b.AddRoute("已存在", "10.9.9.9", "proxy-a", "", ""); err != nil {
@@ -99,8 +103,6 @@ func TestAddRouteRejects(t *testing.T) {
 	}{
 		{"空目标", "   \n ,、", "proxy-a", "至少要填一个目标"},
 		{"非法目标", "10.1.1.1 abc", "proxy-a", `"abc"`},
-		{"与已有规则重复", "10.1.1.1 10.9.9.9", "proxy-a", "已在第 1 条规则"},
-		{"引用了不存在的链", "10.1.1.1", "no-such-chain", "不存在的链"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -207,8 +209,8 @@ func TestRouteEnableSwitch(t *testing.T) {
 	if err := b.SetRouteEnabled(1, true); err != nil {
 		t.Fatalf("第二条启用应成功: %v", err)
 	}
-	// 现在两条都启用 → 第二条启用时目标已被第一条占着？第一条是停用的 → 仍可
-	if err := b.SetRouteEnabled(0, true); err == nil {
-		t.Error("两条都启用且目标相同时，第二条启用应报冲突")
+	// 现在两条都启用 → 目标相同也不再算冲突（多环境现场就是这么用的），必须放行
+	if err := b.SetRouteEnabled(0, true); err != nil {
+		t.Errorf("两条都启用、目标相同也应允许（只提示不拦）: %v", err)
 	}
 }

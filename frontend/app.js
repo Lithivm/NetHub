@@ -1765,6 +1765,11 @@ async function checkOverlaps() {
     c1.appendChild(el('span', null, o.earlierName || '（未命名）'));
     c1.appendChild(el('span', 'dim', '  ↔  后 ' + o.later + ' '));
     c1.appendChild(el('span', null, o.laterName || '（未命名）'));
+    // 两条规则同名是允许的（不同链表、或照搬别人的配置）—— 但只显示名字时，
+    // 看起来会像“一条规则跟自己冲突”，所以同名时把序号和提示都说出来。
+    if ((o.earlierName || '') === (o.laterName || '') && o.earlierName) {
+      c1.appendChild(el('span', 'dim', '  （两条同名，是第 ' + o.earlier + ' 条和第 ' + o.later + ' 条两条不同的规则）'));
+    }
     row.appendChild(c1);
     // 重叠范围
     const c2 = el('div', 'cell mono dim');
