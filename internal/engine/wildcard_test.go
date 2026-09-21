@@ -309,3 +309,135 @@ func TestSNISniffFilterPorts(t *testing.T) {
 		t.Errorf("不该包含入方向（SNI 是客户端先发的）: %s", f)
 	}
 }
+
+// 先接后判：从连接的**前几个字节**里认出域名，并决定走哪条链。
+func clientHelloBytes(name string) []byte {
+	exts := sniExtBytes(name)
+	body := []byte{0x03, 0x03}
+	body = append(body, make([]byte, 32)...)
+	body = append(body, 0)
+	body = append(body, 0x00, 0x02, 0x13, 0x01)
+	body = append(body, 0x01, 0x00)
+	body = append(body, byte(len(exts)>>8), byte(len(exts)))
+	body = append(body, exts...)
+	hs := []byte{0x01, byte(len(body) >> 16), byte(len(body) >> 8), byte(len(body))}
+	hs = append(hs, body...)
+	rec := []byte{0x16, 0x03, 0x01, byte(len(hs) >> 8), byte(len(hs))}
+	return append(rec, hs...)
+}
+
+func sniExtBytes(name string) []byte {
+	inner := []byte{0, byte(len(name) >> 8), byte(len(name))}
+	inner = append(inner, name...)
+	list := append([]byte{byte(len(inner) >> 8), byte(len(inner))}, inner...)
+	return append([]byte{0x00, 0x00, byte(len(list) >> 8), byte(len(list))}, list...)
+}
+
+func TestDecideProbeFromPipe(t *testing.T) {
+	rs := rules.New()
+	if err := rs.Load([]rules.Route{{Name: "w", Targets: []string{"*.his.com"}, Chain: "etyy"}}); err != nil {
+		t.Fatal(err)
+	}
+	e := &Engine{bus: logbus.New(50), rules: rs,
+		cfg:   &config.Config{Chains: []config.Chain{{Name: "etyy", Forward: "socks5://127.0.0.1:1080"}}},
+		names: dnsmap.New(), dynDirty: make(chan struct{}, 1)}
+	st := &connState{dst: net.ParseIP("10.20.30.40"), dport: 443}
+
+	// 客户端先写一段 ClientHello，再写一点“后续数据”（模拟真实应用）
+	hello := clientHelloBytes("db.his.com")
+	c, s := net.Pipe()
+	go func() {
+		_, _ = s.Write(hello)
+		_, _ = s.Write([]byte("AFTER"))
+		time.Sleep(50 * time.Millisecond)
+		_ = s.Close()
+	}()
+	chain, peeked, res, tunnel := e.decideProbe(c, st)
+	if !tunnel || chain != "etyy" || res.Name != "db.his.com" {
+		t.Fatalf("先接后判没认出域名: chain=%q tunnel=%v res=%+v", chain, tunnel, res)
+	}
+	// 读走的字节必须一个不少地留着（要原样补给下游）
+	if !strings.HasPrefix(string(peeked), string(hello)) {
+		t.Errorf("读走的数据不完整: %d 字节", len(peeked))
+	}
+	_ = c.Close()
+
+	// 不是 TLS/HTTP（比如直接是个二进制协议）→ 不接管，但已读字节照样还回来
+	c2, s2 := net.Pipe()
+	go func() { _, _ = s2.Write([]byte("XYZ123")); time.Sleep(30 * time.Millisecond); _ = s2.Close() }()
+	chain2, peeked2, _, tunnel2 := e.decideProbe(c2, &connState{dst: net.ParseIP("10.9.9.9"), dport: 443})
+	if tunnel2 || chain2 != "" {
+		t.Errorf("认不出的协议不该接管: chain=%q tunnel=%v", chain2, tunnel2)
+	}
+	if string(peeked2) != "XYZ123" {
+		t.Errorf("读走的字节要原样保留，得到 %q", peeked2)
+	}
+	_ = c2.Close()
+}
+
+// 名字命中哪条链：通配/具体域名才算；直连与不存在的链都回空（走直连回退）。
+func TestChainForName(t *testing.T) {
+	rs := rules.New()
+	if err := rs.Load([]rules.Route{
+		{Name: "w", Targets: []string{"*.his.com"}, Chain: "etyy"},
+		{Name: "d", Targets: []string{"*.direct.com"}, Chain: "direct", Action: rules.ActionDirect},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Chains: []config.Chain{{Name: "etyy", Forward: "socks5://127.0.0.1:1080"}}}
+	e := &Engine{bus: logbus.New(50), cfg: cfg, rules: rs, names: dnsmap.New()}
+	st := &connState{dst: net.ParseIP("10.1.1.1"), dport: 443}
+
+	if got := e.chainForName("a.his.com", st); got != "etyy" {
+		t.Errorf("通配命中应返回 etyy，得到 %q", got)
+	}
+	if got := e.chainForName("a.direct.com", st); got != "" {
+		t.Errorf("直连规则不该走链，得到 %q", got)
+	}
+	if got := e.chainForName("a.other.com", st); got != "" {
+		t.Errorf("没命中应返回空，得到 %q", got)
+	}
+	if got := e.chainForName("", st); got != "" {
+		t.Errorf("空名字应返回空，得到 %q", got)
+	}
+}
+
+// 先接后判的过滤器：只管内网目标、常见 TLS 端口、且排除主过滤器已覆盖的范围与 relay 自己。
+func TestProbeFilter(t *testing.T) {
+	rs := []rules.Range{{First: 0x0A000001, Last: 0x0A0000FF}} // 10.0.0.1-255
+	f := probeFilter(rs, nil, nets("10.0.0.0/8"), 55043)
+	for _, want := range []string{"outbound and tcp", "tcp.DstPort == 443", "tcp.DstPort == 80",
+		"tcp.SrcPort != 55043",
+		// “不在主过滤器区间内”用等价写法（WinDivert 不认 not）
+		"ip.DstAddr < 10.0.0.1 or ip.DstAddr > 10.0.0.255"} {
+		if !strings.Contains(f, want) {
+			t.Errorf("过滤器里应该有 %q：%s", want, f)
+		}
+	}
+	// 已经学到的通配 IP 也要排除（否则它们永远过不了快路径）
+	f3 := probeFilter(rs, []rules.Range{{First: 0x0A0A0A01, Last: 0x0A0A0A01}}, nets("10.0.0.0/8"), 55043)
+	if !strings.Contains(f3, "ip.DstAddr < 10.10.10.1 or ip.DstAddr > 10.10.10.1") {
+		t.Errorf("学到的通配 IP 应被排除：%s", f3)
+	}
+	if strings.Contains(f, "inbound") {
+		t.Errorf("先接后判只看出方向: %s", f)
+	}
+	if strings.Contains(f, " not ") {
+		t.Errorf("WinDivert 不认 not，不能用它: %s", f)
+	}
+	// 主过滤器为空时不能拼出残缺表达式
+	f2 := probeFilter(nil, nil, nets("10.0.0.0/8"), 55043)
+	if strings.Contains(f2, "and and") || strings.HasSuffix(f2, "and ") {
+		t.Errorf("空区间不该拼出残缺表达式: %s", f2)
+	}
+}
+
+func nets(cidrs ...string) []*net.IPNet {
+	var out []*net.IPNet
+	for _, c := range cidrs {
+		if _, n, err := net.ParseCIDR(c); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}
