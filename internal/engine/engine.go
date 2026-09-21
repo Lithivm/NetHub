@@ -67,10 +67,6 @@ type connState struct {
 	procName string
 	pid      uint32
 
-	// probe 这条连接是“先接后判”接进来的（还不知道要去哪个域名），
-	// 由中转读出 ClientHello 后再决定走链还是直连回退。
-	probe bool
-
 	last    atomic.Int64  // unix nano：最后一次看到包/数据的时间
 	up      atomic.Uint64 // 应用 → 目标 的字节（直连只能统计出方向）
 	down    atomic.Uint64 // 目标 → 应用 的字节
@@ -228,20 +224,10 @@ type Engine struct {
 	dynStop   chan struct{}
 	dynFilter string
 	dynAt     time.Time
-	// probeHandle/probeStop “先接后判”的句柄（可空：只在有通配域名规则且未被关闭时开）。
-	probeHandle *divert.Handle
-	probeStop   chan struct{}
-	probeFilter string               // 当前先接后判的过滤器串
-	mainRanges  []rules.Range        // 启动时装配的规则区间（重建先接后判过滤器要用）
-	probeSeen   map[string]time.Time // 回退日志去重：目标 IP → 上次报过的时间
-	// dnsSeen / dnsLearn 只读嗅探 DNS 的统计（界面与日志用，见 dnsLoop）。
-	dnsSeen   atomic.Uint64
-	dnsLearn  atomic.Uint64
-	sniLearn  atomic.Uint64
-	probed    atomic.Uint64 // 先接后判：接管的连接数
-	probeFall atomic.Uint64 // 先接后判：直连回退的连接数
-	// selfPID 本进程 PID（先接后判要排除自己发起的连接，否则套环）。
-	selfPID uint32
+	// dnsSeen/dnsLearn/sniLearn 只读嗅探的统计（界面与日志用）。
+	dnsSeen  atomic.Uint64
+	dnsLearn atomic.Uint64
+	sniLearn atomic.Uint64
 	// dynDirty/dynLast 动态过滤器的重建节流（见 onWildcardsChanged）。
 	dynDirty chan struct{}
 	dynLast  atomic.Int64
@@ -303,7 +289,6 @@ func New(bus *logbus.Bus, rs *rules.Set, cfg *config.Config) *Engine {
 		proc:        proc.NewResolver(),
 		names:       dnsmap.New(),
 		dynDirty:    make(chan struct{}, 1),
-		selfPID:     uint32(os.Getpid()),
 	}
 }
 
@@ -390,7 +375,7 @@ func (e *Engine) Start() error {
 
 	e.wg.Add(10)
 	go e.acceptLoop()
-	go e.packetLoop(h, nil, false)
+	go e.packetLoop(h, nil)
 	go e.janitor()
 	go e.relayWatch()
 	go e.nameLoop()
@@ -406,30 +391,6 @@ func (e *Engine) Start() error {
 		// 那条路看不了 DNS，但握手是明文的。可在设置里关掉。
 		if e.cfg.TLSSniffEnabled() {
 			go e.sniLoop()
-		}
-		// 先接后判：名字与握手同时到达，不先接就必然漏掉用了加密 DNS 的首次连接。
-		if e.cfg.TLSProbeEnabled() {
-			pf := probeFilter(rs, nil, e.cfg.ProbeNetsParsed(), port)
-			ph, perr := divert.Open(pf, divert.LayerNetwork, divert.PriorityDefault, divert.FlagDefault)
-			if perr != nil {
-				e.bus.Warn("先接后判：过滤器打开失败（%v）—— 加密 DNS 下首次连接仍可能漏", perr)
-			} else {
-				stop := make(chan struct{})
-				e.mu.Lock()
-				if e.run {
-					e.probeHandle, e.probeStop = ph, stop
-					e.probeFilter, e.mainRanges = pf, rs
-				} else {
-					ph = nil // 已经在停了：不要把协程加进 WaitGroup
-				}
-				e.mu.Unlock()
-				if ph != nil {
-					e.wg.Add(2)
-					e.bus.Info("先接后判：已开启（只对 probe_nets 里的目标 + 常见 TLS 端口；不逐条刷日志）")
-					go e.packetLoop(ph, stop, true)
-					go e.probeSummaryLoop()
-				}
-			}
 		}
 	}
 	return nil
@@ -462,21 +423,14 @@ func (e *Engine) Stop() {
 		e.mu.Lock()
 		h, ln, run := e.handle, e.ln, e.run
 		dyn, dynStop := e.dynHandle, e.dynStop
-		probe, probeStop := e.probeHandle, e.probeStop
+
 		e.handle, e.ln, e.run = nil, nil, false
 		e.dynHandle, e.dynStop = nil, nil
-		e.probeHandle, e.probeStop = nil, nil
-		e.probeFilter = ""
+
 		e.mu.Unlock()
 
 		if h != nil {
 			h.Close() // 让 packetLoop 的 Recv 立刻返回错误
-		}
-		if probeStop != nil {
-			close(probeStop)
-		}
-		if probe != nil {
-			probe.Close()
 		}
 		if dynStop != nil {
 			close(dynStop) // 告诉动态句柄的循环“不是出错，是我们在换它”
@@ -726,155 +680,6 @@ func minDur(a, b time.Duration) time.Duration {
 	return b
 }
 
-// handleProbe 先接后判的实际决策与转发。
-//
-// 三种去向：
-//  1. 读出名字且命中规则（通配/具体域名）→ 走那条链（与普通拦截完全同一条路）
-//  2. 读出名字但没命中 / 根本没有名字 / 不是我们能认的协议 → **直连回退**（原样转给真目标）
-//  3. 应用在超时内一个字节都没发（服务端先发问候语的协议）→ 同 2
-//
-// 回退是为了“零打扰”：先接后判拦下来的东西大多数不该走隧道，
-// 必须能原样放行，否则就成了“开了通配域名，所有内网 TLS 都变慢/变坏”。
-func (e *Engine) handleProbe(c net.Conn, st *connState, sport uint16) {
-	chain, peeked, res, tunnelled := e.decideProbe(c, st)
-	name := res.Name
-	if name == "" {
-		name = "（没有读出域名）"
-	}
-
-	if tunnelled && chain != "" {
-		// 学到了就立刻记下：下次同样的名字不再需要先接后判（自愈）
-		if res.Name != "" {
-			e.learnFromHandshake(res, st.dst)
-		}
-		e.mu.Lock()
-		st.chain = chain
-		e.statPerRule[chain]++
-		e.mu.Unlock()
-		e.bus.Info("[%s] 先接后判：%s → 链 %s（%s:%d）", chain, name, chain, st.dst, st.dport)
-		e.relayViaChain(c, st, sport, peeked)
-		return
-	}
-
-	// 直连回退：把接走的字节先补回给真目标，再双向拷贝。
-	// 这是“内网直连”路径，统计上算直连（界面上能看到确实发生过）。
-	st.action = rules.ActionDirect
-	e.probeFall.Add(1)
-	e.noteProbeFallback(st)
-
-	d := net.Dialer{Timeout: 8 * time.Second}
-	up, err := d.Dial("tcp", net.JoinHostPort(st.dst.String(), fmt.Sprint(st.dport)))
-	if err != nil {
-		e.bus.Error("先接后判：直连回退失败 %s:%d: %v", st.dst, st.dport, err)
-		st.fail(err.Error())
-		e.finish(st)
-		return
-	}
-	defer up.Close()
-	if len(peeked) > 0 {
-		if _, werr := up.Write(peeked); werr != nil {
-			e.bus.Warn("先接后判：回写已读数据失败: %v", werr)
-			st.fail(werr.Error())
-			e.finish(st)
-			return
-		}
-		st.up.Add(uint64(len(peeked)))
-	}
-
-	done := make(chan struct{}, 2)
-	go func() { copyAndClose(up, c, &st.up); done <- struct{}{} }()
-	go func() { copyAndClose(c, up, &st.down); done <- struct{}{} }()
-	<-done
-	e.finish(st)
-}
-
-// noteProbeFallback 回退日志去重：同一个目标 10 分钟内只报一次（其余靠汇总行）。
-//
-// 为什么不逐条报：回退是常态（搭进来的大多数都不该走隧道），
-// 逐条报会把日志刷满，反而把真正要看的东西（命中走链、失败）淹掉。
-func (e *Engine) noteProbeFallback(st *connState) {
-	key := st.dst.String()
-	e.mu.Lock()
-	if e.probeSeen == nil {
-		e.probeSeen = map[string]time.Time{}
-	}
-	last, seen := e.probeSeen[key]
-	now := time.Now()
-	show := !seen || now.Sub(last) > 10*time.Minute
-	if show {
-		e.probeSeen[key] = now
-	}
-	e.mu.Unlock()
-	if show {
-		e.bus.Info("先接后判：未命中任何规则 → 直连回退 %s:%d（同一目标 10 分钟内不重复报，会进汇总行）",
-			st.dst, st.dport)
-	}
-}
-
-// probeSummaryLoop 把“先接后判”的动静汇总成每分钟一行（避免逐条刷日志）。
-func (e *Engine) probeSummaryLoop() {
-	defer e.wg.Done()
-	tk := time.NewTicker(60 * time.Second)
-	defer tk.Stop()
-	var lastProbed, lastFall uint64
-	for {
-		select {
-		case <-e.done:
-			return
-		case <-tk.C:
-			p, f := e.ProbeStats()
-			if p != lastProbed || f != lastFall {
-				e.bus.Info("先接后判（最近一分钟）：接管 %d 条，其中直连回退 %d 条",
-					p-lastProbed, f-lastFall)
-				lastProbed, lastFall = p, f
-			}
-		}
-	}
-}
-
-// relayViaChain 先接后判命中后的接管：与普通拦截完全同一条路（含已读回的字节）。
-func (e *Engine) relayViaChain(c net.Conn, st *connState, sport uint16, peeked []byte) {
-	ch, ok := e.cfg.ChainByName(st.chain)
-	if !ok {
-		e.bus.Error("链 %s 不存在，丢弃 %s:%d", st.chain, st.dst, st.dport)
-		return
-	}
-	up, err := e.dialUpstreamKeyed(ch, st.dst, st.dport, st.app.String())
-	if err != nil {
-		who := st.procName
-		if who == "" {
-			who = "未知进程"
-		}
-		e.bus.Error("[%s] 隧道建立失败 %s:%d（进程 %s，PID %d，源端口 %d）",
-			st.chain, st.dst, st.dport, who, st.pid, sport)
-		for _, line := range strings.Split(err.Error(), "\n") {
-			e.bus.Error("    %s", line)
-		}
-		st.fail(err.Error())
-		e.finish(st)
-		return
-	}
-	defer up.Close()
-	if len(peeked) > 0 {
-		if _, werr := up.Write(peeked); werr != nil {
-			e.bus.Warn("[%s] 回写已读数据失败: %v", st.chain, werr)
-			st.fail(werr.Error())
-			e.finish(st)
-			return
-		}
-		st.up.Add(uint64(len(peeked)))
-	}
-	e.bus.Info("[%s] 已接管 %s:%d  (来源端口 %d)", st.chain, st.dst, st.dport, sport)
-
-	done := make(chan struct{}, 2)
-	go func() { copyAndClose(up, c, &st.up); done <- struct{}{} }()
-	go func() { copyAndClose(c, up, &st.down); done <- struct{}{} }()
-	<-done
-	e.finish(st)
-	e.bus.Info("[%s] 连接结束 %s:%d  ↑ %s  ↓ %s", st.chain, st.dst, st.dport,
-		humanBytes(st.up.Load()), humanBytes(st.down.Load()))
-}
-
 func (e *Engine) handleConn(c net.Conn) {
 	defer c.Close()
 
@@ -892,13 +697,6 @@ func (e *Engine) handleConn(c net.Conn) {
 	// 看门狗：relay 确实收到了这条连接（这一步以前没有任何记录，
 	// 导致“包没到 relay”这种故障在日志里完全看不出来）。
 	st.relayed.Store(true)
-
-	// 先接后判：这条连接是先绑架进来、域名还不知道的。
-	// 读一段数据（TLS ClientHello / HTTP 请求头）把域名读出来，再决定去向。
-	if st.probe {
-		e.handleProbe(c, st, sport)
-		return
-	}
 
 	ch, ok := e.cfg.ChainByName(st.chain)
 	if !ok {
@@ -1000,7 +798,7 @@ func copyAndClose(dst, src net.Conn, counter *atomic.Uint64) {
 
 // ───────────────────────── 包处理 ─────────────────────────
 
-func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}, probe bool) {
+func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}) {
 	defer e.wg.Done()
 
 	buf := make([]byte, divert.MTUMax)
@@ -1065,22 +863,8 @@ func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}, probe bool) {
 			case rules.ActionDirect, rules.ActionBlock:
 				e.passThrough(h, pkt, addr, t, src, dst, sport, dport, flags, act, procName, procPID)
 			default:
-				e.rewriteOutbound(h, pkt, addr, t, src, dst, sport, dport, flags, chain, relayIP, relayPort, procName, procPID, false)
+				e.rewriteOutbound(h, pkt, addr, t, src, dst, sport, dport, flags, chain, relayIP, relayPort, procName, procPID)
 			}
-			continue
-		}
-		// “先接后判”：没命中任何规则的连接先绑架到中转去。
-		// 中转读过 ClientHello 才能知道目标域名（名字与握手同时到达，
-		// 不先接就必然漏掉用了加密 DNS 的首次连接）。
-		if probe {
-			// 决不管我们自己发起的连接（中转要直连回退时就是它）：不挡就会套环。
-			if e.ownConn(sport) {
-				if _, err := h.Send(pkt, addr); err != nil {
-					e.bus.Warn("注入失败: %v", err)
-				}
-				continue
-			}
-			e.rewriteOutbound(h, pkt, addr, t, src, dst, sport, dport, flags, probeChain, relayIP, relayPort, procName, procPID, true)
 			continue
 		}
 		// 没命中任何规则：要么是“带本机网段条件的规则”**当前不生效**（A16），
@@ -1312,7 +1096,7 @@ func (e *Engine) rebuildDynFilter() {
 	e.wg.Add(1)
 	e.mu.Unlock()
 
-	go e.packetLoop(nh, stop, false)
+	go e.packetLoop(nh, stop)
 	if oldH != nil {
 		if oldStop != nil {
 			close(oldStop)
@@ -1320,9 +1104,6 @@ func (e *Engine) rebuildDynFilter() {
 		oldH.Close()
 	}
 	e.bus.Info("域名通配：过滤器已更新 —— 覆盖 %d 个 IP 段｜%s", len(rs), filter)
-	// 学到的 IP 变多了：把它们从“先接后判”里排除出去，
-	// 后续同名连接就走动态过滤器的快路径，不再过一道中转。
-	e.rebuildProbeFilter(e.mainRangesSnapshot())
 }
 
 // WildcardStat 一条通配规则当前的状态（界面/日志看“学到了几个 IP”）。
@@ -1563,203 +1344,6 @@ func (e *Engine) learnFromHandshake(res tlsname.Result, dst net.IP) {
 	e.onWildcardsChanged()
 }
 
-// ───────────────────────── “先接后判”（应对加密 DNS 的首次连接） ─────────────────────────
-
-// probePorts 会被“先接后判”接管的端口：与嗅探一致（TLS/HTTP 常见端口）。
-var probePorts = []uint16{443, 8443, 9443, 6443, 4443, 10443, 80, 8080}
-
-// outsideRangeClause 表达“不在这些区间里”。
-//
-// 为什么不用 `not (...)`：实测 WinDivert 的过滤器**不认 not**
-// （Open 直接报 “invalid packet filter string” —— 一次探针程序试出来的，
-// 见 local/pfilter）。所以只能用等价写法：对每个区间“小于起点 或 大于终点”，
-// 再把它们一个个 and 起来。
-//
-// 语义上比“真 not”略保守：某个区间带了端口条件时（比如只拦 443），这里
-// 会把整段都排除掉，于是那段的其他端口不参与先接后判（退回原来的直连）。
-// 宁可少接，不去猜。
-func outsideRangeClause(rs []rules.Range) string {
-	parts := make([]string, 0, len(rs))
-	for _, r := range rs {
-		parts = append(parts, fmt.Sprintf("(ip.DstAddr < %s or ip.DstAddr > %s)",
-			rules.U2IP(r.First), rules.U2IP(r.Last)))
-	}
-	return strings.Join(parts, " and ")
-}
-
-// probeFilter 拼出“先接后判”的过滤器：
-//
-//	outbound tcp + 常见 TLS/HTTP 端口 + **目标落在 probe_nets 里**
-//	+ **排除**：已有规则覆盖的网段、已经学到的通配 IP、relay 自己
-//
-// probe_nets 默认就是内网私有网段。为什么必须窄：每条被接进来的连接都要
-// 经过一道中转（读到握手再定），沾上公网 TLS（Clash 连节点、浏览器日常）
-// 就是白花代价且日志被刷 —— 实测确实会发生，所以范围宁可保守。
-func probeFilter(mainRanges, dynRanges []rules.Range, probeNets []*net.IPNet, relayPort uint16) string {
-	var ports string
-	for i, p := range probePorts {
-		if i > 0 {
-			ports += " or "
-		}
-		ports += fmt.Sprintf("tcp.DstPort == %d", p)
-	}
-	s := fmt.Sprintf("outbound and tcp and (%s)", ports)
-	if c := netClause(probeNets); c != "" {
-		s += " and (" + c + ")"
-	}
-	if c := outsideRangeClause(mainRanges); c != "" {
-		s += " and " + c
-	}
-	if c := outsideRangeClause(dynRanges); c != "" {
-		s += " and " + c
-	}
-	return s + fmt.Sprintf(" and tcp.SrcPort != %d", relayPort)
-}
-
-// netClause 把一组网段拼成 ip.DstAddr 的区间条件。
-func netClause(nets []*net.IPNet) string {
-	parts := make([]string, 0, len(nets))
-	for _, n := range nets {
-		if n == nil || n.IP.To4() == nil {
-			continue
-		}
-		first := rules.IP2U(n.IP.To4())
-		mask := rules.IP2U(net.IP(n.Mask).To4())
-		last := first | ^mask
-		parts = append(parts, fmt.Sprintf("(ip.DstAddr >= %s and ip.DstAddr <= %s)",
-			rules.U2IP(first), rules.U2IP(last)))
-	}
-	return strings.Join(parts, " or ")
-}
-
-// rebuildProbeFilter 重建“先接后判”的句柄（学到的通配 IP 变多了就该把它们排除出去，
-// 让后续连接走动态过滤器的快路径而不是再过一道中转）。
-//
-// 同样用“先开新、再关旧”，中间不丢包。
-func (e *Engine) rebuildProbeFilter(rs []rules.Range) {
-	e.mu.Lock()
-	oldH, oldStop := e.probeHandle, e.probeStop
-	relay := e.relay
-	run := e.run
-	e.mu.Unlock()
-	if !run {
-		return
-	}
-	filter := probeFilter(rs, e.rules.WildcardRanges(e.cfg.CountDirectEnabled()), e.cfg.ProbeNetsParsed(), portOf(relay))
-	if e.probeFilterNow() == filter {
-		return // 没变化
-	}
-	ph, err := divert.Open(filter, divert.LayerNetwork, divert.PriorityDefault, divert.FlagDefault)
-	if err != nil {
-		e.bus.Warn("先接后判：过滤器重建失败（%v）—— 继续用旧的那份", err)
-		return
-	}
-	stop := make(chan struct{})
-	e.mu.Lock()
-	if !e.run {
-		e.mu.Unlock()
-		ph.Close()
-		return
-	}
-	e.probeHandle, e.probeStop = ph, stop
-	e.mu.Unlock()
-	e.wg.Add(1)
-	go e.packetLoop(ph, stop, true)
-	if oldH != nil {
-		if oldStop != nil {
-			close(oldStop)
-		}
-		oldH.Close()
-	}
-}
-
-// mainRangesSnapshot 启动时装配的规则区间（只读用）。
-func (e *Engine) mainRangesSnapshot() []rules.Range {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	return append([]rules.Range(nil), e.mainRanges...)
-}
-
-func (e *Engine) probeFilterNow() string {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	if e.probeHandle == nil {
-		return ""
-	}
-	// 句柄本身不记得过滤器串，用 dynFilter 同构的字段记一份
-	return e.probeFilter
-}
-
-// decideProbe 先接后判：读应用发来的第一段数据，看能不能读出目标域名，
-// 再决定走哪条链；读不出名字或没规则命中 → 直连回退（原样转给真目标）。
-//
-// 返回：链名（空 = 不回链）、已经读走的数据（要一字不漏地转给下游）、解析结果、是否走链。
-//
-// 注意：超时必须清掉，否则后续转发会莫名超时（这个坑很难查）。
-func (e *Engine) decideProbe(c net.Conn, st *connState) (chain string, peeked []byte, res tlsname.Result, tunnel bool) {
-	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
-	defer func() { _ = c.SetReadDeadline(time.Time{}) }()
-
-	buf := make([]byte, 2048)
-	for len(peeked) < 8192 {
-		n, err := c.Read(buf)
-		if n > 0 {
-			peeked = append(peeked, buf[:n]...)
-			if r, ok := tlsname.Name(peeked); ok {
-				return e.chainForName(r.Name, st), peeked, r, true
-			}
-			// TLS 记录没收全 → 接着等；否则不再等
-			if tlsname.LooksLikeTLS(peeked) && !tlsname.Complete(peeked) {
-				continue
-			}
-			break
-		}
-		if err != nil {
-			break
-		}
-	}
-	return "", peeked, tlsname.Result{}, false
-}
-
-// chainForName 先接后判时用：这个名字命中哪条链（空 = 不命中，直连回退）。
-func (e *Engine) chainForName(name string, st *connState) string {
-	if name == "" {
-		return ""
-	}
-	chain, act, ok := e.rules.MatchName(name, st.dst, st.dport, st.procName)
-	if !ok || act != rules.ActionChain {
-		// 直连/阻断规则不需要在这里处理：它们的目标本来就在主过滤器里（不会走到先接后判）。
-		return ""
-	}
-	if _, ok := e.cfg.ChainByName(chain); !ok {
-		return ""
-	}
-	return chain
-}
-
-// ProbeStats 先接后判的计数（诊断用）：接管数 / 直连回退数。
-func (e *Engine) ProbeStats() (probed, fell uint64) {
-	return e.probed.Load(), e.probeFall.Load()
-}
-
-// probeChain 先接后判接进来的连接在统计/日志里的占位“链名”（不是真链）。
-const probeChain = "先接后判"
-
-// ownConn 这条连接是不是我们自己（nethub 进程）发起的。
-//
-// 为什么必须判：中转直连回退时会自己向外发包，而那些包同样会命中“先接后判”
-// 的过滤器 —— 不排除就会自己接自己的连接，套成环。
-func (e *Engine) ownConn(sport uint16) bool {
-	if e.proc == nil {
-		return false
-	}
-	_, pid, ok := e.proc.ByPort(sport)
-	if !ok || pid == 0 {
-		return false
-	}
-	return pid == e.selfPID
-}
-
 // noticeSeen 直连/阻断日志去重用的一条记录。
 type noticeSeen struct {
 	key  string // 动作 + 目标
@@ -1819,7 +1403,7 @@ func isSyn(flags byte) bool { return flags&0x02 != 0 && flags&0x10 == 0 }
 // rewriteOutbound 把应用发往内网目标的包改成"发给本机 relay"。
 func (e *Engine) rewriteOutbound(h *divert.Handle, pkt []byte, addr *divert.Address, t int,
 	src, dst net.IP, sport, dport uint16, flags byte, chain string, relayIP net.IP, relayPort uint16,
-	procName string, pid uint32, probe bool) {
+	procName string, pid uint32) {
 
 	if isSyn(flags) {
 		// A14：新建连接时判一次环（目标=上游自己 / 源=目标 / 同目标疯狂重连）
@@ -1832,7 +1416,7 @@ func (e *Engine) rewriteOutbound(h *divert.Handle, pkt []byte, addr *divert.Addr
 			dst: dst, dport: dport,
 			app: append(net.IP(nil), src...), appPort: sport,
 			chain: chain, action: rules.ActionChain, start: time.Now(),
-			procName: procName, pid: pid, probe: probe,
+			procName: procName, pid: pid,
 		}
 		st.touch()
 		e.conns[sport] = st
@@ -1843,15 +1427,7 @@ func (e *Engine) rewriteOutbound(h *divert.Handle, pkt []byte, addr *divert.Addr
 		}
 		e.mu.Unlock()
 		if !existed {
-			if probe {
-				e.probed.Add(1)
-				// 这里**不**逐条打日志：先接后判活在整个内网 TLS 上，
-				// 逐条打会把日志刷满（实测过，用户直接抱怨）。
-				// 结果只在两处出现：命中走链（值得看）、首次回退（每目标一条）
-				// + 每分钟的汇总行（probeSummaryLoop）。
-			} else {
-				e.bus.Info("[%s] 拦截 %s:%d  → relay", chain, dst, dport)
-			}
+			e.bus.Info("[%s] 拦截 %s:%d  → relay", chain, dst, dport)
 		}
 	} else if st := e.flow(sport); st != nil {
 		st.touch()

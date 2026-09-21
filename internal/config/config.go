@@ -803,25 +803,6 @@ type Tuning struct {
 	//
 	// 关掉它 = 只靠 DNS：零额外开销，但遇到 DoH 就学不到名字。
 	TLSSniffDisabled bool `yaml:"tls_sniff_disabled,omitempty"`
-	// TLSProbeDisabled 是否关掉“先接后判”（默认开，同样只有通配域名规则时才生效）。
-	//
-	// 何为先接后判：名字与握手是同时到达的，所以“先看 SNI 再决定”对**首次连接**
-	// 根本来不及（实测：那条 curl 直连出去后超时了）。先接后判就是把这种连接先
-	// 绑架到中转，中转读到 ClientHello 再决定：命中通配就走链，否则原样直连回退。
-	//
-	// 代价：这些连接多过一道用户态 + 多一次中转回退。所以**范围必须窄**：
-	// 默认只管内网网段（见 ProbeNets），靠 ProbeNets 显式扩大。
-	TLSProbe bool `yaml:"tls_probe,omitempty"`
-	// ProbeNets “先接后判”只管哪些目标网段（CIDR 或单个 IP）。
-	//
-	// 留空 = 用内置的内网网段（10/8、172.16/12、192.168/16、169.254/16、100.64/10）。
-	// 客户环境里如果有**用公网 IP 的内网系统**（比如 219.145.88.134），
-	// 把那些 IP/网段写进来才会被先接后判。
-	//
-	// 为什么必须窄：先接后判的每条连接都要过一道中转（读到握手再定），
-	// 一旦沾上公网 TLS（比如 Clash 自己连节点、浏览器日常访问），
-	// 就是白花代价 + 日志被刷。
-	ProbeNets []string `yaml:"probe_nets,omitempty"`
 	// DomainResolve 规则里的域名怎么变成实际连接：
 	//
 	//	local（默认）本机解析出 IP 后按 IP 连 —— 客户内网域名通常只有本机能解答
@@ -1748,40 +1729,12 @@ func (c *Config) BackupNow() error { return c.backupLocked() }
 // 需要在「连接」页勾选，改完要重启服务（过滤器在启动时装配）。
 func (c *Config) CountDirectEnabled() bool { return c.Tuning.CountDirect }
 
-// TLSSniffEnabled 是否只读噢探 TLS SNI / HTTP Host（默认开）。
+// TLSSniffEnabled 是否只读嗅探 TLS SNI / HTTP Host（默认开）。
 // 注意：即使开着，没有通配域名规则时也不会开第二只句柄（一分钱不花）。
 func (c *Config) TLSSniffEnabled() bool { return !c.Tuning.TLSSniffDisabled }
 
-// TLSProbeEnabled 是否开启“先接后判”（默认开，但只有通配域名规则时才真的生效）。
-func (c *Config) TLSProbeEnabled() bool { return c.Tuning.TLSProbe }
-
-// ProbeNetsParsed “先接后判”只管哪些网段。留空则用内置的内网网段。
-func (c *Config) ProbeNetsParsed() []*net.IPNet {
-	var out []*net.IPNet
-	for _, s := range c.Tuning.ProbeNets {
-		s = strings.TrimSpace(s)
-		if s == "" {
-			continue
-		}
-		if !strings.Contains(s, "/") {
-			s += "/32"
-		}
-		if _, n, err := net.ParseCIDR(s); err == nil && n.IP.To4() != nil {
-			out = append(out, n)
-		}
-	}
-	if len(out) > 0 {
-		return out
-	}
-	// 默认：内网私有网段（含 CGNAT 与链路本地）
-	for _, d := range []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
-		"169.254.0.0/16", "100.64.0.0/10"} {
-		if _, n, err := net.ParseCIDR(d); err == nil {
-			out = append(out, n)
-		}
-	}
-	return out
-}
+// ProbeNetsParsed 已删除（随“先接后判”一起去掉）：域名通配的名字来源现在
+// 只有两条只读通道（明文 DNS 嗅探 + TLS SNI/HTTP Host 嗅探），不再揣测。
 
 // EnabledRoutes 只返回启用的规则（引擎、界面统计用）。
 //

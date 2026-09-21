@@ -98,3 +98,11 @@ pwsh -NoProfile -File ./local/restart.ps1                   # 优雅重启 + 复
 3. **候选竞速再进一层**：现在只对"第一条超过 150ms"起跑，可扩到"按历史延迟排序后竞速"。
 4. **服务模式与界面共存**（需 IPC，较大）；**DNS 走代理**（需确认客户是否真有内网域名解析需求）。
 5. 上游协议扩展（ws/gRPC/QUIC/ss）——**取决于上游会不会换实现**，换之前不做。
+
+## 内核过滤器（WinDivert）上的实测坑
+
+- **`not` 不合法**：`outbound and tcp and not (...)` 会被 `WinDivertOpen` 直接拒掉，
+  只报一句 “invalid packet filter string”（不告诉你哪个词不行）。
+  要表达“不在某区间里”只能展开成 `(ip.DstAddr < 起点 or ip.DstAddr > 终点)`。
+  另见 `git log` 里 1bda686 那条：它是用一个一次性探针程序（`local/pfilter`）逐个写法试出来的
+  —— 过滤器语法出问题时就该这么试，别猜。
