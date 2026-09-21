@@ -106,3 +106,15 @@ pwsh -NoProfile -File ./local/restart.ps1                   # 优雅重启 + 复
   要表达“不在某区间里”只能展开成 `(ip.DstAddr < 起点 or ip.DstAddr > 终点)`。
   另见 `git log` 里 1bda686 那条：它是用一个一次性探针程序（`local/pfilter`）逐个写法试出来的
   —— 过滤器语法出问题时就该这么试，别猜。
+
+## 日志规范（新增日志一律照这个写）
+
+- 格式：`模块.动作: key=value key=value …`，例：
+  `intercept: chain=etyy target=172.30.4.217:443 action=relay`、
+  `dns.takeover: name=main.his.com fake_ip=198.19.0.5 ttl=1m0s`、
+  `relay.fail: chain=etyy target=10.0.0.5:5432 proc=navicat pid=1234 src_port=51234`。
+- **不要**在日志里写“人话解释/闲聊/情绪” ——（“我们这么做是因为…”“别让人猜”这类）
+  解释放代码注释或界面的「i」弹窗里。日志只回答：谁、对什么、结果如何。
+- 报错必须**原始且完整**：一行上下文（模块/链/目标/进程/端口）+ 上游返回的原文逐行照抄，
+  不做翻译、不归类、不裁剪。
+- 用户可见的中文说明（界面文案）可以口语化；**日志不行**。

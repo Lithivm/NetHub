@@ -241,6 +241,10 @@ type Engine struct {
 	tookOver atomic.Uint64
 	tookSeen map[string]bool
 	dnsBox   *dnsBlackbox // 排查用：DNS 黑匣子（tuning.dns_blackbox 打开时才有）
+	// tunBlocked 本机已有别的 TUN 模式代理在接管流量（检测到就自动让路）。
+	tunBlocked bool
+	// dohSeen 已报过的加密 DNS 端点（避免刷屏）。
+	dohSeen map[string]bool
 	// dynDirty/dynLast 动态过滤器的重建节流（见 onWildcardsChanged）。
 	dynDirty chan struct{}
 	dynLast  atomic.Int64
@@ -350,6 +354,13 @@ func (e *Engine) Start() error {
 	// 域名规则：先把域名解析成 IP（供匹配与过滤器用），再装配过滤器。
 	// 必须在 buildFilter 之前 —— 否则这些 IP 不在过滤器里，包根本不到我们手上。
 	e.resolveHostTargets(false)
+	// 启动时读一次 Windows DNS 客户端缓存：把“NetHub 启动之前就解析过”的名字
+	// 也灌进名字表（顺带覆盖系统级 DoH —— 那种场景看不到明文报文，但缓存照写）。
+	if e.rules.HasWildcards() {
+		if n := e.dnsCacheSeed(); n > 0 {
+			e.bus.Info("dns.seed: names=%d source=windows-dns-cache", n)
+		}
+	}
 
 	// DNS 接管（发假 IP）：池子在这里建，它覆盖的**整段**假 IP 要进主过滤器 ——
 	// 应用拿到假 IP 后会去连它，那段地址不在过滤器里的话包到不了我们手上。
@@ -377,7 +388,7 @@ func (e *Engine) Start() error {
 		return fmt.Errorf("没有需要拦截的规则（只填了直连规则时无事可做）")
 	}
 	filter := buildFilter(rs, port)
-	e.bus.Info("内核过滤器: %s", filter)
+	e.bus.Info("filter.main: rules=%d ranges=%d filter=%s", len(e.rules.List()), len(rs), filter)
 
 	// 3) 打开 WinDivert（含首次安装驱动的重试）
 	h, err := openDivert(e.bus, filter)
@@ -389,15 +400,15 @@ func (e *Engine) Start() error {
 	e.ln, e.relay, e.handle, e.run = ln, relay, h, true
 	e.mu.Unlock()
 
-	e.bus.Info("✓ 拦截已启动：relay=%s，规则 %d 条", relay, len(e.rules.List()))
+	e.bus.Info("engine.start: relay=%s rules=%d", relay, len(e.rules.List()))
 	for _, r := range e.rules.List() {
 		switch r.Action {
 		case rules.ActionDirect:
-			e.bus.Info("    %s  →  直连（不走代理）", r.Label())
+			e.bus.Info("route: %s action=direct", r.Label())
 		case rules.ActionBlock:
-			e.bus.Info("    %s  →  阻断（丢弃）", r.Label())
+			e.bus.Info("route: %s action=block", r.Label())
 		default:
-			e.bus.Info("    %s  →  链 %s", r.Label(), r.Chain)
+			e.bus.Info("route: %s action=chain/%s", r.Label(), r.Chain)
 		}
 	}
 	for _, ch := range e.cfg.Chains {
@@ -417,6 +428,18 @@ func (e *Engine) Start() error {
 	// 只读嗅探 DNS + SNI/Host：只有真的用了通配域名才开（否则一分钱不花）。
 	// 它们负责把“应用实际要去哪个名字”学回来，并维护动态过滤器。
 	if e.rules.HasWildcards() {
+		// 先看本机是不是已经有别的程序在用 TUN 模式接管流量（多为 Clash/mihomo）：
+		// TUN 与我们的透明接管互斥 —— 那时包根本到不了我们手上，继续“假装在工作”
+		// 是最坏的结果，所以直接说清楚并**不开**嗅探/接管（把 DNS 让给对方）。
+		tun := detectTun()
+		if tun.Active() {
+			e.bus.Error("检测到本机已有 TUN 模式的代理在接管流量：%s", tun.Summary())
+			e.bus.Error("  —— TUN 模式与 NetHub 的透明接管互斥（全机流量与 DNS 都被它抓走），两者只能二选一。" +
+				"域名通配的名字学习与 DNS 接管已自动让路（不启动）；请关掉对方的 TUN，或只用按 IP 段的规则")
+			e.tunBlocked = true
+		}
+	}
+	if e.rules.HasWildcards() && !e.tunBlocked {
 		go e.dnsLoop()
 		go e.dynFilterLoop()
 		// SNI/Host：应对加密 DNS（DoH/DoT）与自带解析器的客户端 ——
@@ -429,6 +452,10 @@ func (e *Engine) Start() error {
 	// 搞熄）——看查询复用上面那只早已跑通的 dnsLoop 嗅探句柄；
 	// 这里只新开一只 **filter=false** 的“只塞”句柄（什么也不匹配 → 结构上不可能
 	// 影响任何流量），用来把假 IP 应答注进去。
+	if e.fake != nil && e.tunBlocked {
+		e.bus.Warn("DNS 接管：因本机已被 TUN 模式代理接管，本次不启动（让路）")
+		e.fake = nil
+	}
 	if e.fake != nil {
 		dh, derr := divert.Open("false", divert.LayerNetwork, divert.PriorityDefault, divert.FlagDefault)
 		if derr != nil {
@@ -447,7 +474,7 @@ func (e *Engine) Start() error {
 					e.dnsBox = openDNSBlackbox(dnsBlackboxPath(), 4<<20)
 					e.bus.Info("DNS 接管：黑匣子已开启（%s）—— 每个查询/每次回答都记在里面", dnsBlackboxPath())
 				}
-				e.bus.Info("DNS 接管：已开启（复用同一只只读嗅探看查询 + filter=false 的句柄塞假 IP）")
+				e.bus.Info("dns.takeover: started observe=shared-sniff inject=filter-false range=%s", e.fake.Range())
 				e.wg.Add(1)
 				go e.dnsTakeoverGuard()
 			}
@@ -507,7 +534,7 @@ func (e *Engine) Stop() {
 		}
 		e.wg.Wait()
 		if run {
-			e.bus.Info("拦截已停止")
+			e.bus.Info("engine.stop")
 		}
 	})
 }
@@ -854,7 +881,7 @@ func (e *Engine) handleConn(c net.Conn) {
 	}
 	defer up.Close()
 
-	e.bus.Info("[%s] 已接管 %s:%d  (来源端口 %d)", st.chain, st.dst, st.dport, sport)
+	e.bus.Info("relay.up: chain=%s target=%s:%d src_port=%d", st.chain, st.dst, st.dport, sport)
 
 	done := make(chan struct{}, 2)
 	go func() { copyAndClose(up, c, &st.up); done <- struct{}{} }()
@@ -862,7 +889,7 @@ func (e *Engine) handleConn(c net.Conn) {
 	<-done
 
 	e.finish(st)
-	e.bus.Info("[%s] 连接结束 %s:%d  ↑ %s  ↓ %s", st.chain, st.dst, st.dport,
+	e.bus.Info("relay.done: chain=%s target=%s:%d up=%s down=%s", st.chain, st.dst, st.dport,
 		humanBytes(st.up.Load()), humanBytes(st.down.Load()))
 }
 
@@ -1012,7 +1039,7 @@ func (e *Engine) dnsLoop() {
 		return
 	}
 	defer h.Close()
-	e.bus.Info("域名通配：已开始只读嗅探 DNS（应答 + 查询，只读不改写）")
+	e.bus.Info("dns.sniff: started mode=read-only scope=answers+queries")
 
 	buf := make([]byte, divert.MTUMax)
 	addr := new(divert.Address)
@@ -1265,7 +1292,7 @@ func (e *Engine) rebuildDynFilter() {
 				close(oldStop)
 			}
 			oldH.Close()
-			e.bus.Info("域名通配：当前没有命中任何通配规则的 IP，动态过滤器已撤下")
+			e.bus.Info("wildcard: filter.remove reason=no-matched-ip")
 		}
 		return
 	}
@@ -1294,7 +1321,7 @@ func (e *Engine) rebuildDynFilter() {
 		}
 		oldH.Close()
 	}
-	e.bus.Info("域名通配：过滤器已更新 —— 覆盖 %d 个 IP 段｜%s", len(rs), filter)
+	e.bus.Info("wildcard: filter.update ranges=%d filter=%s", len(rs), filter)
 }
 
 // WildcardStat 一条通配规则当前的状态（界面/日志看“学到了几个 IP”）。
@@ -1379,7 +1406,7 @@ func sameStrSet(a, b []string) bool {
 // 为什么要端口白名单：嗅探的代价是“这些包的负载都拷一份到用户态”，
 // 范围越小越好；而握手只发生在连接最开始，常见的就这几类端口。
 // 内网服务端口不在表里的，可以用通配域名 + 明文 DNS 拿到（不依赖 SNI）。
-var sniSniffPorts = []uint16{443, 8443, 9443, 6443, 4443, 10443, 80, 8080}
+var sniSniffPorts = []uint16{443, 8443, 9443, 6443, 4443, 10443, 80, 8080, 853} // 853=DoT
 
 // sniSniffFilter 拼出方向 TCP 的嗅探过滤器（只读，不改任何包）。
 //
@@ -1423,7 +1450,7 @@ func (e *Engine) sniLoop() {
 		return
 	}
 	defer h.Close()
-	e.bus.Info("TLS 嗅探：已开始只读嗅探 SNI / HTTP Host（只读，不改写任何包）｜%s", filter)
+	e.bus.Info("sni.sniff: started mode=read-only ports=%d filter=%s", len(sniSniffPorts), filter)
 
 	buf := make([]byte, divert.MTUMax)
 	addr := new(divert.Address)
@@ -1534,11 +1561,49 @@ func (e *Engine) learnFromHandshake(res tlsname.Result, dst net.IP) {
 	if len(before) == 0 && !wasKnown {
 		// 这个名字从未在明文 DNS 里出现过 → 基本可以确定这台机器上有人用了
 		// 加密 DNS 或自带解析器的客户端。这条日志的价值：让“为什么通配能/不能生效”有据可查。
-		e.bus.Info("TLS 嗅探：从握手学到一个没在明文 DNS 里见过的名字：%s → %s（加密 DNS 或自带解析器）",
-			res.Name, dst)
+		e.bus.Info("sni.learn: name=%s ip=%s dns_seen=false", res.Name, dst)
 	}
 	e.applyHostIPs()
 	e.onWildcardsChanged()
+}
+
+// dohHosts 已知的加密 DNS（DoH/DoT）服务名。只用于**报信**，不参与任何匹配。
+var dohHosts = []string{
+	"dns.google", "dns.google.com", "cloudflare-dns.com", "one.one.one.one",
+	"mozilla.cloudflare-dns.com", "chrome.cloudflare-dns.com",
+	"doh.pub", "dns.pub", "doh.360.cn", "dns.alidns.com", "doh.alidns.com",
+	"dns.quad9.net", "doh.opendns.com", "dns.nextdns.io", "doh.dns.sb",
+	"doh.cleanbrowsing.org", "dns.adguard.com",
+}
+
+// isDoHEndpoint 这个域名是不是已知的加密 DNS 端点。
+func isDoHEndpoint(name string) bool {
+	name = strings.ToLower(strings.TrimSuffix(name, "."))
+	for _, h := range dohHosts {
+		if name == h {
+			return true
+		}
+	}
+	return false
+}
+
+// noteDoH 第一次看到加密 DNS 端点时报一条（同一个端点只报一次，否则刷屏）。
+func (e *Engine) noteDoH(name string, dst net.IP) {
+	e.mu.Lock()
+	if e.dohSeen == nil {
+		e.dohSeen = map[string]bool{}
+	}
+	show := !e.dohSeen[name]
+	if show {
+		e.dohSeen[name] = true
+	}
+	e.mu.Unlock()
+	if !show {
+		return
+	}
+	e.bus.Warn("doh.detect: host=%s ip=%s impact=first-connect-may-miss", name, dst)
+	e.bus.Warn("  影响：这些名字只能从 TLS 握手看到，**首次连接**可能来不及进过滤器（重试起生效）。" +
+		"要首次就生效，需打开 DNS 接管或改用明文 DNS")
 }
 
 // ───────────────────────── DNS 接管（发假 IP） ─────────────────────────
@@ -1618,10 +1683,10 @@ func (e *Engine) noteTookOver(name string) {
 	}
 	ip, _ := e.fake.IPFor(name)
 	if ip == nil {
-		e.bus.Info("DNS 接管：%s → 答\"没有 IPv6 记录\"（避免应用走 IPv6 绕过）", name)
+		e.bus.Info("dns.takeover: name=%s qtype=AAAA answer=NOERROR/empty", name)
 		return
 	}
-	e.bus.Info("DNS 接管：%s → 假 IP %s（应用连它时我们就知道要去哪个域名）", name, ip)
+	e.bus.Info("dns.takeover: name=%s fake_ip=%s ttl=%s", name, ip, dnsFakeTTL)
 }
 
 // ───────────────────────── 名字反查：假 IP 优先 ─────────────────────────
@@ -1658,7 +1723,7 @@ func (e *Engine) sweepFakeIP() {
 		delete(e.tookSeen, n)
 	}
 	e.mu.Unlock()
-	e.bus.Info("DNS 接管：%d 个假 IP 已过期回收：%v", len(gone), gone)
+	e.bus.Info("fakeip.recycle: count=%d names=%v", len(gone), gone)
 }
 
 // udpPayload 从 IP 包里取出 UDP 负载，并返回地址/端口（DNS 接管要互换它们）。
@@ -1834,10 +1899,10 @@ func (e *Engine) dnsTakeoverSelfCheck() {
 		good++
 	}
 	if good > 0 {
-		e.bus.Info("DNS 接管自检通过：不相干名字照常解析（%v）", dnsCanaries)
+		e.bus.Info("dns.selftest: ok canaries=%v", dnsCanaries)
 		return
 	}
-	e.bus.Error("DNS 接管自检异常（%d/%d）：%v", bad, len(dnsCanaries), detail)
+	e.bus.Error("dns.selftest: failed bad=%d total=%d detail=%v", bad, len(dnsCanaries), detail)
 	e.bus.Error("  —— 注意：DNS 接管只应该改变**命中通配规则**的名字，其余必须照常。" +
 		"这条已经影响别的名字了，请把上面几行日志发回来（功能不会自动关闭，但这个问题得查）")
 }
@@ -1960,12 +2025,12 @@ func (e *Engine) rewriteOutbound(h *divert.Handle, pkt []byte, addr *divert.Addr
 			if e.isFakeIP(dst) {
 				if n, ok := e.nameOf(dst); ok {
 					st.fakeName = n
-					e.bus.Info("[%s] 拦截 %s（假 IP %s）:%d  → relay", chain, n, dst, dport)
+					e.bus.Info("intercept: chain=%s target=%s fake_ip=%s port=%d action=relay", chain, n, dst, dport)
 				} else {
-					e.bus.Info("[%s] 拦截 %s:%d  → relay（未知假 IP）", chain, dst, dport)
+					e.bus.Info("intercept: chain=%s target=%s:%d action=relay fake_ip=unmapped", chain, dst, dport)
 				}
 			} else {
-				e.bus.Info("[%s] 拦截 %s:%d  → relay", chain, dst, dport)
+				e.bus.Info("intercept: chain=%s target=%s:%d action=relay", chain, dst, dport)
 			}
 		}
 	} else if st := e.flow(sport); st != nil {
@@ -2586,7 +2651,7 @@ func (e *Engine) pruneNames() {
 	for _, h := range exp {
 		e.names.Remove(h)
 	}
-	e.bus.Info("域名通配：%d 个观察到的域名已过期（TTL 到）—— 不再作为匹配依据：%v", len(exp), exp)
+	e.bus.Info("name.expire: count=%d names=%v", len(exp), exp)
 	e.applyHostIPs()
 	e.onWildcardsChanged()
 }

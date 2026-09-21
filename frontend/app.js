@@ -1589,7 +1589,11 @@ function wire() {
   };
 
   // 模态框
-  document.getElementById('modalOk').onclick = () => { if (modal.onOk) modal.onOk(); };
+  document.getElementById('modalOk').onclick = () => {
+    // 没给回调（比如纯说明类的「i」弹窗）= 点「确定」就是关闭。
+    // 以前这里直接调用 modal.onOk（null）→ 按钮看起来没反应。
+    if (modal.onOk) { modal.onOk(); } else { modal.close(); }
+  };
   document.getElementById('modalCancel').onclick = () => modal.close();
   document.getElementById('modalX').onclick = () => modal.close();
 

@@ -358,7 +358,10 @@ func (b *Backend) GetChains() []ChainView {
 	return out
 }
 
-// briefUpstream 列表用的简化地址：协议 + 主机:端口 +（有凭据）“带凭据”。
+// briefUpstream 列表用的简化地址：协议 + 主机:端口。
+//
+// **不带凭据标记** —— 界面上另有一个单独的“带凭据 / 无凭据”标签，
+// 这里再拼一个就重复了（实测被用户当成显示两次的 bug）。
 func briefUpstream(raw string) string {
 	b := gostbat.Redact(raw)
 	if u, err := upstream.Parse(raw); err == nil && u.Addr != "" {
@@ -367,9 +370,6 @@ func briefUpstream(raw string) string {
 			proto += "+tls"
 		}
 		b = proto + "://" + u.Addr
-	}
-	if hasCred(raw) {
-		b += "（带凭据）"
 	}
 	return b
 }
@@ -1269,7 +1269,7 @@ func (b *Backend) SelfTest() {
 	}
 
 	go func() {
-		b.a.Bus.Info("=== 链路自检开始（%d 条链）===", len(chains))
+		b.a.Bus.Info("selftest.start: chains=%d", len(chains))
 		report := SelfTestReport{Total: len(chains)}
 		// 每条链的结果除了写日志，也攒起来给界面：以前只写日志，界面上一句
 		// “详见上方日志”——可现场根本不知道去哪里看，等于没回答。
@@ -1317,7 +1317,7 @@ func (b *Backend) SelfTest() {
 				if lastProbe.Err != nil {
 					errText = lastProbe.Err.Error()
 				}
-				b.a.Bus.Error("[%s] ✗ 代理段不可用", ch.Name)
+				b.a.Bus.Error("selftest.fail: chain=%s scope=upstream", ch.Name)
 				lines := []string{"代理段不可用"}
 				for _, line := range strings.Split(errText, "\n") {
 					b.a.Bus.Error("    %s", line)
@@ -1366,7 +1366,7 @@ func (b *Backend) SelfTest() {
 				if conn, derr := dial(rip, rport); derr == nil {
 					conn.Close()
 					hit, hitIP = int(rport), rip.String()
-					b.a.Bus.Info("[%s] 用最近访问过的真实目标探测：%s", ch.Name, ref.Target)
+					b.a.Bus.Info("selftest.probe: chain=%s target=%s source=recent", ch.Name, ref.Target)
 					break
 				}
 			}
@@ -1398,10 +1398,10 @@ func (b *Backend) SelfTest() {
 			}
 			if hit > 0 {
 				if guessed {
-					b.a.Bus.Info("[%s] ✓ 端到端可达：%s → %s:%d（端口是从常见端口里试出来的，不代表业务端口）", ch.Name, desc, ip, hit)
+					b.a.Bus.Info("selftest.ok: chain=%s upstream=%s reach=%s:%d port_source=guessed", ch.Name, desc, ip, hit)
 					add(ch.Name, true, fmt.Sprintf("端到端可达：→ %s:%d（端口是猜的，不代表业务端口）", ip, hit), "上游："+desc)
 				} else {
-					b.a.Bus.Info("[%s] ✓ 端到端可达：%s → %s:%d", ch.Name, desc, ip, hit)
+					b.a.Bus.Info("selftest.ok: chain=%s upstream=%s reach=%s:%d port_source=recent", ch.Name, desc, ip, hit)
 					add(ch.Name, true, fmt.Sprintf("端到端可达：→ %s:%d（最近真的访问过）", ip, hit), "上游："+desc)
 				}
 				b.emit("selftest", ProbeView{Target: ip.String(), Port: hit, OK: true})
@@ -1422,7 +1422,7 @@ func (b *Backend) SelfTest() {
 			b.a.Bus.Info("=== 链路自检通过：%d 条链全部可用 ===", len(chains))
 			b.emit("notify", NotifyView{Title: "链路自检通过", Text: fmt.Sprintf("%d 条链全部可用", len(chains)), Kind: "info"})
 		} else {
-			b.a.Bus.Error("=== 链路自检结束：%d 条链有问题（结果已显示在「链路自检」框里）===", bad)
+			b.a.Bus.Error("selftest.done: chains_failed=%d", bad)
 			b.emit("notify", NotifyView{Title: "链路自检有问题", Text: fmt.Sprintf("%d 条链不可用", bad), Kind: "error"})
 		}
 	}()

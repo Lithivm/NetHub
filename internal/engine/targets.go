@@ -118,14 +118,14 @@ func (e *Engine) probeOneTarget(ref targetRef) {
 	flipped, bad := e.markTarget(ref.target, ref.chain, derr == nil, lat, msg)
 	if flipped && bad {
 		// 只报坏事：通了就写日志（巡检本身会不时地好一下坏一下，弹窗太吵）
-		e.bus.Warn("内网目标不通：%s —— 经链 %s 连不上：%s", ref.target, ref.chain, msg)
+		e.bus.Warn("target.down: target=%s chain=%s err=%s", ref.target, ref.chain, msg)
 		if e.Notify != nil {
 			e.Notify("内网目标不通："+ref.target, "经链 "+ref.chain+" 连不上："+msg, true)
 		}
 		return
 	}
 	if flipped {
-		e.bus.Info("内网目标恢复：%s —— 经链 %s 已通（%s）", ref.target, ref.chain, lat.Round(time.Millisecond))
+		e.bus.Info("target.up: target=%s chain=%s rtt=%s", ref.target, ref.chain, lat.Round(time.Millisecond))
 	}
 }
 

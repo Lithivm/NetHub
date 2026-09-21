@@ -191,14 +191,14 @@ func (e *Engine) probeChain(ch config.Chain) {
 			if r.AuthOK {
 				// 恢复只写日志（链路会不时抖一下，弹窗太吵）
 				if r.Public {
-					e.bus.Info("链路 %s 上游 %s 可用（%d ms，认证通过）", ch.Name, maskUpstream(upRaw), r.Latency.Milliseconds())
+					e.bus.Info("upstream.up: chain=%s upstream=%s rtt_ms=%d auth=ok", ch.Name, maskUpstream(upRaw), r.Latency.Milliseconds())
 				} else {
 					// 很多客户出口就是不让自己出公网 —— 对“访问内网”而言这不算故障
 					e.bus.Info("链路 %s 上游 %s 可用（%d ms，认证通过；出口未连到公网，对内网访问无影响）",
 						ch.Name, maskUpstream(upRaw), r.Latency.Milliseconds())
 				}
 			} else {
-				e.bus.Warn("链路 %s 上游 %s 不可用：%s", ch.Name, maskUpstream(upRaw), msg)
+				e.bus.Warn("upstream.down: chain=%s upstream=%s err=%s", ch.Name, maskUpstream(upRaw), msg)
 				if e.Notify != nil {
 					e.Notify("链路 "+ch.Name+" 上游不可用", maskUpstream(upRaw)+"："+msg, true)
 				}
@@ -220,7 +220,7 @@ func (e *Engine) healthLoop() {
 	defer e.wg.Done()
 	tk := time.NewTicker(5 * time.Second)
 	defer tk.Stop()
-	e.bus.Info("健康探测已启动：%d 条链，粒度 5s", len(e.cfg.Chains))
+	e.bus.Info("health.start: chains=%d interval=5s", len(e.cfg.Chains))
 	last := map[string]time.Time{}
 	// 先立即探一轮：否则刚打开界面的那几十秒里，链路页全是“未探过”的灰点，
 	// 用户会以为没生效（实际只是还在等第一个 tick）。
