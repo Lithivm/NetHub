@@ -59,19 +59,23 @@
   color-scheme: light;
 }
 
-/* ── 深色：暖黑画布 + 提亮蓝（原旧主色已按用户要求改为同色相蓝） ── */
+/* ── 深色：**中性**灰阶（不带暖味） + 提亮蓝 ──
+   用户反馈：“深色有点太暖了，色温需要中性一点”。以前那套是暖黑（R>G>B，
+   如 #141312 / #23211f / #b4aea4），屏幕上一看就偏黄。现在换成 R=G=B 的中性灰，
+   亮度与原值基本对齐（不靠减亮度去“显得没那么暖”）。语义色（成功/警告/错误）
+   仍保留各自色相 —— 它们是“信号”，不是背景。 */
 [data-theme="dark"] {
-  --canvas: #141312;
-  --canvas-soft: #1c1b19;
-  --card: #23211f;
-  --card-strong: #2c2a27;
-  --hairline: #3a3733;
-  --hairline-soft: #2a2824;
+  --canvas: #131313;
+  --canvas-soft: #1b1b1b;
+  --card: #222222;
+  --card-strong: #2b2b2b;
+  --hairline: #383838;
+  --hairline-soft: #292929;
 
-  --ink: #faf9f6;
-  --body: #ece9e4;
-  --muted: #b4aea4;
-  --muted-soft: #8a847b;
+  --ink: #fafafa;
+  --body: #eaeaea;
+  --muted: #b2b2b2;
+  --muted-soft: #888888;
   --on-primary: #ffffff;
 
   --primary: #3b82f6;
@@ -88,7 +92,7 @@
 
   --shadow-card: 0 1px 2px rgba(0, 0, 0, .5), 0 10px 28px -14px rgba(0, 0, 0, .8);
   --shadow-pop: 0 16px 48px -8px rgba(0, 0, 0, .7), 0 2px 10px rgba(0, 0, 0, .5);
-  --scrollbar: #4a4640;
+  --scrollbar: #484848;
   color-scheme: dark;
 }
 
@@ -282,6 +286,12 @@ code, .mono { font-family: var(--font-mono); }
 /* 顶部栏里的「设置」：外观与旁边的 .btn 完全一致（它就是 .btn），
    只额外兼容 .tab 的选中态（在设置页时高亮成主色，否则看不出当前在哪一页） */
 .tab-top { padding: 7px var(--s3); border-radius: var(--r-btn); font-weight: 600; }
+/* 图标按钮（顶栏「设置」）：与旁边文字按钮同高，宽度固定不跳动 */
+.btn-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; padding: 0; height: 34px;
+}
+.btn-icon svg { display: block; }
 .tab-top.is-active { background: var(--primary-soft); color: var(--primary); border-color: var(--primary); }
 .tab-top.is-active:hover { background: var(--primary-soft); color: var(--primary); }
 .tabs .tab {
@@ -698,8 +708,12 @@ code, .mono { font-family: var(--font-mono); }
 .noticebar.is-warn  { background: #fdf6e3; color: #7a5a12; border-bottom-color: #f0e0b0; }
 .noticebar .nb-title { font-weight: 600; }
 .noticebar .nb-text { flex: 1; min-width: 200px; }
-body.theme-dark .noticebar.is-error { background: #3a1f1f; color: #f0b4b4; border-bottom-color: #5a2b2b; }
-body.theme-dark .noticebar.is-warn  { background: #3a3320; color: #e8d9a8; border-bottom-color: #5a4d2b; }
+/* 深色下的常驻告警条。
+   ⚠ 选择器原来是 body.theme-dark —— 主题是挂在 <html data-theme> 上的，
+   所以这两条**从未生效**过（而且没有别的深色规则兼着），于是深色模式下
+   横幅用的是浅色底（淡红/淡黄），又亮又暖。改成与主题同源的选择器。 */
+[data-theme="dark"] .noticebar.is-error { background: #2e1c1c; color: #f0b4b4; border-bottom-color: #4a2626; }
+[data-theme="dark"] .noticebar.is-warn  { background: #2b2718; color: #e8d9a8; border-bottom-color: #4a4227; }
 
 /* 表头与开关列的居中（表头文字默认左对齐，会和居中的开关错开一格） */
 .trow .cell.center { text-align: center; }
@@ -767,3 +781,45 @@ body.theme-dark .noticebar.is-warn  { background: #3a3320; color: #e8d9a8; borde
 .clash-cov[open] > summary::before { content: '▾ '; }
 .clash-cov > summary:hover { color: var(--fg); }
 .clash-cov .clash-table { margin-top: var(--s2); }
+
+/* ── 两段式滑块（设置 → 外观 → 主题）────────────────────────────
+   要求（用户明确提的）：两个选项**完全等宽**、小字说明另起一行、看起来像滑块。
+   做法：grid 两列 1fr 保证等宽（不靠 padding 凑），选中态由底下那块
+   .seg2-thumb 滑过去表示（transform 过渡），文字颜色随之切换。
+   为什么不用 .tabs/.tab：那是顶部标签条，.tab:not(:last-child) 带 min-width，
+   两段宽度会不一样（就是这次的起因）。 */
+.seg2 {
+  position: relative;
+  display: inline-grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;      /* ← 等宽的关键：两列各占一半 */
+  width: 168px;
+  padding: 3px;
+  background: var(--canvas-soft);
+  border: 1px solid var(--hairline);
+  border-radius: calc(var(--r-chip) + 3px);
+}
+.seg2-thumb {
+  position: absolute;
+  top: 3px; left: 3px;
+  width: calc(50% - 3px);
+  height: calc(100% - 6px);
+  background: var(--primary);
+  border-radius: var(--r-chip);
+  transition: transform .18s ease;
+  pointer-events: none;
+}
+.seg2[data-theme="dark"] .seg2-thumb { transform: translateX(100%); }
+.seg2-btn {
+  position: relative; z-index: 1;
+  width: 100%; min-width: 0;   /* 等宽：不允许按内容撑开 */
+  padding: 6px 0;
+  font: inherit; font-weight: 600;
+  color: var(--muted);
+  background: none; border: 0;
+  border-radius: var(--r-chip);
+  cursor: pointer;
+  transition: color .18s ease;
+}
+.seg2-btn.is-active { color: var(--on-primary); }
+.seg2-btn:not(.is-active):hover { color: var(--fg); }

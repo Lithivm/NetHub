@@ -32,8 +32,14 @@
   <div class="actions">
     <button class="btn btn-primary" id="btnToggle">启动服务</button>
     <button class="btn" id="btnRestart">重启</button>
-    <button class="btn tab-top" id="btnSettings" data-page="settings">设置</button>
-    <button class="btn" id="btnTheme">深色模式</button>
+    <button class="btn tab-top btn-icon" id="btnSettings" data-page="settings" title="设置" aria-label="设置">
+      <!-- 扁平齿轮：顶栏里文字“设置”换成图标（与旁边的按钮同高，宽度固定不跳动） -->
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+           stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="3.2"/>
+        <path d="M19.1 14.4a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 8.8 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/>
+      </svg>
+    </button>
   </div>
 </header>
 
@@ -203,7 +209,7 @@
       <div class="card">
         <div class="card-head">
           <h2>配置体检</h2>
-          <span class="hint">只读报告：能不能干活、哪个目标被覆盖了、哪条链只填了单个上游</span>
+          <span class="hint">只读报告：能不能干活、哪个目标被覆盖了、哪条链只填了单个上游；再逐条链**实测一次隧道**（上游认证 + 内网目标可达）</span>
           <div class="spacer"></div>
           <button class="btn btn-sm" id="btnCopyPrecheck">复制结果</button>
           <button class="btn btn-sm btn-primary" id="btnPrecheck">重新体检</button>
@@ -218,6 +224,25 @@
 
   <section class="page" id="page-settings">
     <div class="settings-scroll">
+
+      <div class="card">
+        <div class="card-head"><h2>外观</h2></div>
+        <div class="card-body form">
+          <!-- 深/浅色以前在顶部栏（和「启动服务」「设置」挤在一起）。它是低频操作、
+               且属于“设置”的语义，所以搬进设置页；顶栏只留运行状态与常用动作。 -->
+          <div class="input-row">
+            <span>主题</span>
+            <!-- 两段式滑块：浅色 | 深色。两个按钮**等宽**（grid 两列 1fr），
+                 选中项由下面那块 .seg2-thumb 滑过去表示。 -->
+            <div class="seg2" id="themeSeg" data-theme="light" role="group" aria-label="主题">
+              <span class="seg2-thumb" aria-hidden="true"></span>
+              <button class="seg2-btn" id="btnThemeLight" data-theme="light">浅色</button>
+              <button class="seg2-btn" id="btnThemeDark" data-theme="dark">深色</button>
+            </div>
+          </div>
+          <div class="hint">改完立即生效，也记进 config.yaml（换机器跟配置走）</div>
+        </div>
+      </div>
 
       <div class="card">
         <div class="card-head"><h2>开机自启</h2></div>

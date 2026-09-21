@@ -48,6 +48,8 @@ type Backend struct {
 	// 最近一次链路自检的结果：界面直接看，不用再翻日志（打开设置页也能看到上次的）。
 	selfTestMu   sync.RWMutex
 	selfTestLast SelfTestReport
+	selfTestAt   time.Time  // 上次自检完成时间（体检要知道结果新不新）
+	selfTestGate sync.Mutex // 同一时刻只跑一轮（体检与按钮可能撞车）
 
 	// 自启状态缓存：schtasks 是外部进程，不能在 GetState（前端每 1.5s 调一次）里跑，
 	// 否则会不断创建进程；而且 GUI 子系统没控制台，会表现为窗口一直闪、抢焦点。
@@ -705,7 +707,78 @@ func (b *Backend) SortRoutes() error {
 }
 
 // PrecheckConfig 配置体检：返回人话报告（不修任何东西）。
-func (b *Backend) PrecheckConfig() []string { return b.a.Cfg.Precheck() }
+func (b *Backend) PrecheckConfig() []string {
+	// 隧道探测也放进体检报告里。
+	//
+	// 为什么：这张卡是**开机自动跑一次**的那份报告（界面文案：“打开设置页时把上次结果补上
+	// （开机自动跑过一次）”），但它以前只有配置层面的检查 —— “配置没问题”读起来像
+	// “网络没问题”，而某条链上游挂了、口令错了根本看不出来。用户明确要求把隧道探测加上。
+	lines := b.a.Cfg.Precheck()
+	lines = append(lines, b.tunnelProbeLines()...)
+	return lines
+}
+
+// ensureSelfTest 拿到“足够新”的自检结果：有现成的就用，没有就跑一轮。
+//
+// 并发安全：SelfTest 与体检可能同时要结果，用 selfTestGate 保证只跑一轮 ——
+// 后来者等前一轮跑完直接拿结果，不会把同一条链探两遍（探活本身是对端可见的动作）。
+func (b *Backend) ensureSelfTest(maxAge time.Duration) SelfTestReport {
+	if rep, ok := b.freshSelfTest(maxAge); ok {
+		return rep
+	}
+	// 这里只排队（闸在 runSelfTest 里），不能再自己拿一次 —— Go 的 Mutex 不可重入
+	b.runSelfTest()
+	b.selfTestMu.RLock()
+	defer b.selfTestMu.RUnlock()
+	return b.selfTestLast
+}
+
+func (b *Backend) freshSelfTest(maxAge time.Duration) (SelfTestReport, bool) {
+	b.selfTestMu.RLock()
+	rep, at := b.selfTestLast, b.selfTestAt
+	b.selfTestMu.RUnlock()
+	if rep.Total > 0 && !at.IsZero() && time.Since(at) < maxAge {
+		return rep, true
+	}
+	return rep, false
+}
+
+// tunnelProbeLines 把自检结果转成体检报告里的一段（逐条链一句）。
+func (b *Backend) tunnelProbeLines() []string {
+	// 每次体检都要看见**当前**的隧道状态 → 最多认 90 秒内的结果，过期就重探。
+	rep := b.ensureSelfTest(90 * time.Second)
+	if rep.Total == 0 {
+		return []string{"⚠ 隧道探测：没有可探测的链（还没配链路？）"}
+	}
+	out := []string{fmt.Sprintf("— 隧道探测（%s 实测，逐条链去连其内网目标）—", rep.At)}
+	for _, c := range rep.Chains {
+		detail := ""
+		if len(c.Detail) > 0 {
+			detail = c.Detail[0]
+		}
+		switch {
+		case c.OK && strings.Contains(detail, "跳过"):
+			// 不是错误：代理段是好的，只是没东西可探（新环境常见）
+			out = append(out, "⚠ 隧道 "+c.Name+"："+detail)
+			if len(c.Detail) > 1 {
+				out = append(out, "    "+c.Detail[1])
+			}
+		case c.OK:
+			out = append(out, "✓ 隧道 "+c.Name+"："+detail)
+		default:
+			out = append(out, "✗ 隧道 "+c.Name+"："+detail)
+			for _, d := range c.Detail[1:] {
+				out = append(out, "    "+d)
+			}
+		}
+	}
+	if rep.Bad == 0 {
+		out = append(out, fmt.Sprintf("✓ %d 条链的隧道探测全部通过", rep.Total))
+	} else {
+		out = append(out, fmt.Sprintf("✗ %d/%d 条链的隧道探测没通过（详见上面各行）", rep.Bad, rep.Total))
+	}
+	return out
+}
 
 // ListBackups 配置备份列表（新的在前）。
 func (b *Backend) ListBackups() []string { return b.a.Cfg.Backups() }
@@ -1260,15 +1333,20 @@ func (b *Backend) RemoveHosts() error {
 
 // SelfTest 对每条链做端到端探测：本地 socks5 通不通 + 经它能不能真连到内网目标。
 // 走 gost 的本地监听，不经过 WinDivert，所以它单独验证"链路"这一段。
-func (b *Backend) SelfTest() {
+func (b *Backend) SelfTest() { go b.runSelfTest() }
+
+// runSelfTest 真正跑一轮（同步）。走 selfTestGate 排队：体检与按钮可能同时要结果，
+// 排队比重复探测好 —— 探活是对端可见的动作，能少发就少发。
+func (b *Backend) runSelfTest() {
 	chains := append([]config.Chain(nil), b.a.Cfg.Chains...)
 	_ = b.a.Cfg.Routes // 探针目标改为从 hosts 取真实主机 IP，不再用规则网段
 	if len(chains) == 0 {
 		b.emit("notify", NotifyView{Title: "无法自检", Text: "还没有配置任何链", Kind: "warn"})
 		return
 	}
-
-	go func() {
+	b.selfTestGate.Lock()
+	defer b.selfTestGate.Unlock()
+	func() {
 		b.a.Bus.Info("selftest.start: chains=%d", len(chains))
 		report := SelfTestReport{Total: len(chains)}
 		// 每条链的结果除了写日志，也攒起来给界面：以前只写日志，界面上一句
@@ -1282,7 +1360,7 @@ func (b *Backend) SelfTest() {
 		defer func() {
 			report.At = time.Now().Format("15:04:05")
 			b.selfTestMu.Lock()
-			b.selfTestLast = report
+			b.selfTestLast, b.selfTestAt = report, time.Now()
 			b.selfTestMu.Unlock()
 			b.emit("selftest-report", report)
 		}()

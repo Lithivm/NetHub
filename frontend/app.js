@@ -92,12 +92,18 @@ function confirmBox(title, text, danger, okText) {
 function applyTheme(mode) {
   state.theme = mode === 'dark' ? 'dark' : 'light';
   document.documentElement.dataset.theme = state.theme;
-  document.getElementById('btnTheme').textContent = state.theme === 'dark' ? '浅色模式' : '深色模式';
+  // 两段式滑块：滑块位置看容器上的 data-theme，文字选中态看按钮的 is-active
+  const seg = document.getElementById('themeSeg');
+  if (seg) seg.dataset.theme = state.theme;
+  document.querySelectorAll('#themeSeg .seg2-btn').forEach(b =>
+    b.classList.toggle('is-active', b.dataset.theme === state.theme));
 }
 
-async function toggleTheme() {
-  const next = state.theme === 'dark' ? 'light' : 'dark';
-  applyTheme(next);                       // 先本地切，界面立刻响应
+// setTheme 直接指定主题（设置页里点哪一个就是哪一个），不再是“切换”。
+async function setTheme(mode) {
+  const next = mode === 'dark' ? 'dark' : 'light';
+  if (next === state.theme) return;   // 点已选中的那个：什么都不做（不写盘）
+  applyTheme(next);                   // 先本地切，界面立刻响应
   try { await call('SetTheme', next); } catch (e) { fail(e); }
 }
 
@@ -1455,7 +1461,10 @@ function wire() {
     catch (e) { toast('重启失败', (e && e.message) || String(e), 'error'); }
     refreshState();
   };
-  document.getElementById('btnTheme').onclick = toggleTheme;
+  document.getElementById('themeSeg').addEventListener('click', ev => {
+    const b = ev.target.closest('[data-theme]');
+    if (b) setTheme(b.dataset.theme);
+  });
 
   // 日志页
   document.getElementById('btnClearLog').onclick = () => {
