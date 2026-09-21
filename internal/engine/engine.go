@@ -1345,16 +1345,15 @@ func (e *Engine) rebuildDynFilter() {
 
 // WildcardStat 一条通配规则当前的状态（界面/日志看“学到了几个 IP”）。
 type WildcardStat struct {
-	Pattern string
-	IPs     []string
-	Updated string // 距上次更新多久（人读）
-
-	// Takeover：DNS 接管是否开着。开着时“还没学到 IP”**不等于**“什么都不拦”
-	// —— 接管路径直接按名字回假 IP 拦下来了，只是那些真实 IP 我们还不知道。
-	Takeover bool
+	Pattern  string            `json:"pattern"`
+	IPs      []string          `json:"ips"`
+	Updated  string            `json:"updated"`
+	Takeover bool              `json:"takeover"`
+	Names    []string          `json:"names"`
+	FakeIPs  map[string]string `json:"fakeIps"`
 }
 
-// WildcardStats 通配域名规则当前各覆盖到哪些 IP。
+// WildcardStats 通配域名规则当前各覆盖到哪些 IP / 接管过哪些名字。
 func (e *Engine) WildcardStats() []WildcardStat {
 	var out []WildcardStat
 	seen := map[string][]string{}
@@ -1370,8 +1369,24 @@ func (e *Engine) WildcardStats() []WildcardStat {
 				}
 			}
 			sort.Strings(ips)
+			// 接管过哪些名字：假 IP 池里有记录（这是它**真的在干活**的证据）。
+			var names []string
+			fake := map[string]string{}
+			if e.fake != nil {
+				for _, n := range e.fake.Names() {
+					if !dnsmap.MatchWildcard(w, n) {
+						continue
+					}
+					names = append(names, n)
+					if ip, ok := e.fake.IPFor(n); ok {
+						fake[n] = ip.String()
+					}
+				}
+			}
+			sort.Strings(names)
 			seen[w] = ips
-			out = append(out, WildcardStat{Pattern: w, IPs: ips, Takeover: e.cfg.DNSTakeoverEnabled()})
+			out = append(out, WildcardStat{Pattern: w, IPs: ips, Names: names, FakeIPs: fake,
+				Takeover: e.cfg.DNSTakeoverEnabled()})
 		}
 	}
 	if len(out) == 0 {

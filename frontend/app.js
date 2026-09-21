@@ -877,28 +877,31 @@ function targetsCell(list, ports, shadowed, localNets, inactive, apps, resolves,
         (hr.age ? '（' + hr.age + ' 前解析' + (hr.stale ? '，已过期，正在刷新' : '') + '）' : '');
     c.appendChild(s);
   }
-  // 通配域名（*.his.com）：显示“已经学到哪些 IP”。学到 0 个要标出来 ——
-  // 那意味着这条规则现在什么都不拦（没观察到 DNS 应答就看不出名字）。
+  // 通配域名（*.his.com）/ 中间带星（db-*.his.com）：显示这条规则现在**真的在管什么**。
+  //
+  // 历史教训：一开始只看“学到了几个 IP”，接管路径（我们回假 IP）根本不产生真实 IP，
+  // 于是一条正在干活的规则显示成“还没学到任何 IP”，看起来像坏的 —— 用户反馈过两次。
+  // 现在以**接管过的名字**为主证据（那是它干活的直接记录），IP 只是补充。
   for (const w of (wildcards || [])) {
     const ips = w.ips || [];
-    // "没学到 IP" 有两种截然不同的意思，不能混着说：
-    //  接管开着（w.takeover）：这条规则**在工作** —— 命中它的名字我们在 DNS 阶段就回了假 IP
-    //    直接拦下来了，只是那些名字的真实 IP 我们还不知道（不需要知道）；
-    //  接管关着：那就真的什么都不拦（只能等嗅探到明文 DNS 应答）。
-    const s = el('span', ips.length ? 'dim' : 'resolve-bad',
+    const names = w.names || [];
+    const s = el('span', (ips.length || names.length) ? 'dim' : 'resolve-bad',
       ips.length ? '  → 已覆盖 ' + ips.length + ' 个 IP'
-        : (w.takeover ? '  ✓ 接管中（还没学到 IP）' : '  ⚠ 还没学到任何 IP'));
-    s.title = ips.length
-      ? w.pattern + ' 现在覆盖：\n' + ips.join('\n') +
-        (w.updated && w.updated !== '—' ? '\n（最后一次更新：' + w.updated + ' 前）' : '')
+        : names.length ? '  ✓ 接管中 · 已管 ' + names.length + ' 个名字'
+          : (w.takeover ? '  ✓ 接管中（还没命中过名字）' : '  ⚠ 还没学到任何 IP'));
+    const nameList = names.slice(0, 12).join('\n') + (names.length > 12 ? '\n…（还有 ' + (names.length - 12) + ' 个）' : '');
+    s.title = (ips.length || names.length)
+      ? w.pattern + ' 现在：\n' +
+        (names.length ? '接管的名字（命中即拦，会换回真实 IP 再走这条链）：\n' + nameList + '\n' : '') +
+        (ips.length ? '已知真实 IP：\n' + ips.join('\n') + '\n' : '') +
+        (w.updated && w.updated !== '—' ? '（最后一次更新：' + w.updated + ' 前）' : '')
       : w.takeover
         ? w.pattern + ' 正在接管：命中它的域名在 DNS 阶段就被回了假 IP（我们自己的地址），\n' +
           '连到假 IP 会被拦下、换回真实 IP 再走这条规则指定的链 —— 所以这条规则已经在工作。\n' +
-          '“还没学到 IP”只表示：这些名字的真实 IP 我们还没有记录（没访问过，或它走的是加密 DNS）。\n' +
-          '记录会在第一次真正连上之后出现（那是“名字 → 真实 IP”），同时也是给“应用第二次用\n' +
-          '缓存里的真实 IP 直连”用的。'
+          '现在写“还没命中过名字”只是指：本进程启动以来还没有名字落到这个模式上\n' +
+          '（应用还没访问过，或它走的是加密 DNS）。第一次真访问之后这里会列出名字。'
         : w.pattern + ' 目前没匹配到任何 IP。\n原因：通配域名只能靠“观察应用自己的 DNS 应答”知道 IP，' +
-          '还没看到任何名字落到这个后缀下（应用还没访问过，或用了加密 DNS/DoH，那样我们看不见）。';
+          '还没看到任何名字落到这个模式上（应用还没访问过，或用了加密 DNS/DoH，那样我们看不见）。';
     c.appendChild(s);
   }
   ports = ports || [];

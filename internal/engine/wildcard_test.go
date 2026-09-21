@@ -8,6 +8,7 @@ import (
 
 	"nethub/internal/config"
 	"nethub/internal/dnsmap"
+	"nethub/internal/fakeip"
 	"nethub/internal/logbus"
 	"nethub/internal/rules"
 	"nethub/internal/tlsname"
@@ -307,5 +308,67 @@ func TestSNISniffFilterPorts(t *testing.T) {
 	}
 	if strings.Contains(f, "inbound") {
 		t.Errorf("不该包含入方向（SNI 是客户端先发的）: %s", f)
+	}
+}
+
+// 通配规则“接管中”必须能显示出**它管了哪些名字**。
+//
+// 用户两次反馈同一个观感：规则页显示“还没学到任何 IP”，看起来像这条规则是坏的 ——
+// 而它刚刚才按名字把连接拦下来过。根因是接管路径**不产生真实 IP**（假 IP 不是真地址），
+// 所以只看 IP 数永远是 0。现在以“接管过的名字”为主证据。
+func TestWildcardStatsShowsTakenOverNames(t *testing.T) {
+	rs := rules.New()
+	if err := rs.Load([]rules.Route{{Name: "w", Targets: []string{"oapi.*.com"}, Chain: "sjy"}}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{}
+	cfg.Tuning.DNSTakeoverDisabled = false // 接管开着
+	pool, err := fakeip.NewPool("198.19.0.0/16")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &Engine{bus: logbus.New(50), cfg: cfg, rules: rs,
+		names: dnsmap.New(), fake: pool, dynDirty: make(chan struct{}, 1)}
+	e.dynLast.Store(time.Now().UnixMilli())
+
+	// 接管之前：没有任何名字，界面该老实说“还没命中过”
+	st := e.WildcardStats()
+	if len(st) != 1 || st[0].Pattern != "oapi.*.com" {
+		t.Fatalf("通配状态 = %+v", st)
+	}
+	if len(st[0].Names) != 0 || len(st[0].IPs) != 0 {
+		t.Fatalf("还没接管过任何名字时不该有内容: %+v", st[0])
+	}
+	if !st[0].Takeover {
+		t.Error("接管开着时 Takeover 应为 true（界面靠它区分“在工作”与“真的没拦”）")
+	}
+
+	// 模拟一次 DNS 接管：给命中模式的名字发假 IP
+	fake := pool.Assign("oapi.dingtalk.com", dnsFakeTTL)
+	if fake == nil {
+		t.Fatal("假 IP 池没给出地址")
+	}
+	// 不匹配的名字不该混进来
+	pool.Assign("other.example.com", dnsFakeTTL)
+
+	st = e.WildcardStats()
+	if len(st) != 1 {
+		t.Fatalf("通配状态 = %+v", st)
+	}
+	if len(st[0].Names) != 1 || st[0].Names[0] != "oapi.dingtalk.com" {
+		t.Errorf("接管过的名字没显示出来: %+v（这是“这条规则在工作”的唯一证据）", st[0].Names)
+	}
+	if got := st[0].FakeIPs["oapi.dingtalk.com"]; got != fake.String() {
+		t.Errorf("假 IP 映射 = %q，期望 %s", got, fake)
+	}
+	if len(st[0].IPs) != 0 {
+		t.Errorf("接管路径不该凭空产生真实 IP: %+v", st[0].IPs)
+	}
+
+	// 真机解析出真实 IP 之后（noteRealIP），IP 那一列才有内容
+	e.noteRealIP("oapi.dingtalk.com", net.ParseIP("106.11.40.32"))
+	st = e.WildcardStats()
+	if len(st[0].IPs) != 1 || st[0].IPs[0] != "106.11.40.32" {
+		t.Errorf("真实 IP 应记进名字表并显示: %+v", st[0].IPs)
 	}
 }
