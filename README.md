@@ -18,7 +18,8 @@
   配置一键导出/导入（一个文件就够）、按需抓包（导出 pcap，Wireshark 直接打开）
 - **自带代理客户端** —— `socks5` / `socks5+tls` / `socks4` / `http` / `https`，不需要装 gost；
   旧 gost 的 `.bat` 可以在界面里直接导入（只取其中的上游地址）
-- **口令加密** —— 上游口令用 Windows DPAPI 加密存到 `secrets.dat`，`config.yaml` 里看不到明文（拷走也不等于泄露）
+- **口令是明文**（和 gost 脚本一样）—— `config.yaml` 里直接写账号口令，不加密；
+  发配置给别人看用「导出配置（抹掉口令）」。**不要把 config.yaml 提交进 git 或发到群里**
 - **界面**（Wails + WebView2）—— 实时日志、链路自检、与 Clash 共存检测、深/浅主题、托盘常驻
 - **不抢设置** —— 不改系统代理、不动路由表，和 Clash / v2rayN 这类工具共存
 
@@ -35,6 +36,33 @@
    （别忘了给本机网段加一条「直连」规则，规则页有「填本机网段」按钮）
 
 需要 Windows 10 / 11 x64 + 管理员权限。
+
+## 命令行 / 无界面
+
+同一个 `nethub.exe` 也能完全不靠界面用（脚本、自动化、远程运维、让 agent 配网络）：
+
+```bash
+nethub.exe -check                # 只校验配置文件，逐条列出错误（不启动、不改任何东西，不需管理员）
+nethub.exe -status               # 打印机器可读的 JSON 现状：版本/服务状态/链路/规则/开关/通配目标
+nethub.exe -headless             # 无界面只跑引擎（自动化用）
+nethub.exe -service-install      # 装成 Windows 服务（开机即启、无人登录也跑）
+nethub.exe -service-uninstall    # 卸载服务
+nethub.exe -service-state        # 打印服务状态
+nethub.exe -quit                 # 让正在运行的实例优雅退出
+nethub.exe -clash-check          # 只检测系统代理会不会把内网送进代理
+nethub.exe -test-upstream        # 直接实测上游链路（不经 gost）
+nethub.exe -import-bats <目录>    # 从 gost 的 .bat 目录导入链路配置
+nethub.exe -rollback             # 回滚到上一版本（一键更新出问题时用）
+nethub.exe -version              # 打印版本号
+```
+
+改动配置的标准流程（人、脚本、agent 都一样）：
+
+```
+改 config.yaml（或界面里改）→ nethub.exe -check → 重启（-quit 后重新启动，或重启服务）→ nethub.exe -status 确认
+```
+
+`config.yaml` 是唯一配置来源，命令行与界面等价；配置文件就在 `nethub.exe` 同目录。
 
 ## 换一台机器：一个文件就够
 

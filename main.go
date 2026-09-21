@@ -65,6 +65,8 @@ func main() {
 	afterUpdate := flag.Bool("after-update", false, "更新收尾：先等旧进程退出，再替换被占用的文件（由一键更新自动拉起）")
 	clashCheck := flag.Bool("clash-check", false, "只检测系统代理/Clash 会不会把内网送进代理，然后退出（不需管理员）")
 	upTest := flag.Bool("test-upstream", false, "直接实测原生上游链路（不经 gost），然后退出（不需管理员）")
+	checkFlag := flag.Bool("check", false, "只校验配置文件（逐条列错误，不启动、不改任何东西），随后退出（不需管理员）")
+	statusFlag := flag.Bool("status", false, "打印机器可读的 JSON 现状（版本/服务/链路/规则/开关），随后退出（不需管理员）")
 	flag.Parse()
 
 	if *verFlag {
@@ -168,6 +170,14 @@ func main() {
 		return
 	}
 
+	// -check / -status：只读，不改任何状态、不需管理员，供脚本与 agent 用
+	if *checkFlag {
+		os.Exit(cmdCheck(configPathFor(*cfgPath)))
+	}
+	if *statusFlag {
+		os.Exit(cmdStatus(configPathFor(*cfgPath)))
+	}
+
 	// 需要管理员：装 WinDivert 驱动、改 hosts、起驱动服务
 	if !*noElevate && !isElevated() {
 		if err := relaunchElevated(); err != nil {
@@ -214,7 +224,21 @@ func main() {
 
 	cfg, err := config.Load(p)
 	if err != nil {
-		fatal("%v", err)
+		// 配置坏了以前是“静默不启动”（连日志都没有）—— 这条实测踩过：
+		// 配置里写重复键 → 进程直接退出 → 用户只看到“点了没反应”。
+		// 所以这里要：① 原始错误整段打进日志 ② 弹窗说清楚 ③ 退出码非 0。
+		bus.Error("配置无法载入：%v", err)
+		for _, line := range strings.Split(err.Error(), "\n") {
+			bus.Error("    %s", line)
+		}
+		bus.Error("  修好后再启动；可用 `nethub.exe -check` 逐条看错误（不需管理员）")
+		// 服务模式下没有交互桌面，弹窗没人看得到（也不该弹）
+		if !*serviceMode && !winsvc.IsService() {
+			msgBox("NetHub 无法启动",
+				"配置文件有问题，程序没有启动（日志在 logs\\nethub.log）：\n\n"+err.Error()+
+					"\n\n提示：命令行跑 `nethub.exe -check` 可以只看错误、不启动。")
+		}
+		os.Exit(2)
 	}
 	bus.Info("配置载入：%d 条链，%d 条规则", len(cfg.Chains), len(cfg.Routes))
 

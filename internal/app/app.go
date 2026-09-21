@@ -287,3 +287,15 @@ func toRules(rs []config.Route) []rules.Route {
 	}
 	return out
 }
+
+// BuildRules 供命令行（-check）复用“配置 → 规则集”这条唯一路径。
+//
+// 为什么单独导出：校验必须走**和启动时完全一样**的转换，否则会出现
+// “-check 说没问题、启动却失败”这种最难查的情况。
+func BuildRules(cfg *config.Config) (*rules.Set, error) {
+	rs := rules.New()
+	if err := rs.Load(toRules(cfg.Routes)); err != nil {
+		return nil, err
+	}
+	return rs, nil
+}
