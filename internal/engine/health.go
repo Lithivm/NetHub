@@ -214,7 +214,7 @@ func (e *Engine) probeChain(ch config.Chain) {
 
 // ProbeAll 立刻把所有链的所有上游探一遍（界面上的"立即探测"）。
 func (e *Engine) ProbeAll() {
-	for _, ch := range e.cfg.Chains {
+	for _, ch := range e.cfg.ChainsSnapshot() {
 		e.probeChain(ch)
 	}
 }
@@ -225,11 +225,11 @@ func (e *Engine) healthLoop() {
 	defer e.wg.Done()
 	tk := time.NewTicker(5 * time.Second)
 	defer tk.Stop()
-	e.bus.Info("health.start: chains=%d interval=5s", len(e.cfg.Chains))
+	e.bus.Info("health.start: chains=%d interval=5s", len(e.cfg.ChainsSnapshot()))
 	last := map[string]time.Time{}
 	// 先立即探一轮：否则刚打开界面的那几十秒里，链路页全是“未探过”的灰点，
 	// 用户会以为没生效（实际只是还在等第一个 tick）。
-	for _, ch := range e.cfg.Chains {
+	for _, ch := range e.cfg.ChainsSnapshot() {
 		if ch.ProbeInterval() == 0 {
 			continue
 		}
@@ -241,7 +241,7 @@ func (e *Engine) healthLoop() {
 		case <-e.done:
 			return
 		case <-tk.C:
-			for _, ch := range e.cfg.Chains {
+			for _, ch := range e.cfg.ChainsSnapshot() {
 				iv := ch.ProbeInterval()
 				if iv == 0 {
 					continue
@@ -258,8 +258,8 @@ func (e *Engine) healthLoop() {
 
 // ChainHealth 所有链的健康快照（界面用）。
 func (e *Engine) ChainHealth() []ChainHealthView {
-	out := make([]ChainHealthView, 0, len(e.cfg.Chains))
-	for _, ch := range e.cfg.Chains {
+	out := make([]ChainHealthView, 0, len(e.cfg.ChainsSnapshot()))
+	for _, ch := range e.cfg.ChainsSnapshot() {
 		v := ChainHealthView{
 			Name:     ch.Name,
 			Strategy: ch.StrategyName(),

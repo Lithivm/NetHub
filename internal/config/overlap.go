@@ -33,6 +33,8 @@ type Overlap struct {
 // CheckOverlaps 全量两两比对，返回所有"会互相影响"的规则对。
 // 目标不重叠、或端口不重叠的，都不算（那种重叠没有后果）。
 func (c *Config) CheckOverlaps() []Overlap {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	var out []Overlap
 	n := len(c.Routes)
 	for i := 0; i < n; i++ {

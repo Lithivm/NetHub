@@ -66,14 +66,15 @@ func (a *App) startHostsWatch() {
 				return
 			case <-tk.C:
 			}
-			if !a.Running() || !a.Cfg.Hosts.Manage || len(a.Cfg.Hosts.Entries) == 0 {
+			hosts := a.Cfg.HostsCopy()
+			if !a.Running() || !hosts.Manage || len(hosts.Entries) == 0 {
 				continue
 			}
-			ok, why := hostsmgr.Verify(a.Cfg.Hosts.Entries)
+			ok, why := hostsmgr.Verify(hosts.Entries)
 			if ok {
 				continue
 			}
-			res, err := hostsmgr.Apply(a.Cfg.Hosts.Entries)
+			res, err := hostsmgr.Apply(hosts.Entries)
 			if err != nil {
 				a.Bus.Error("hosts 被改动了（%s），且自动恢复失败: %v", why, err)
 				a.notify("hosts 被改动且恢复失败", err.Error(), NotifyError)
@@ -189,7 +190,7 @@ func (a *App) startLocked() error {
 		a.Bus.Error("   新版不再加密口令 —— 请把口令直接填回链路的 forward（形如 socks5+tls://用户名:口令@主机:端口）")
 		a.notify("有链路的旧版口令解不开", "请把口令重新填进链路的上游地址（新版用明文）", NotifyError)
 	}
-	if err := a.Rules.Load(toRules(a.Cfg.Routes)); err != nil {
+	if err := a.Rules.Load(toRules(a.Cfg.RoutesSnapshot())); err != nil {
 		a.Bus.Error("规则载入失败: %v", err)
 		a.setLastError("规则载入失败：" + err.Error())
 		a.notify("启动失败", err.Error(), NotifyError)
@@ -197,8 +198,8 @@ func (a *App) startLocked() error {
 	}
 
 	// 1) hosts（可选）
-	if a.Cfg.Hosts.Manage {
-		if res, err := hostsmgr.Apply(a.Cfg.Hosts.Entries); err != nil {
+	if hosts := a.Cfg.HostsCopy(); hosts.Manage {
+		if res, err := hostsmgr.Apply(hosts.Entries); err != nil {
 			a.Bus.Warn("hosts 写入失败（不影响拦截）: %v", err)
 			a.notify("hosts 未写入", err.Error(), NotifyWarn)
 		} else {
@@ -279,7 +280,7 @@ func (a *App) SaveConfig() error {
 	if err := a.Cfg.Validate(); err != nil {
 		return err
 	}
-	if err := a.Rules.Load(toRules(a.Cfg.Routes)); err != nil {
+	if err := a.Rules.Load(toRules(a.Cfg.RoutesSnapshot())); err != nil {
 		return err
 	}
 	return a.Cfg.Save()
@@ -315,7 +316,7 @@ func toRules(rs []config.Route) []rules.Route {
 // “-check 说没问题、启动却失败”这种最难查的情况。
 func BuildRules(cfg *config.Config) (*rules.Set, error) {
 	rs := rules.New()
-	if err := rs.Load(toRules(cfg.Routes)); err != nil {
+	if err := rs.Load(toRules(cfg.RoutesSnapshot())); err != nil {
 		return nil, err
 	}
 	return rs, nil

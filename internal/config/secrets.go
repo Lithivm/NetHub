@@ -81,6 +81,12 @@ func publicURL(up *upstream.Upstream) string {
 // 下一次保存会被 flattenSecrets 摊平成明文，之后这个函数就走直通分支了。
 // 没有 secret 的链就是原样。
 func (c *Config) UpstreamsResolved(ch Chain) []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.upstreamsResolvedLocked(ch)
+}
+
+func (c *Config) upstreamsResolvedLocked(ch Chain) []string {
 	raws := ch.Upstreams()
 	if ch.Secret == "" || len(raws) == 0 {
 		return raws
@@ -131,16 +137,25 @@ func withCreds(up *upstream.Upstream, user, pass string) string {
 // 落盘前调用：这样"以前加过密"的配置下一次保存就变成和 gost 脚本一样的明文，
 // 之后 secrets.dat 也不再需要（没有引用了就删掉它）。
 func (c *Config) flattenSecrets() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.flattenSecretsLocked()
+}
+
+// flattenSecretsLocked 同 flattenSecrets，但调用方已持锁。
+func (c *Config) flattenSecretsLocked() int {
 	if c.Secrets() == nil {
 		return 0 // 保险箱打不开（或没装）：保持原样，别把口令弄丢
 	}
+	// copy-on-write：不能在原切片上就地改（读方可能正持旧切片）
+	chains := append([]Chain(nil), c.Chains...)
 	n := 0
-	for i := range c.Chains {
-		ch := &c.Chains[i]
+	for i := range chains {
+		ch := &chains[i]
 		if ch.Secret == "" {
 			continue
 		}
-		raws := c.UpstreamsResolved(*ch)
+		raws := c.upstreamsResolvedLocked(*ch)
 		if len(raws) == 0 {
 			continue
 		}
@@ -161,6 +176,9 @@ func (c *Config) flattenSecrets() int {
 		ch.Secret = ""
 		n++
 	}
+	if n > 0 {
+		c.Chains = chains
+	}
 	return n
 }
 
@@ -170,17 +188,19 @@ func (c *Config) flattenSecrets() int {
 // 而 secrets.dat 丢了，现象是"链路上游明明填了、却报认证被拒"，很难一眼看出原因。
 // 这里在载入时就把话说明白。返回涉及的链名。
 func (c *Config) LegacySecretWarning() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	var out []string
 	for _, ch := range c.Chains {
 		if ch.Secret == "" {
 			continue
 		}
-		if len(c.UpstreamsResolved(ch)) == 0 {
+		if len(c.upstreamsResolvedLocked(ch)) == 0 {
 			continue
 		}
 		// 解出来有没有凭据？没有就是解不开
 		hasCred := false
-		for _, u := range c.UpstreamsResolved(ch) {
+		for _, u := range c.upstreamsResolvedLocked(ch) {
 			if strings.Contains(u, "@") || strings.Contains(u, "auth=") {
 				hasCred = true
 			}

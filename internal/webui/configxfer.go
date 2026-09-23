@@ -130,7 +130,7 @@ func (b *Backend) importConfigFromRaw(srcPath string, raw []byte) (string, error
 	if err != nil {
 		return "", fmt.Errorf("导入后重新载入失败（已备份，可从 backups 目录回滚）：%w", err)
 	}
-	*b.a.Cfg = *cur
+	b.a.Cfg.ReplaceFrom(cur)
 	b.a.Bus.Info("已导入配置：%s（%d 条链，%d 条规则）", filepath.Base(srcPath), len(cur.Chains), len(cur.Routes))
 	return srcPath, nil
 }

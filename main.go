@@ -293,7 +293,7 @@ func runGUI(a *app.App, bus *logbus.Bus, cfgPath string) {
 
 	theme := wopts.Light
 	bg := uint32(0xffffffff)
-	if a.Cfg.UI.Theme == "dark" {
+	if a.Cfg.Theme() == "dark" {
 		theme = wopts.Dark
 		bg = 0xff121314 // ABGR
 	}

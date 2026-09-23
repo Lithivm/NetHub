@@ -97,9 +97,9 @@ tuning:
 	if err != nil {
 		t.Fatalf("清空后重新载入失败: %v", err)
 	}
-	*a.Cfg = *empty
-	if len(a.Cfg.Chains) != 1 || a.Cfg.Chains[0].Name != "proxy-a" {
-		t.Fatalf("清空后不是默认配置: %+v", a.Cfg.Chains)
+	a.Cfg.ReplaceFrom(empty)
+	if a.Cfg.ChainCount() != 1 || a.Cfg.ChainsSnapshot()[0].Name != "proxy-a" {
+		t.Fatalf("清空后不是默认配置: %+v", a.Cfg.ChainsSnapshot())
 	}
 
 	// ③ 导入（走真实导入路径）

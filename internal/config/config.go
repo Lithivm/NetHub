@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -292,6 +293,16 @@ type UICfg struct {
 
 // Config 顶层配置。
 type Config struct {
+	// mu 保护下面所有可变字段（Chains/Routes/Patrol/Tuning/Hosts/UI/Relay）。
+	//
+	// 背景：引擎在后台 goroutine 里持续读配置（探活 5s、拨号、巡检），
+	// 而界面线程会改配置（增删规则/链、保存、导入/回滚），两边以前没有任何同步 ——
+	// 轻则读到半新半旧的值（拨号到垃圾地址），重则 *cfg = *cur 整块替换时越界崩溃。
+	//
+	// 约定：**公共方法内部加锁**；*Locked 后缀的内部方法假定调用方已持锁，不再加锁
+	//（否则会重入死锁 —— sync.RWMutex 不可重入）。
+	mu sync.RWMutex
+
 	Relay  string   `yaml:"relay"` // relay 监听地址，端口写 0 表示自动分配
 	Chains []Chain  `yaml:"chains"`
 	Routes []Route  `yaml:"routes"`
@@ -368,20 +379,32 @@ func Load(path string) (*Config, error) {
 // v1 的 `target:` 并进 `targets:`、目标归一化成 CIDR、组内去重、清掉两侧空白。
 // 返回是否改动过（调用方据此决定要不要写回文件）。
 func (c *Config) Normalize() (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.normalizeLocked()
+}
+
+func (c *Config) normalizeLocked() (bool, error) {
+	// copy-on-write：读方可能正持旧切片遍历，归一化不能在原切片上就地改
+	chains := append([]Chain(nil), c.Chains...)
+	routes := append([]Route(nil), c.Routes...)
 	changed := false
-	for i := range c.Chains {
-		ch, err := c.Chains[i].normalize()
+	for i := range chains {
+		ch, err := chains[i].normalize()
 		if err != nil {
-			return changed, fmt.Errorf("第 %d 条链 %s: %v", i+1, c.Chains[i].Name, err)
+			return changed, fmt.Errorf("第 %d 条链 %s: %v", i+1, chains[i].Name, err)
 		}
 		changed = changed || ch
 	}
-	for i := range c.Routes {
-		ch, _, err := c.Routes[i].normalize()
+	for i := range routes {
+		ch, _, err := routes[i].normalize()
 		if err != nil {
 			return changed, fmt.Errorf("第 %d 条规则: %v", i+1, err)
 		}
 		changed = changed || ch
+	}
+	if changed {
+		c.Chains, c.Routes = chains, routes
 	}
 	return changed, nil
 }
@@ -401,13 +424,14 @@ func (c *Config) Save() error {
 	if c.path == "" {
 		return fmt.Errorf("配置路径未设置")
 	}
-	return c.writeTo(c.path, false)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.writeToLocked(c.path)
 }
 
-// writeTo 落盘。seal 参数只为兼容导出路径保留，现一律不封存。
-func (c *Config) writeTo(path string, seal bool) error {
-	c.flattenSecrets() // 老配置里的 secret: 引用在这里摊平成明文（只做一次，之后就没引用了）
-	_ = seal
+// writeToLocked 落盘（调用方已持写锁）。
+func (c *Config) writeToLocked(path string) error {
+	c.flattenSecretsLocked() // 老配置里的 secret: 引用在这里摊平成明文（只做一次，之后就没引用了）
 	b, err := yaml.Marshal(c)
 	if err != nil {
 		return err
@@ -427,6 +451,12 @@ func (c *Config) writeTo(path string, seal bool) error {
 
 // Validate 结构校验：链名唯一、路由引用的链存在、地址格式合法。
 func (c *Config) Validate() error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.validateLocked()
+}
+
+func (c *Config) validateLocked() error {
 	if len(c.Chains) == 0 {
 		return fmt.Errorf("至少要配置一条链")
 	}
@@ -790,6 +820,8 @@ type Patrol struct {
 
 // PatrolInterval 归一化后的巡检间隔（0 = 关闭）。**默认关闭**（空值 = 关）。
 func (c *Config) PatrolInterval() time.Duration {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	s := strings.ToLower(strings.TrimSpace(c.Patrol.Interval))
 	switch s {
 	case "off", "none", "0":
@@ -874,6 +906,12 @@ type Tuning struct {
 
 // DialTimeoutDur 单次尝试上游的超时（默认 5s，夹在 1s～30s）。
 func (c *Config) DialTimeoutDur() time.Duration {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.dialTimeoutLocked()
+}
+
+func (c *Config) dialTimeoutLocked() time.Duration {
 	return clampDur(c.Tuning.DialTimeout, 5*time.Second, time.Second, 30*time.Second)
 }
 
@@ -881,7 +919,9 @@ func (c *Config) DialTimeoutDur() time.Duration {
 // 默认 = 2×单次超时（即“最多两轮”）：拒绝型失败几乎不花时间，所以
 // 候选多时照样会一路试下去；只有“超时型”失败才会把预算吃光。
 func (c *Config) DialBudgetDur() time.Duration {
-	per := c.DialTimeoutDur()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	per := c.dialTimeoutLocked()
 	d := clampDur(c.Tuning.DialBudget, 2*per, per, time.Minute)
 	if d < per { // 配置里总预算比单次还小 → 以单次为准，否则第一条就被预算卡掉
 		d = per
@@ -892,6 +932,8 @@ func (c *Config) DialBudgetDur() time.Duration {
 // RaceAfterDur 竞速起跑时间（默认 300ms）。
 // 显式写 0 / off 表示关闭竞速；非法值回默认。
 func (c *Config) RaceAfterDur() time.Duration {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	s := strings.ToLower(strings.TrimSpace(c.Tuning.RaceAfter))
 	switch s {
 	case "0", "off", "none", "false":
@@ -922,6 +964,8 @@ func clampDur(s string, def, lo, hi time.Duration) time.Duration {
 
 // PatrolCount 每轮巡检的目标数（默认 8，上限 32，免得一下探爆客户内网）。
 func (c *Config) PatrolCount() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	n := c.Patrol.Count
 	if n <= 0 {
 		return 8
@@ -937,6 +981,12 @@ func (c *Config) PatrolEnabled() bool { return c.PatrolInterval() > 0 }
 
 // FindChain 按下标找链，找不到返回 -1。
 func (c *Config) FindChain(name string) int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.findChainLocked(name)
+}
+
+func (c *Config) findChainLocked(name string) int {
 	for i := range c.Chains {
 		if c.Chains[i].Name == name {
 			return i
@@ -947,15 +997,19 @@ func (c *Config) FindChain(name string) int {
 
 // AddChain 追加一条链。
 func (c *Config) AddChain(ch Chain) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if strings.TrimSpace(ch.Name) == "" {
 		return fmt.Errorf("链名不能为空")
 	}
-	if c.FindChain(ch.Name) >= 0 {
+	if c.findChainLocked(ch.Name) >= 0 {
 		return fmt.Errorf("链名 %q 已存在", ch.Name)
 	}
-	c.Chains = append(c.Chains, ch)
-	if err := c.Validate(); err != nil {
-		c.Chains = c.Chains[:len(c.Chains)-1] // 回滚，不留非法状态
+	old := c.Chains
+	// copy-on-write：读方（引擎）可能正持着旧切片遍历，绝不原地改它
+	c.Chains = append(append([]Chain(nil), c.Chains...), ch)
+	if err := c.validateLocked(); err != nil {
+		c.Chains = old // 回滚，不留非法状态
 		return err
 	}
 	return nil
@@ -980,6 +1034,8 @@ func (c *Config) ChainCredUser(ch Chain) string {
 	if ch.Secret == "" {
 		return ""
 	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	store := c.Secrets()
 	if store == nil {
 		return ""
@@ -993,15 +1049,20 @@ func (c *Config) ChainCredUser(ch Chain) string {
 
 // UpdateChain 把 oldName 这条链替换成 ch（允许改名）。
 func (c *Config) UpdateChain(oldName string, ch Chain) error {
-	i := c.FindChain(oldName)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	i := c.findChainLocked(oldName)
 	if i < 0 {
 		return fmt.Errorf("找不到链 %q", oldName)
 	}
-	if ch.Name != oldName && c.FindChain(ch.Name) >= 0 {
+	if ch.Name != oldName && c.findChainLocked(ch.Name) >= 0 {
 		return fmt.Errorf("链名 %q 已存在", ch.Name)
 	}
-	old := c.Chains[i]
-	oldRoutes := append([]Route(nil), c.Routes...) // 改名会连带改规则引用，回滚时要一起还原
+	// copy-on-write：先拿旧切片做快照（引擎可能正在遍历），改的是一份新切片
+	oldChains, oldRoutes := c.Chains, c.Routes
+	chains := append([]Chain(nil), c.Chains...)
+	routes := append([]Route(nil), c.Routes...)
+	old := chains[i]
 	// ⚠ 关键：界面上编辑链路时，表单里看不到已封存的口令（forward 只剩 host:port），
 	// 如果直接整体替换，就会把 secret: 引用一并抹掉 —— 那才是真丢口令。
 	// 所以：新写法里没有凭据时，继承旧的 secret 引用；
@@ -1012,19 +1073,19 @@ func (c *Config) UpdateChain(oldName string, ch Chain) error {
 	if chainHasCreds(ch) {
 		ch.Secret = ""
 	}
-	c.Chains[i] = ch
+	chains[i] = ch
 	if ch.Name != oldName {
 		// 改名同步改所有引用
-		for j := range c.Routes {
-			if c.Routes[j].Chain == oldName {
-				c.Routes[j].Chain = ch.Name
+		for j := range routes {
+			if routes[j].Chain == oldName {
+				routes[j].Chain = ch.Name
 			}
 		}
 	}
-	if err := c.Validate(); err != nil {
+	c.Chains, c.Routes = chains, routes
+	if err := c.validateLocked(); err != nil {
 		// 回滚：链本体 + 改名连带改过的规则引用（只还原链会留下“规则指向不存在的链”）
-		c.Chains[i] = old
-		c.Routes = oldRoutes
+		c.Chains, c.Routes = oldChains, oldRoutes
 		return err
 	}
 	return nil
@@ -1032,6 +1093,12 @@ func (c *Config) UpdateChain(oldName string, ch Chain) error {
 
 // ChainUsage 返回引用了该链的规则条数。
 func (c *Config) ChainUsage(name string) int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.chainUsageLocked(name)
+}
+
+func (c *Config) chainUsageLocked(name string) int {
 	n := 0
 	for _, r := range c.Routes {
 		if r.Chain == name {
@@ -1043,22 +1110,29 @@ func (c *Config) ChainUsage(name string) int {
 
 // RemoveChain 删除链；还被规则引用时拒绝，避免静默产生悬空规则。
 func (c *Config) RemoveChain(name string) error {
-	i := c.FindChain(name)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	i := c.findChainLocked(name)
 	if i < 0 {
 		return fmt.Errorf("找不到链 %q", name)
 	}
-	if n := c.ChainUsage(name); n > 0 {
+	if n := c.chainUsageLocked(name); n > 0 {
 		return fmt.Errorf("链 %q 还被 %d 条规则引用，请先改掉那些规则", name, n)
 	}
 	if len(c.Chains) <= 1 {
 		return fmt.Errorf("至少要保留一条链")
 	}
-	c.Chains = append(c.Chains[:i], c.Chains[i+1:]...)
+	out := make([]Chain, 0, len(c.Chains)-1)
+	out = append(out, c.Chains[:i]...)
+	out = append(out, c.Chains[i+1:]...)
+	c.Chains = out
 	return nil
 }
 
 // MoveChain 把第 from 条链移到第 to 条位置。
 func (c *Config) MoveChain(from, to int) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	n := len(c.Chains)
 	if from < 0 || from >= n || to < 0 || to >= n || from == to {
 		return fmt.Errorf("位置越界")
@@ -1179,10 +1253,16 @@ func (r *Route) normalize() (changed bool, dup []string, err error) {
 // 后者才是最常踩的排序错误：先写 10.0.0.0/24 走链、再写 10.0.0.5/32 直连 ——
 // 自上而下命中即止，那条 /32 永远轮不到。
 func (c *Config) ShadowedTargets(i int) []string {
-	if i < 0 || i >= len(c.Routes) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return shadowedTargetsIn(c.Routes, i)
+}
+
+func shadowedTargetsIn(routes []Route, i int) []string {
+	if i < 0 || i >= len(routes) {
 		return nil
 	}
-	rt := c.Routes[i]
+	rt := routes[i]
 	if !rt.IsEnabled() {
 		return nil // 停用的规则谈不上“被覆盖”
 	}
@@ -1194,7 +1274,7 @@ func (c *Config) ShadowedTargets(i int) []string {
 		}
 		covered := false
 		for j := 0; j < i && !covered; j++ {
-			r := c.Routes[j]
+			r := routes[j]
 			if !r.IsEnabled() {
 				continue // 前面那条本来就是关着的，盖不住谁
 			}
@@ -1271,6 +1351,8 @@ func validLocalNet(s string) error {
 //
 // 返回是否有改动。
 func (c *Config) SortRoutesBySpecificity() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	type key struct {
 		prefix int
 		ports  int
@@ -1414,14 +1496,15 @@ func parseCIDRs(list ...string) []*net.IPNet {
 // Precheck 启动前的体检：返回人话报告（✓ 正常 / ⚠ 提醒 / ✗ 问题）。
 // 不修任何东西，只回答“这份配置能不能干活、有没有埋雷”。
 func (c *Config) Precheck() []string {
+	snap := c.Snapshot() // 一次性快照，后续不再碰活配置（避免持锁重入）
 	var out []string
 	if err := c.Validate(); err != nil {
 		return []string{"✗ 配置校验失败：" + err.Error()}
 	}
-	out = append(out, fmt.Sprintf("✓ 配置可载入：%d 条链，%d 条规则", len(c.Chains), len(c.Routes)))
+	out = append(out, fmt.Sprintf("✓ 配置可载入：%d 条链，%d 条规则", len(snap.Chains), len(snap.Routes)))
 
 	tunnel := 0
-	for _, r := range c.Routes {
+	for _, r := range snap.Routes {
 		if r.NeedsChain() {
 			tunnel++
 		}
@@ -1432,13 +1515,13 @@ func (c *Config) Precheck() []string {
 		out = append(out, fmt.Sprintf("✓ %d 条隧道规则会进内核过滤器（其余流量不经过我们）", tunnel))
 	}
 
-	for i := range c.Routes {
-		if s := c.ShadowedTargets(i); len(s) > 0 {
+	for i := range snap.Routes {
+		if s := shadowedTargetsIn(snap.Routes, i); len(s) > 0 {
 			out = append(out, fmt.Sprintf("⚠ 第 %d 条规则%s 里有 %d 个目标被前面的规则完全覆盖（永远不生效）：%s",
-				i+1, c.Routes[i].Describe(), len(s), strings.Join(s, ", ")))
+				i+1, snap.Routes[i].Describe(), len(s), strings.Join(s, ", ")))
 		}
 	}
-	for _, ch := range c.Chains {
+	for _, ch := range snap.Chains {
 		n := len(ch.Upstreams())
 		if n == 0 {
 			out = append(out, "✗ 链 "+ch.Name+" 没有上游")
@@ -1450,7 +1533,7 @@ func (c *Config) Precheck() []string {
 		}
 		out = append(out, detail)
 	}
-	if !strings.Contains(c.Relay, ":") {
+	if !strings.Contains(snap.Relay, ":") {
 		out = append(out, "✗ relay 不是 host:port")
 	}
 
@@ -1478,6 +1561,12 @@ func (c *Config) BackupDir() string {
 
 // Backups 列出已有备份（新的排前面）。
 func (c *Config) Backups() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.backupsLocked()
+}
+
+func (c *Config) backupsLocked() []string {
 	d := c.BackupDir()
 	if d == "" {
 		return nil
@@ -1499,6 +1588,8 @@ func (c *Config) Backups() []string {
 // RestoreBackup 用某个备份覆盖当前配置（覆盖前先把当前配置也备一份），并重新载入。
 // 返回载入后的配置。
 func (c *Config) RestoreBackup(name string) (*Config, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	src := filepath.Join(c.BackupDir(), filepath.Base(name))
 	b, err := os.ReadFile(src)
 	if err != nil {
@@ -1545,7 +1636,7 @@ func (c *Config) backupLocked() error {
 		return err
 	}
 	// 只留最新 keepBackups 份（够回滚就行；留太多反而让人在列表里挑半天）
-	if all := c.Backups(); len(all) > keepBackups {
+	if all := c.backupsLocked(); len(all) > keepBackups {
 		for _, old := range all[keepBackups:] {
 			_ = os.Remove(filepath.Join(d, old))
 		}
@@ -1566,11 +1657,17 @@ func (c *Config) backupLocked() error {
 // 只判断“**完全一样**的目标 + 端口被上面那条全盖住”这一种（即上面空端口、下面任何端口都算），
 // 网段包含关系与不同端口本就该由用户自由组合。
 func (c *Config) occupiedHint(rt Route, skip int) []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return occupiedHintIn(c.Routes, rt, skip)
+}
+
+func occupiedHintIn(routes []Route, rt Route, skip int) []string {
 	if !rt.IsEnabled() {
 		return nil
 	}
 	var out []string
-	for j, r := range c.Routes {
+	for j, r := range routes {
 		if j == skip || j > skip || !r.IsEnabled() {
 			continue // 只看“排在它前面”的：后面的盖不住它
 		}
@@ -1593,12 +1690,15 @@ func (c *Config) occupiedHint(rt Route, skip int) []string {
 
 // AddRoute 追加一条规则：名字/目标/链都会归一化，组内重复目标去掉。
 func (c *Config) AddRoute(rt Route) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if _, _, err := rt.normalize(); err != nil {
 		return err
 	}
-	c.Routes = append(c.Routes, rt)
-	if err := c.Validate(); err != nil {
-		c.Routes = c.Routes[:len(c.Routes)-1] // 回滚，不留非法状态
+	old := c.Routes
+	c.Routes = append(append([]Route(nil), c.Routes...), rt)
+	if err := c.validateLocked(); err != nil {
+		c.Routes = old // 回滚，不留非法状态
 		return err
 	}
 	return nil
@@ -1607,24 +1707,30 @@ func (c *Config) AddRoute(rt Route) error {
 // RouteHints 保存后“值得知道但不拦”的提示（目标被前面的规则盖住之类）。
 // 调用方（界面）把它们记进日志即可，不影响保存成功。
 func (c *Config) RouteHints(i int) []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if i < 0 || i >= len(c.Routes) {
 		return nil
 	}
-	return c.occupiedHint(c.Routes[i], i)
+	return occupiedHintIn(c.Routes, c.Routes[i], i)
 }
 
 // UpdateRoute 替换第 i 条规则。
 func (c *Config) UpdateRoute(i int, rt Route) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if i < 0 || i >= len(c.Routes) {
 		return fmt.Errorf("规则下标越界")
 	}
 	if _, _, err := rt.normalize(); err != nil {
 		return err
 	}
-	old := c.Routes[i]
-	c.Routes[i] = rt
-	if err := c.Validate(); err != nil {
-		c.Routes[i] = old // 回滚
+	old := c.Routes
+	routes := append([]Route(nil), c.Routes...)
+	routes[i] = rt
+	c.Routes = routes
+	if err := c.validateLocked(); err != nil {
+		c.Routes = old // 回滚
 		return err
 	}
 	return nil
@@ -1632,15 +1738,22 @@ func (c *Config) UpdateRoute(i int, rt Route) error {
 
 // RemoveRoute 删除第 i 条规则。
 func (c *Config) RemoveRoute(i int) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if i < 0 || i >= len(c.Routes) {
 		return fmt.Errorf("规则下标越界")
 	}
-	c.Routes = append(c.Routes[:i], c.Routes[i+1:]...)
+	out := make([]Route, 0, len(c.Routes)-1)
+	out = append(out, c.Routes[:i]...)
+	out = append(out, c.Routes[i+1:]...)
+	c.Routes = out
 	return nil
 }
 
 // MoveRoute 把第 from 条规则移到第 to 条位置（顺序即匹配优先级）。
 func (c *Config) MoveRoute(from, to int) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	n := len(c.Routes)
 	if from < 0 || from >= n || to < 0 || to >= n || from == to {
 		return fmt.Errorf("位置越界")
@@ -1670,6 +1783,8 @@ func NormalizeListenLoose(s string) string {
 
 // ChainByName 按名字取链。
 func (c *Config) ChainByName(name string) (Chain, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	for _, ch := range c.Chains {
 		if ch.Name == name {
 			return ch, true
@@ -1693,11 +1808,11 @@ func DefaultPath() string {
 func (c *Config) SaveAs(path string) error {
 	// 在副本上把历史遗留的 secret: 引用摊平成明文 —— 否则导出的文件头声称
 	// “forward 里含凭据”，实际却是无凭据版，换台机器这条链必然认证失败。
-	// 必须在副本上做（deep-copy Chains），不能改动程序正在用的配置。
-	cp := *c
-	cp.Chains = append([]Chain(nil), c.Chains...)
-	cp.flattenSecrets()
-	b, err := yaml.Marshal(&cp)
+	// 必须在快照副本上做，不能改动程序正在用的配置。
+	cp := c.Snapshot().config()
+	cp.path = c.Path()
+	cp.flattenSecretsLocked()
+	b, err := yaml.Marshal(cp)
 	if err != nil {
 		return err
 	}
@@ -1719,6 +1834,8 @@ func (c *Config) SaveAs(path string) error {
 //
 // DomainResolveMode 域名解析策略：local（默认）| upstream | auto。
 func (c *Config) DomainResolveMode() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	s := strings.ToLower(strings.TrimSpace(c.Tuning.DomainResolve))
 	switch s {
 	case "upstream", "remote", "proxy":
@@ -1732,6 +1849,8 @@ func (c *Config) DomainResolveMode() string {
 
 // WarmTarget 每条上游预热几条"已握手、只差 CONNECT"的会话。
 func (c *Config) WarmTarget() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	s := strings.ToLower(strings.TrimSpace(c.Tuning.WarmSessions))
 	switch s {
 	case "off", "none", "0", "false":
@@ -1813,9 +1932,10 @@ func redactUserinfo(raw string) string {
 
 // SaveAsRedacted 导出一份"无凭据但可导入"的配置。
 func (c *Config) SaveAsRedacted(path string) error {
-	cp := *c
-	cp.Chains = make([]Chain, len(c.Chains))
-	for i, ch := range c.Chains {
+	snapshot := c.Snapshot()
+	cp := snapshot.config()
+	cp.Chains = make([]Chain, len(snapshot.Chains))
+	for i, ch := range snapshot.Chains {
 		n := ch
 		n.Forward = stripCreds(ch.Forward)
 		if len(ch.Forwards) > 0 {
@@ -1844,27 +1964,49 @@ func (c *Config) SaveAsRedacted(path string) error {
 }
 
 // BackupNow 立刻备份当前配置（导入/回滚前用）。
-func (c *Config) BackupNow() error { return c.backupLocked() }
+func (c *Config) BackupNow() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.backupLocked()
+}
 
 // CountDirectEnabled 是否把直连流量也纳入统计（默认关）。
 //
 // 关（默认）：直连网段不进内核过滤器 —— 一个包都不碰，统计里只看到它的 SYN。
 // 开：直连网段也装进过滤器，我们不改包、只数双向字节（换来一点每包开销）。
 // 需要在「连接」页勾选，改完要重启服务（过滤器在启动时装配）。
-func (c *Config) CountDirectEnabled() bool { return c.Tuning.CountDirect }
+func (c *Config) CountDirectEnabled() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Tuning.CountDirect
+}
 
 // TLSSniffEnabled 是否只读嗅探 TLS SNI / HTTP Host（默认开）。
 // 注意：即使开着，没有通配域名规则时也不会开第二只句柄（一分钱不花）。
-func (c *Config) TLSSniffEnabled() bool { return !c.Tuning.TLSSniffDisabled }
+func (c *Config) TLSSniffEnabled() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return !c.Tuning.TLSSniffDisabled
+}
 
 // DNSTakeoverEnabled 是否开启 DNS 接管（发假 IP）。默认开，只有通配域名规则时才生效。
-func (c *Config) DNSTakeoverEnabled() bool { return !c.Tuning.DNSTakeoverDisabled }
+func (c *Config) DNSTakeoverEnabled() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return !c.Tuning.DNSTakeoverDisabled
+}
 
 // DNSBlackboxEnabled 是否开 DNS 黑匣子（排查用，默认关）。
-func (c *Config) DNSBlackboxEnabled() bool { return c.Tuning.DNSBlackbox }
+func (c *Config) DNSBlackboxEnabled() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Tuning.DNSBlackbox
+}
 
 // FakeIPRangeOr 假 IP 段（未配则用 fakeip 包的默认值）。
 func (c *Config) FakeIPRangeOr() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if s := strings.TrimSpace(c.Tuning.FakeIPRange); s != "" {
 		return s
 	}
@@ -1879,6 +2021,8 @@ func (c *Config) FakeIPRangeOr() string {
 // 注意：真正的"停用"效果发生在 app.toRules（停用规则根本不进规则集与内核过滤器），
 // 这个函数是给需要显式过滤的调用方用的（比如规则模拟器、体检）。
 func (c *Config) EnabledRoutes() []Route {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	out := make([]Route, 0, len(c.Routes))
 	for _, r := range c.Routes {
 		if r.IsEnabled() {
@@ -1886,4 +2030,196 @@ func (c *Config) EnabledRoutes() []Route {
 		}
 	}
 	return out
+}
+
+// ───────── 快照与受控修改（给引擎/界面用）─────────
+
+// ConfigSnapshot 配置的只读快照（不含锁，可安全传阅）。
+//
+// Chains/Routes 是新切片：配合写入路径的 copy-on-write，拿到快照后
+// 可以任意遍历，不会再与后到的修改竞争。
+//
+// Config 里含 sync.RWMutex，**不能按值拷 Config**（go vet copylocks）；
+// 外部要快照就用这个类型。
+func (c *Config) Snapshot() ConfigSnapshot {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.snapshotLocked()
+}
+
+func (c *Config) snapshotLocked() ConfigSnapshot {
+	return ConfigSnapshot{
+		Relay:  c.Relay,
+		Chains: append([]Chain(nil), c.Chains...),
+		Routes: append([]Route(nil), c.Routes...),
+		Patrol: c.Patrol,
+		Tuning: c.Tuning,
+		Hosts:  c.Hosts,
+		UI:     c.UI,
+	}
+}
+
+// ConfigSnapshot 配置的只读快照（不含锁）。
+type ConfigSnapshot struct {
+	Relay  string
+	Chains []Chain
+	Routes []Route
+	Patrol Patrol
+	Tuning Tuning
+	Hosts  HostsCfg
+	UI     UICfg
+}
+
+// config 把快照还原成可 marshal 的 *Config（深拷贝切片；mutex 为零值、不使用）。
+func (s ConfigSnapshot) config() *Config {
+	return &Config{
+		Relay:  s.Relay,
+		Chains: append([]Chain(nil), s.Chains...),
+		Routes: append([]Route(nil), s.Routes...),
+		Patrol: s.Patrol,
+		Tuning: s.Tuning,
+		Hosts:  s.Hosts,
+		UI:     s.UI,
+	}
+}
+
+// RelayAddr relay 地址快照（只读）。
+func (c *Config) RelayAddr() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Relay
+}
+
+// ChainsSnapshot 链列表快照（新切片）。
+func (c *Config) ChainsSnapshot() []Chain {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return append([]Chain(nil), c.Chains...)
+}
+
+// RoutesSnapshot 规则列表快照（新切片）。
+func (c *Config) RoutesSnapshot() []Route {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return append([]Route(nil), c.Routes...)
+}
+
+// RouteCount 规则条数（快照）。
+func (c *Config) RouteCount() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return len(c.Routes)
+}
+
+// ChainCount 链条数（快照）。
+func (c *Config) ChainCount() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return len(c.Chains)
+}
+
+// ReplaceFrom 用另一份配置整体替换（导入/回滚用）。
+//
+// 比调用方直接 *c = *cur 安全：后者会连同一把被用过的 mutex 一起拷（copylocks），
+// 而且拷贝期间没有任何同步。
+func (c *Config) ReplaceFrom(src *Config) {
+	s := src.Snapshot()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Relay, c.Chains, c.Routes = s.Relay, s.Chains, s.Routes
+	c.Patrol, c.Tuning, c.Hosts, c.UI = s.Patrol, s.Tuning, s.Hosts, s.UI
+	if p := src.Path(); p != "" {
+		c.path = p
+	}
+}
+
+// SetPatrol 修改巡检设置。
+func (c *Config) SetPatrol(interval string, count int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Patrol.Interval = interval
+	if count > 0 {
+		c.Patrol.Count = count
+	}
+}
+
+// SetHosts 修改 hosts 托管设置。entries 为 nil 表示不改动条目。
+func (c *Config) SetHosts(manage bool, entries []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Hosts.Manage = manage
+	if entries != nil {
+		c.Hosts.Entries = append([]string(nil), entries...)
+	}
+}
+
+// HostsCopy hosts 设置的快照。
+func (c *Config) HostsCopy() HostsCfg {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Hosts
+}
+
+// SetTheme 修改界面主题（只存 "dark"/"light"）。
+func (c *Config) SetTheme(mode string) {
+	if mode != "dark" {
+		mode = "light"
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.UI.Theme = mode
+}
+
+// Theme 界面主题快照。
+func (c *Config) Theme() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.UI.Theme
+}
+
+// SetCountDirect 切换“统计直连流量”。
+func (c *Config) SetCountDirect(on bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Tuning.CountDirect = on
+}
+
+// UpdateTuning 在锁下修改 Tuning（界面保存拨号调优用）。
+func (c *Config) UpdateTuning(fn func(*Tuning)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	fn(&c.Tuning)
+}
+
+// SetRouteEnabled 启用/停用第 i 条规则（COW）。
+func (c *Config) SetRouteEnabled(i int, on bool) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if i < 0 || i >= len(c.Routes) {
+		return fmt.Errorf("规则下标越界")
+	}
+	routes := append([]Route(nil), c.Routes...)
+	routes[i].SetEnabled(on)
+	c.Routes = routes
+	return nil
+}
+
+// RouteAt 取第 i 条规则的副本。
+func (c *Config) RouteAt(i int) (Route, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if i < 0 || i >= len(c.Routes) {
+		return Route{}, false
+	}
+	return c.Routes[i], true
+}
+
+// ChainAt 取第 i 条链的副本。
+func (c *Config) ChainAt(i int) (Chain, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if i < 0 || i >= len(c.Chains) {
+		return Chain{}, false
+	}
+	return c.Chains[i], true
 }

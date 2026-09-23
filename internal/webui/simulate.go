@@ -186,19 +186,21 @@ type simVerdict struct {
 // simEval 就是「这个目标会被怎么处理」：命中哪条规则、动作是什么。
 func (b *Backend) simEval(ip net.IP, port uint16, ignorePort bool) simVerdict {
 	idx, _, ok := b.a.Rules.Explain(ip, port, ignorePort)
-	if !ok || idx < 0 || idx >= len(b.a.Cfg.Routes) {
+	routes := b.a.Cfg.RoutesSnapshot()
+	if !ok || idx < 0 || idx >= len(routes) {
 		return simVerdict{action: "未命中（不拦截）"}
 	}
-	r := b.a.Cfg.Routes[idx]
+	r := routes[idx]
 	return simVerdict{rule: r.Name, ruleNo: idx + 1, action: r.ActionText(), chain: r.Chain}
 }
 
 // portNote：没填端口、但命中的规则带端口条件时，把这件事说清楚（别让人误以为结论确定）。
 func portNote(b *Backend, ruleNo int, hasPort bool) string {
-	if hasPort || ruleNo <= 0 || ruleNo > len(b.a.Cfg.Routes) {
+	routes := b.a.Cfg.RoutesSnapshot()
+	if hasPort || ruleNo <= 0 || ruleNo > len(routes) {
 		return ""
 	}
-	if p := b.a.Cfg.Routes[ruleNo-1].Ports; len(p) > 0 {
+	if p := routes[ruleNo-1].Ports; len(p) > 0 {
 		return "该规则限定端口 " + strings.Join(p, ",") + "；未填端口时按「只看目标」判断"
 	}
 	return ""

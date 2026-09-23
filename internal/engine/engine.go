@@ -396,9 +396,9 @@ func (e *Engine) Start() error {
 	}
 
 	// 1) 先起 relay，拿到真实端口（端口可能配的是 0=自动分配，过滤器要用它）
-	ln, err := net.Listen("tcp", e.cfg.Relay)
+	ln, err := net.Listen("tcp", e.cfg.RelayAddr())
 	if err != nil {
-		return fmt.Errorf("relay 监听 %s 失败: %w", e.cfg.Relay, err)
+		return fmt.Errorf("relay 监听 %s 失败: %w", e.cfg.RelayAddr(), err)
 	}
 	relay := ln.Addr().String()
 	port := uint16(ln.Addr().(*net.TCPAddr).Port)
@@ -468,7 +468,7 @@ func (e *Engine) Start() error {
 			e.bus.Info("route: %s action=chain/%s", r.Label(), r.Chain)
 		}
 	}
-	for _, ch := range e.cfg.Chains {
+	for _, ch := range e.cfg.ChainsSnapshot() {
 		e.bus.Info("    链 %s：%d 个上游，策略 %s，探测 %s",
 			ch.Name, len(ch.Upstreams()), ch.StrategyName(), ch.ProbeInterval())
 	}
@@ -2706,10 +2706,14 @@ func (e *Engine) resolveHostTargets(warnChange bool) {
 // 这种最典型的场景下，通配域名将什么都匹配不到。
 // TTL 给长一点（每轮 nameLoop 都会重新灌一遍，过期清理不会误删）。
 func (e *Engine) seedFromHosts() {
-	if e.cfg == nil || !e.cfg.Hosts.Manage {
+	if e.cfg == nil {
 		return
 	}
-	for _, line := range e.cfg.Hosts.Entries {
+	hosts := e.cfg.HostsCopy()
+	if !hosts.Manage {
+		return
+	}
+	for _, line := range hosts.Entries {
 		f := strings.Fields(strings.TrimSpace(line))
 		if len(f) < 2 || strings.HasPrefix(f[0], "#") {
 			continue

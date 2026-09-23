@@ -371,7 +371,7 @@ func clashTargets(cfg *config.Config) []string {
 			add(f[0])
 		}
 	}
-	for _, rt := range cfg.Routes {
+	for _, rt := range cfg.RoutesSnapshot() {
 		// 停用的规则不参与：那些环境现在不由我们接管，
 		// 也就没有“它该走直连”这一说 —— 否则会把同事的停用环境 IP 也报成红线。
 		if !rt.IsEnabled() {

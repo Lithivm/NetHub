@@ -299,7 +299,7 @@ func (b *Backend) GetState() StateView {
 		ActiveConns: active,
 		ConfigPath:  b.a.Cfg.Path(),
 		LogPath:     b.a.Bus.FilePath(),
-		Theme:       b.a.Cfg.UI.Theme,
+		Theme:       b.a.Cfg.Theme(),
 		HostsPath:   hostsmgr.Path(),
 		HostsInFile: hostsInFile,
 		Autostart:   b.autostartCached(),
@@ -332,8 +332,9 @@ func (b *Backend) autostartDetailCached() string {
 }
 
 func (b *Backend) GetChains() []ChainView {
-	out := make([]ChainView, 0, len(b.a.Cfg.Chains))
-	for _, c := range b.a.Cfg.Chains {
+	chains := b.a.Cfg.ChainsSnapshot()
+	out := make([]ChainView, 0, len(chains))
+	for _, c := range chains {
 		ups := c.Upstreams()
 		brief := make([]string, 0, len(ups))
 		hasAuth := false
@@ -424,13 +425,15 @@ func (b *Backend) ProbeChains() error {
 }
 
 func (b *Backend) GetRoutes() []RouteView {
+	chains := b.a.Cfg.ChainsSnapshot()
+	routes := b.a.Cfg.RoutesSnapshot()
 	note := map[string]string{}
-	for _, c := range b.a.Cfg.Chains {
+	for _, c := range chains {
 		note[c.Name] = c.Note
 	}
 	wildcardStats := b.a.Engine.WildcardStats()
-	out := make([]RouteView, 0, len(b.a.Cfg.Routes))
-	for i, r := range b.a.Cfg.Routes {
+	out := make([]RouteView, 0, len(routes))
+	for i, r := range routes {
 		note := note[r.Chain]
 		switch {
 		case r.IsDirect():
@@ -642,13 +645,14 @@ func (b *Backend) ExplainTarget(ip, port string) (ExplainView, error) {
 	}
 
 	idx, shadowed, _ := b.a.Rules.Explain(addr, pnum, v.PortIgnored)
-	if idx >= 0 && idx < len(b.a.Cfg.Routes) {
-		r := b.a.Cfg.Routes[idx]
+	routes := b.a.Cfg.RoutesSnapshot()
+	if idx >= 0 && idx < len(routes) {
+		r := routes[idx]
 		v.Matched, v.RuleIndex, v.RuleName, v.Action, v.Chain = true, idx, r.Name, r.ActionText(), r.Chain
 	}
 	for _, si := range shadowed {
-		if si >= 0 && si < len(b.a.Cfg.Routes) {
-			r := b.a.Cfg.Routes[si]
+		if si >= 0 && si < len(routes) {
+			r := routes[si]
 			v.Shadowed = append(v.Shadowed, ExplainRef{Index: si, Name: r.Name, Action: r.ActionText()})
 		}
 	}
@@ -675,14 +679,13 @@ func (b *Backend) ExplainTarget(ip, port string) (ExplainView, error) {
 // 为什么做成一个独立的小入口（而不是走保存整条规则的表单）：现场要在十几个
 // 内网环境之间来回切，开关必须**一下点到位**，不能每次弹出表单改完再存。
 func (b *Backend) SetRouteEnabled(index int, on bool) error {
-	if index < 0 || index >= len(b.a.Cfg.Routes) {
+	rt, ok := b.a.Cfg.RouteAt(index)
+	if !ok {
 		return fmt.Errorf("规则序号超出范围")
 	}
-	was := b.a.Cfg.Routes[index].IsEnabled()
-	if was == on {
+	if rt.IsEnabled() == on {
 		return nil
 	}
-	rt := b.a.Cfg.Routes[index]
 	rt.SetEnabled(on)
 	if err := b.a.Cfg.UpdateRoute(index, rt); err != nil {
 		// 启用时如果链丢了/目标冲了，要当场说清楚，而不是模糊地“保存失败”
@@ -789,7 +792,7 @@ func (b *Backend) RestoreBackup(name string) error {
 	if err != nil {
 		return err
 	}
-	*b.a.Cfg = *cur
+	b.a.Cfg.ReplaceFrom(cur)
 	// 同一个指针：引擎/规则看到的就是新配置（path 也一并带过来）
 	b.a.Bus.Warn("已回滚配置：%s（当前配置已自动备份）", name)
 	return b.a.Restart()
@@ -841,7 +844,7 @@ func humanInterval(d time.Duration) string {
 // SetPatrol 改开关与间隔（即时保存；引擎每 10 秒看一眼配置，自己接上）。
 func (b *Backend) SetPatrol(enabled bool, interval string) error {
 	if !enabled {
-		b.a.Cfg.Patrol.Interval = "off"
+		b.a.Cfg.SetPatrol("off", 0)
 		return b.save("关闭业务目标巡检")
 	}
 	iv := strings.TrimSpace(interval)
@@ -855,7 +858,7 @@ func (b *Backend) SetPatrol(enabled bool, interval string) error {
 	if d < 10*time.Second {
 		return fmt.Errorf("间隔太短：最少 10s —— 每轮都要经隧道去连客户内网")
 	}
-	b.a.Cfg.Patrol.Interval = iv
+	b.a.Cfg.SetPatrol(iv, 0)
 	return b.save("业务目标巡检：每 " + iv)
 }
 
@@ -869,7 +872,8 @@ func (b *Backend) GetLogs() []LogView {
 }
 
 func (b *Backend) GetSettings() SettingsView {
-	entries := b.a.Cfg.Hosts.Entries
+	hosts := b.a.Cfg.HostsCopy()
+	entries := hosts.Entries
 	if len(entries) == 0 {
 		if block, ok, _, err := hostsmgr.Read(); err == nil && ok {
 			entries = block
@@ -879,9 +883,9 @@ func (b *Backend) GetSettings() SettingsView {
 		entries = defaultHostsEntries()
 	}
 	return SettingsView{
-		HostsManage:  b.a.Cfg.Hosts.Manage,
+		HostsManage:  hosts.Manage,
 		HostsEntries: entries,
-		Theme:        b.a.Cfg.UI.Theme,
+		Theme:        b.a.Cfg.Theme(),
 		DialTimeout:  int(b.a.Cfg.DialTimeoutDur() / time.Second),
 		DialBudget:   int(b.a.Cfg.DialBudgetDur() / time.Second),
 		RaceAfter:    intPtr(int(b.a.Cfg.RaceAfterDur() / time.Millisecond)),
@@ -992,19 +996,20 @@ func (b *Backend) SaveRoute(index int, in RouteInput) error {
 		return err
 	}
 	if index < 0 {
+		base := b.a.Cfg.RouteCount()
 		if err := b.a.Cfg.AddRoute(rt); err != nil {
 			return err
 		}
-		return b.saveHint(len(b.a.Cfg.Routes)-1, ruleSaved("添加", rt))
+		return b.saveHint(base, ruleSaved("添加", rt))
 	}
 	old := ""
-	if rs := b.a.Cfg.Routes; index < len(rs) {
+	if cur, ok := b.a.Cfg.RouteAt(index); ok {
 		// 规则开关由列表上的开关控制，不是表单字段 —— 编辑内容时**必须继承原状态**，
 		// 否则“改个名字/加个目标”会悳悹把停用的规则重新启用。
-		rt.Enabled = rs[index].Enabled
-		old = rs[index].Name
+		rt.Enabled = cur.Enabled
+		old = cur.Name
 		if strings.TrimSpace(old) == "" {
-			old = rs[index].Describe()
+			old = cur.Describe()
 		}
 	}
 	if err := b.a.Cfg.UpdateRoute(index, rt); err != nil {
@@ -1110,7 +1115,7 @@ func (b *Backend) AddRoute(name, targets, chain, ports, localNets string) error 
 	if err := b.a.Cfg.AddRoute(rt); err != nil {
 		return err
 	}
-	return b.saveHint(len(b.a.Cfg.Routes)-1, ruleSaved("添加", rt))
+	return b.saveHint(b.a.Cfg.RouteCount()-1, ruleSaved("添加", rt))
 }
 
 // UpdateRoute 替换第 index 条规则（同样支持多目标 + 端口条件）。
@@ -1195,7 +1200,7 @@ func (b *Backend) applyBatEntries(got []gostbat.BatEntry) (*ImportResult, error)
 		name := be.Name()
 		if idx := b.a.Cfg.FindChain(name); idx >= 0 {
 			// 同名链已存在 → 只更新 upstream（最常见的"换服务器"场景）
-			cur := b.a.Cfg.Chains[idx]
+			cur, _ := b.a.Cfg.ChainAt(idx)
 			cur.SetUpstreams([]string{be.Forward}) // 必须整体替换，不能只写 Forward（见 SetUpstreams 注释）
 			if err := b.a.Cfg.UpdateChain(name, cur); err != nil {
 				res.Skipped = append(res.Skipped, fmt.Sprintf("%s：更新失败（%v）", name, err))
@@ -1223,37 +1228,40 @@ func (b *Backend) SaveSettings(s SettingsView) error {
 	cfg := b.a.Cfg
 	// 不动 cfg.Relay：界面上没有这个字段，前端不会传。
 	// （之前这里写 cfg.Relay = s.Relay，前端不传时会被清成空串，直接校验失败）
-	cfg.Hosts.Manage = s.HostsManage
+	var entries []string
 	if len(s.HostsEntries) > 0 {
-		cfg.Hosts.Entries = s.HostsEntries
+		entries = s.HostsEntries
 	}
-	// 拨号调优：只在界面确实传了值时才改（0 = 没传，保持原样）
-	if s.DialTimeout > 0 {
-		cfg.Tuning.DialTimeout = fmt.Sprintf("%ds", s.DialTimeout)
-	}
-	if s.DialBudget > 0 {
-		cfg.Tuning.DialBudget = fmt.Sprintf("%ds", s.DialBudget)
-	}
+	cfg.SetHosts(s.HostsManage, entries)
+	// 拨号调优：只在界面确实传了值时才改（0 = 没传，保持原样）；
 	// 竞速起跑 / 预热会话：nil = 前端没传 → 保持原值；0 = 明确关闭
-	if s.RaceAfter != nil {
-		if *s.RaceAfter == 0 {
-			cfg.Tuning.RaceAfter = "off"
-		} else {
-			cfg.Tuning.RaceAfter = fmt.Sprintf("%dms", *s.RaceAfter)
+	cfg.UpdateTuning(func(t *config.Tuning) {
+		if s.DialTimeout > 0 {
+			t.DialTimeout = fmt.Sprintf("%ds", s.DialTimeout)
 		}
-	}
-	if s.WarmSessions != nil {
-		if *s.WarmSessions == 0 {
-			cfg.Tuning.WarmSessions = "off"
-		} else {
-			cfg.Tuning.WarmSessions = fmt.Sprintf("%d", *s.WarmSessions)
+		if s.DialBudget > 0 {
+			t.DialBudget = fmt.Sprintf("%ds", s.DialBudget)
 		}
-	}
+		if s.RaceAfter != nil {
+			if *s.RaceAfter == 0 {
+				t.RaceAfter = "off"
+			} else {
+				t.RaceAfter = fmt.Sprintf("%dms", *s.RaceAfter)
+			}
+		}
+		if s.WarmSessions != nil {
+			if *s.WarmSessions == 0 {
+				t.WarmSessions = "off"
+			} else {
+				t.WarmSessions = fmt.Sprintf("%d", *s.WarmSessions)
+			}
+		}
+	})
 	if err := b.a.SaveConfig(); err != nil {
 		return err
 	}
 	b.a.Bus.Info("设置已保存（hosts 托管=%v；拨号单次 %s / 总预算 %s / 竞速起跑 %s / 预热 %d 条）",
-		cfg.Hosts.Manage, cfg.DialTimeoutDur(), cfg.DialBudgetDur(), cfg.RaceAfterDur(), cfg.WarmTarget())
+		b.a.Cfg.HostsCopy().Manage, cfg.DialTimeoutDur(), cfg.DialBudgetDur(), cfg.RaceAfterDur(), cfg.WarmTarget())
 	return nil
 }
 
@@ -1262,7 +1270,7 @@ func (b *Backend) SetTheme(mode string) error {
 	if mode != "dark" {
 		mode = "light"
 	}
-	b.a.Cfg.UI.Theme = mode
+	b.a.Cfg.SetTheme(mode)
 	if mode == "dark" {
 		wruntime.WindowSetDarkTheme(b.ctx)
 		wruntime.WindowSetBackgroundColour(b.ctx, 0x14, 0x13, 0x12, 0xff)
@@ -1310,8 +1318,7 @@ func (b *Backend) ApplyHosts(entries []string) error {
 	if err != nil {
 		return err
 	}
-	b.a.Cfg.Hosts.Entries = clean
-	b.a.Cfg.Hosts.Manage = true
+	b.a.Cfg.SetHosts(true, clean)
 	if err := b.a.SaveConfig(); err != nil {
 		return err
 	}
@@ -1330,7 +1337,7 @@ func (b *Backend) RemoveHosts() error {
 	if err := hostsmgr.Remove(); err != nil {
 		return err
 	}
-	b.a.Cfg.Hosts.Manage = false
+	b.a.Cfg.SetHosts(false, nil)
 	if err := b.a.SaveConfig(); err != nil {
 		return err
 	}
@@ -1347,8 +1354,7 @@ func (b *Backend) SelfTest() { go b.runSelfTest() }
 // runSelfTest 真正跑一轮（同步）。走 selfTestGate 排队：体检与按钮可能同时要结果，
 // 排队比重复探测好 —— 探活是对端可见的动作，能少发就少发。
 func (b *Backend) runSelfTest() {
-	chains := append([]config.Chain(nil), b.a.Cfg.Chains...)
-	_ = b.a.Cfg.Routes // 探针目标改为从 hosts 取真实主机 IP，不再用规则网段
+	chains := b.a.Cfg.ChainsSnapshot()
 	if len(chains) == 0 {
 		b.emit("notify", NotifyView{Title: "无法自检", Text: "还没有配置任何链", Kind: "warn"})
 		return
@@ -1546,7 +1552,7 @@ func probeIPsForChain(cfg *config.Config, chainName string) []net.IP {
 	// 真实例子：xaby-dev 那条规则的网段里全是大网段，但目标里有 172.16.20.172/32、
 	// 219.145.88.134/32、39.103.146.155/32 —— 以前只去 hosts 里找，找不到就报“跳过”，
 	// 而目标其实就摆在眼前。多个时全部返回（调用方逐个试到底：第一个可能恰好没开）。
-	for _, rt := range cfg.Routes {
+	for _, rt := range cfg.RoutesSnapshot() {
 		if rt.Chain != chainName {
 			continue
 		}
@@ -1568,7 +1574,7 @@ func probeIPsForChain(cfg *config.Config, chainName string) []net.IP {
 	}
 
 	var nets []*net.IPNet
-	for _, rt := range cfg.Routes {
+	for _, rt := range cfg.RoutesSnapshot() {
 		if rt.Chain != chainName {
 			continue
 		}
@@ -1724,7 +1730,7 @@ func (b *Backend) GetCountDirect() CountDirectView {
 
 // SetCountDirect 开关直连统计。改完要重启（过滤器在启动时装配），所以顺手重启一下。
 func (b *Backend) SetCountDirect(on bool) error {
-	b.a.Cfg.Tuning.CountDirect = on
+	b.a.Cfg.SetCountDirect(on)
 	if err := b.a.SaveConfig(); err != nil {
 		return err
 	}

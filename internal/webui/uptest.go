@@ -20,7 +20,7 @@ import (
 // TestUpstream 对每条链的原生上游做一次真实探测。不需要管理员权限。
 func TestUpstream(cfg *config.Config) {
 	fmt.Println("=== 原生上游链路实测（不经 gost）===")
-	if len(cfg.Chains) == 0 {
+	if len(cfg.ChainsSnapshot()) == 0 {
 		fmt.Println("  配置里没有链")
 		return
 	}
@@ -31,7 +31,7 @@ func TestUpstream(cfg *config.Config) {
 	realHosts := realHostsByChain(cfg)
 
 	pass, fail := 0, 0
-	for _, ch := range cfg.Chains {
+	for _, ch := range cfg.ChainsSnapshot() {
 		up, err := upstream.Parse(ch.Forward)
 		if err != nil {
 			fmt.Printf("  [%s] 解析上游失败: %v\n", ch.Name, err)
@@ -73,7 +73,7 @@ func realHostsByChain(cfg *config.Config) map[string][]net.IP {
 	// 与界面自检用同一套口径（见 probeIPsForChain），否则会出现
 	// “界面能探活、命令行却说找不到主机”的不一致。
 	out := map[string][]net.IP{}
-	for _, rt := range cfg.Routes {
+	for _, rt := range cfg.RoutesSnapshot() {
 		for _, t := range rt.Targets {
 			t = strings.TrimSpace(t)
 			if ip := net.ParseIP(t); ip != nil && ip.To4() != nil {
@@ -93,7 +93,7 @@ func realHostsByChain(cfg *config.Config) map[string][]net.IP {
 		n     *net.IPNet
 	}
 	var nets []cidr
-	for _, rt := range cfg.Routes {
+	for _, rt := range cfg.RoutesSnapshot() {
 		for _, t := range rt.Targets {
 			if _, n, err := net.ParseCIDR(t); err == nil {
 				nets = append(nets, cidr{rt.Chain, n})
@@ -169,8 +169,9 @@ var _ = bufio.NewReader
 // 配置 → hosts 文件里的标记区块 → 内置默认。
 // （不能只读配置：默认配置的 entries 是空的，那样什么都探不到）
 func hostsEntriesFrom(cfg *config.Config) []string {
-	if len(cfg.Hosts.Entries) > 0 {
-		return cfg.Hosts.Entries
+	hosts := cfg.HostsCopy()
+	if len(hosts.Entries) > 0 {
+		return hosts.Entries
 	}
 	if block, ok, _, err := hostsmgr.Read(); err == nil && ok {
 		return block

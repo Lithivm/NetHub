@@ -91,7 +91,7 @@ func (b *Backend) diagReport() string {
 	}
 
 	s.WriteString("\n── 规则（自上而下，命中即停）──\n")
-	for i, r := range b.a.Cfg.Routes {
+	for i, r := range b.a.Cfg.RoutesSnapshot() {
 		ports := ""
 		if len(r.Ports) > 0 {
 			ports = "  端口 " + strings.Join(r.Ports, ",")
@@ -140,7 +140,7 @@ func (b *Backend) diagReport() string {
 	hostsPath := hostsmgr.Path()
 	_, hostsInFile, _, _ := hostsmgr.Read()
 	fmt.Fprintf(&s, "  hosts：%s（已托管标记：%v）\n", hostsPath, hostsInFile)
-	fmt.Fprintf(&s, "  hosts 托管开关：%v\n", b.a.Cfg.Hosts.Manage)
+	fmt.Fprintf(&s, "  hosts 托管开关：%v\n", b.a.Cfg.HostsCopy().Manage)
 	return s.String()
 }
 
