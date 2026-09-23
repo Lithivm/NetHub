@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"time"
@@ -65,6 +66,11 @@ func (u *Upstream) ProbeAuth(timeout time.Duration) ProbeAuthResult {
 		return res
 	}
 	if err := u.ConnectOn(conn, ip, ProbePublicPort, timeout); err != nil {
+		// 认证被拒是真的坏（旧版把这里一律当“只是出不了公网”，口令错了也报可用）
+		var ae *ProxyAuthError
+		if errors.As(err, &ae) {
+			return ProbeAuthResult{Latency: time.Since(start), AuthOK: false, Err: err}
+		}
 		// 认证已过，只是出口出不了公网 —— 很多客户出口就是这样，不算故障
 		return res
 	}

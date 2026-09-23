@@ -107,11 +107,7 @@ func (e *Engine) candidates(ch config.Chain) []int {
 	bad := make([]int, 0, n)
 	for i := 0; i < n; i++ {
 		idx := (start + i) % n
-		h := (*upHealth)(nil)
-		if idx < len(hs) {
-			h = hs[idx]
-		}
-		if h != nil && !h.checked.IsZero() && !h.ok {
+		if e.upKnownBad(hs, idx) {
 			bad = append(bad, idx)
 			continue
 		}
@@ -140,17 +136,26 @@ func (e *Engine) candidatesFor(ch config.Chain, key string) []int {
 	bad := make([]int, 0, n)
 	for i := 0; i < n; i++ {
 		idx := (start + i) % n
-		var hh *upHealth
-		if idx < len(hs) {
-			hh = hs[idx]
-		}
-		if hh != nil && !hh.checked.IsZero() && !hh.ok {
+		if e.upKnownBad(hs, idx) {
 			bad = append(bad, idx)
 			continue
 		}
 		good = append(good, idx)
 	}
 	return append(good, bad...)
+}
+
+// upKnownBad 一条上游是否“已知坏”。
+//
+// 必须在锁下读 hs[idx] 的字段：markUp 会在后台探活协程里写它们。
+func (e *Engine) upKnownBad(hs []*upHealth, idx int) bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if idx < 0 || idx >= len(hs) || hs[idx] == nil {
+		return false
+	}
+	h := hs[idx]
+	return !h.checked.IsZero() && !h.ok
 }
 
 // fnv32a FNV-1a 32 位哈希（标准库 hash/fnv 的实现，自己写一份免得多一个依赖）。
@@ -261,15 +266,24 @@ func (e *Engine) ChainHealth() []ChainHealthView {
 			Probe:    ch.ProbeInterval().String(),
 		}
 		hs := e.healthOf(ch)
-		for i, raw := range e.cfg.UpstreamsResolved(ch) {
+		ups := e.cfg.UpstreamsResolved(ch)
+		for i, raw := range ups {
 			uv := UpHealthView{URL: maskUpstream(raw)}
-			if i < len(hs) && hs[i] != nil && !hs[i].checked.IsZero() {
+			// 在锁下拷贝一条观测记录：markUp 会在探活协程里并发写它。
+			e.mu.RLock()
+			var h upHealth
+			have := i < len(hs) && hs[i] != nil
+			if have {
+				h = *hs[i]
+			}
+			e.mu.RUnlock()
+			if have && !h.checked.IsZero() {
 				uv.Known = true
-				uv.OK = hs[i].ok
-				uv.Error = hs[i].err
-				uv.Checked = hs[i].checked.Format("15:04:05")
-				if hs[i].ok {
-					uv.Latency = fmt.Sprintf("%d ms", hs[i].latency.Milliseconds())
+				uv.OK = h.ok
+				uv.Error = h.err
+				uv.Checked = h.checked.Format("15:04:05")
+				if h.ok {
+					uv.Latency = fmt.Sprintf("%d ms", h.latency.Milliseconds())
 				}
 			}
 			v.Upstreams = append(v.Upstreams, uv)

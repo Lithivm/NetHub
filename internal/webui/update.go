@@ -212,16 +212,20 @@ func UpdateNow(progDir string, progress func(stage, text string, pct int)) (stri
 		return "", err
 	}
 
-	if asset.SHA256 != "" {
-		progress("verify", "正在校验完整性…", -1)
-		sum, err := fileSHA256(zipPath)
-		if err != nil {
-			return "", err
-		}
-		if !strings.EqualFold(sum, asset.SHA256) {
-			return "", fmt.Errorf("下载包校验不通过（期望 %s…，实际 %s…），已中止，没有动程序文件",
-				asset.SHA256[:12], sum[:12])
-		}
+	// 摘要必须校验：下载走的是 HTTP + 各种代理/镜像，不能只靠“来源是 GitHub 就信”。
+	// 官方 API 从 2025 起会给出 sha256 摘要；拿不到就拒绝自动更新（fail-closed）。
+	if asset.SHA256 == "" {
+		return "", fmt.Errorf("发布包没有 sha256 摘要，无法校验完整性 —— 已中止，没有动程序文件" +
+			"（请到 GitHub Release 手动下载）")
+	}
+	progress("verify", "正在校验完整性…", -1)
+	sum, err := fileSHA256(zipPath)
+	if err != nil {
+		return "", err
+	}
+	if !strings.EqualFold(sum, asset.SHA256) {
+		return "", fmt.Errorf("下载包校验不通过（期望 %s…，实际 %s…），已中止，没有动程序文件",
+			asset.SHA256[:12], sum[:12])
 	}
 
 	progress("stage", "正在解包…", -1)

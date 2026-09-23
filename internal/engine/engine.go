@@ -71,8 +71,13 @@ type connState struct {
 
 	// fakeName/realDst：DNS 接管相关。目标是我们发的假 IP 时，fakeName 是它对应的
 	// 域名，realDst 是这个域名在本机解析出的**真实 IP**（假 IP 绝不能拿去连）。
+	//
+	// ⚠ st.dst 是“**应用实际连的那个地址**”（假 IP 场景下就是假 IP），**发布后不再修改**：
+	//   - rewriteInbound 必须用它作回包源地址，否则应用内核不认（它连的是假 IP）；
+	//   - 它同时还被 Conns/recentTargets/checkUnrelayed 在锁下读，改了就是数据竞争。
+	// 真实 IP 只用于拨号与展示，存在 realDst（原子，允许在包路径之外写）。
 	fakeName string
-	realDst  net.IP
+	realDst  atomic.Value // net.IP：本机解析出的真实 IP（未解析到时为 nil）
 
 	last    atomic.Int64  // unix nano：最后一次看到包/数据的时间
 	up      atomic.Uint64 // 应用 → 目标 的字节（直连只能统计出方向）
@@ -90,6 +95,22 @@ type connState struct {
 }
 
 func (st *connState) touch() { st.last.Store(time.Now().UnixNano()) }
+
+// realTarget 真实目标 IP（未解析到返回 nil）。
+func (st *connState) realTarget() net.IP {
+	if v, ok := st.realDst.Load().(net.IP); ok {
+		return v
+	}
+	return nil
+}
+
+// displayTarget 展示/巡检用的目标：优先真实 IP，拿不到就用应用连的地址。
+func (st *connState) displayTarget() net.IP {
+	if r := st.realTarget(); r != nil {
+		return r
+	}
+	return st.dst
+}
 
 func (st *connState) fail(msg string) { st.errText.Store(msg) }
 
@@ -189,7 +210,7 @@ func (e *Engine) Conns(limit int, withProc bool) []ConnView {
 			}
 		}
 		out = append(out, ConnView{
-			Target:  fmt.Sprintf("%s:%d", st.dst, st.dport),
+			Target:  fmt.Sprintf("%s:%d", st.displayTarget(), st.dport),
 			Action:  st.action.String(),
 			Chain:   st.chain,
 			Proc:    name,
@@ -852,7 +873,8 @@ func (e *Engine) handleConn(c net.Conn) {
 	// 上游是公网中转服务器、解析不到（host unreachable）—— 所以不能默认透传。
 	host, hasName := e.nameOf(st.dst)
 	// 目标是我们发的假 IP：绝不能拿它去连（那是个不存在的地址）。
-	// 先换回真实 IP，后续流程与“具体域名”完全一致。
+	// st.dst 保持“应用连的那个地址”（回包改写要用），真实 IP 单独放 st.realDst，
+	// 拨号/展示统一走 dialDst。
 	if e.isFakeIP(st.dst) {
 		name := host
 		st.fakeName = name
@@ -866,8 +888,7 @@ func (e *Engine) handleConn(c net.Conn) {
 		}
 		real := e.resolveReal(name)
 		if real != nil {
-			st.realDst = real
-			st.dst = real
+			st.realDst.Store(real)
 			// 把“名字 → 真实 IP”记进名字表。两个作用：
 			//  ① 界面上的通配规则能显示“已覆盖 N 个 IP”（否则接管过的名字永远是空的，
 			//     看起来像“这条规则什么都不拦”—— 而它刚刚才拦过）；
@@ -878,6 +899,7 @@ func (e *Engine) handleConn(c net.Conn) {
 			e.bus.Info("DNS 接管：假 IP %s → %s 本机解不开，交给上游解析", st.dst, name)
 		}
 	}
+	dialDst := st.displayTarget() // 假 IP 已解析则用真实 IP，否则保持原地址
 	mode := e.cfg.DomainResolveMode()
 	var up net.Conn
 	var err error
@@ -894,22 +916,21 @@ func (e *Engine) handleConn(c net.Conn) {
 	}
 	// 假 IP 且本机解不开：只能交给上游（不能拿假 IP 当目标）。
 	// 其余情况保持原有语义：按 DomainResolve 配置走 local / upstream / auto。
-	if e.isFakeIP(st.dst) {
-		ebus := e.bus
-		ebus.Info("[%s] 目标 %s 是假 IP（无真实 IP），只能交给上游解析域名 %s", st.chain, st.dst, host)
+	if e.isFakeIP(st.dst) && st.realTarget() == nil {
+		e.bus.Info("[%s] 目标 %s 是假 IP（无真实 IP），只能交给上游解析域名 %s", st.chain, st.dst, host)
 		tryName()
 	} else {
 		switch {
 		case mode == "upstream" && hasName:
 			if !tryName() {
-				up, err = e.dialUpstreamKeyed(ch, st.dst, st.dport, st.app.String())
+				up, err = e.dialUpstreamKeyed(ch, dialDst, st.dport, st.app.String())
 			}
 		case mode == "upstream":
-			up, err = e.dialUpstreamKeyed(ch, st.dst, st.dport, st.app.String())
+			up, err = e.dialUpstreamKeyed(ch, dialDst, st.dport, st.app.String())
 		default: // local / auto：先用本机解析出的 IP
-			up, err = e.dialUpstreamKeyed(ch, st.dst, st.dport, st.app.String())
+			up, err = e.dialUpstreamKeyed(ch, dialDst, st.dport, st.app.String())
 			if err != nil && mode == "auto" && hasName {
-				e.bus.Info("[%s] 按 IP %s 连不上（%v），改用域名 %s 交给上游再试", st.chain, st.dst, err, host)
+				e.bus.Info("[%s] 按 IP %s 连不上（%v），改用域名 %s 交给上游再试", st.chain, dialDst, err, host)
 				tryName()
 			}
 		}
@@ -926,13 +947,13 @@ func (e *Engine) handleConn(c net.Conn) {
 		//     那只是我们“查不到”的哨兵值，打在日志里纯属误导（用户以为多了个进程）。
 		if st.procName == "" {
 			e.bus.Info("tunnel.down: chain=%s target=%s:%d proc=unknown src_port=%d err=%s",
-				st.chain, st.dst, st.dport, sport, firstLine(err.Error()))
+				st.chain, dialDst, st.dport, sport, firstLine(err.Error()))
 			st.fail(err.Error())
 			e.finish(st)
 			return
 		}
 		e.bus.Error("[%s] 隧道建立失败 %s:%d（进程 %s，PID %d，源端口 %d）",
-			st.chain, st.dst, st.dport, st.procName, st.pid, sport)
+			st.chain, dialDst, st.dport, st.procName, st.pid, sport)
 		for _, line := range strings.Split(err.Error(), "\n") {
 			e.bus.Error("    %s", line)
 		}
@@ -942,7 +963,7 @@ func (e *Engine) handleConn(c net.Conn) {
 	}
 	defer up.Close()
 
-	e.bus.Info("relay.up: chain=%s target=%s:%d src_port=%d", st.chain, st.dst, st.dport, sport)
+	e.bus.Info("relay.up: chain=%s target=%s:%d src_port=%d", st.chain, dialDst, st.dport, sport)
 
 	done := make(chan struct{}, 2)
 	go func() { copyAndClose(up, c, &st.up); done <- struct{}{} }()
@@ -950,7 +971,7 @@ func (e *Engine) handleConn(c net.Conn) {
 	<-done
 
 	e.finish(st)
-	e.bus.Info("relay.done: chain=%s target=%s:%d up=%s down=%s", st.chain, st.dst, st.dport,
+	e.bus.Info("relay.done: chain=%s target=%s:%d up=%s down=%s", st.chain, dialDst, st.dport,
 		humanBytes(st.up.Load()), humanBytes(st.down.Load()))
 }
 
@@ -2164,7 +2185,7 @@ func (e *Engine) rewriteInbound(h *divert.Handle, pkt []byte, addr *divert.Addre
 		return
 	}
 	st.touch()
-	copy(pkt[offSrcIP:offSrcIP+4], st.dst.To4())
+	copy(pkt[offSrcIP:offSrcIP+4], st.dst.To4()) // 源 = 应用实际连的那个地址（假 IP 场景就是假 IP）
 	putBE16(pkt, t+offSrcPort, st.dport)
 	copy(pkt[offDstIP:offDstIP+4], st.app.To4())
 	putBE16(pkt, t+offDstPort, st.appPort)
@@ -2309,7 +2330,7 @@ func (e *Engine) checkUnrelayed() {
 			continue
 		}
 		if d := now.Sub(st.start); d >= relayGrace {
-			fresh = append(fresh, bad{sport, fmt.Sprintf("%s:%d", st.dst, st.dport), st.chain, st.procName, d})
+			fresh = append(fresh, bad{sport, fmt.Sprintf("%s:%d", st.displayTarget(), st.dport), st.chain, st.procName, d})
 		}
 	}
 	e.mu.RUnlock()

@@ -125,7 +125,7 @@ func Parse(raw string) (*Upstream, error) {
 			up.Creds.Pass = p
 		}
 	}
-	if a := u.Query().Get("auth"); a != "" {
+	if a := queryAuth(u.RawQuery); a != "" {
 		dec, err := base64.StdEncoding.DecodeString(a)
 		if err != nil {
 			dec, err = base64.RawStdEncoding.DecodeString(strings.TrimRight(a, "="))
@@ -162,6 +162,25 @@ func Parse(raw string) (*Upstream, error) {
 		up.Verify = true
 	}
 	return up, nil
+}
+
+// queryAuth 取 ?auth= 的**原值**，不做 `+` → 空格 的转换。
+//
+// 为什么不用 u.Query()：base64 里会出现 `+`，而 url.Values 会把 `+` 解成空格，
+// 于是合法凭据被解成非法 base64，报“auth 参数不是合法的 base64” —— 概率约 1/64 每字符。
+// 这里用 PathUnescape：它会解 %2B，但不会把字面量 `+` 变成空格。
+func queryAuth(rawQuery string) string {
+	for _, kv := range strings.Split(rawQuery, "&") {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok || k != "auth" {
+			continue
+		}
+		if d, err := url.PathUnescape(v); err == nil {
+			return d
+		}
+		return v
+	}
+	return ""
 }
 
 // String 只用来打日志：把凭据遮蔽掉。

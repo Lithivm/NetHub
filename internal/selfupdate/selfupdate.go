@@ -112,8 +112,9 @@ func looksLikePE(b []byte) bool {
 	if len(b) < 64 || b[0] != 'M' || b[1] != 'Z' {
 		return false
 	}
-	off := int(b[0x3c]) | int(b[0x3d])<<8 // e_lfanew 低 16 位够用（实际是 4 字节）
-	if off+4 > len(b) {
+	// e_lfanew 是 4 字节小端；只读低 16 位会把大 PE（头部 >64KB）的偏移算错。
+	off := int(b[0x3c]) | int(b[0x3d])<<8 | int(b[0x3e])<<16 | int(b[0x3f])<<24
+	if off < 0 || off+4 > len(b) {
 		return false
 	}
 	return b[off] == 'P' && b[off+1] == 'E' && b[off+2] == 0 && b[off+3] == 0
@@ -187,6 +188,15 @@ func ApplyPending(progDir string, waitFor func(pid int, max time.Duration) bool)
 		waitFor(p.OldPID, 15*time.Second)
 	}
 	stageDir := filepath.Join(progDir, StageDirName)
+	// 统计“这次真正需要替换的文件数”：nethub.exe 若已在运行前换过就不算，
+	// 否则只含 exe 的更新包会因为 done 永远是空而永远清不掉 pending.json。
+	need := 0
+	for _, name := range p.Files {
+		if name == "nethub.exe" && p.ExeSwapped {
+			continue
+		}
+		need++
+	}
 	var done []string
 	var firstErr error
 	for _, name := range p.Files {
@@ -223,7 +233,7 @@ func ApplyPending(progDir string, waitFor func(pid int, max time.Duration) bool)
 		done = append(done, name)
 	}
 	// 全部换完了才清标记；有失败就留着，下次启动继续
-	if len(done) == len(p.Files) || (firstErr == nil && len(done) > 0) {
+	if len(done) == need {
 		_ = os.Remove(filepath.Join(stageDir, PendingName))
 		cleanupOld(progDir, p.Files)
 	}

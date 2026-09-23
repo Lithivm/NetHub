@@ -58,7 +58,7 @@ func (e *Engine) recentTargets(limit int) []targetRef {
 		if st.action != rules.ActionChain || st.last.Load() < cut {
 			continue
 		}
-		key := fmt.Sprintf("%s:%d", st.dst, st.dport)
+		key := fmt.Sprintf("%s:%d", st.displayTarget(), st.dport)
 		if seen[key] {
 			continue
 		}

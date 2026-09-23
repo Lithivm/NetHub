@@ -99,12 +99,13 @@ func sendConnectRequest(u *Upstream, conn net.Conn, target string, timeout time.
 		return fmt.Errorf("CONNECT 响应格式异常: %q", line)
 	}
 	code := fields[1]
+	if code == "407" {
+		return &ProxyAuthError{Line: line}
+	}
 	if !strings.HasPrefix(code, "2") {
-		// 把状态码带回去；常见的 407 = 需要认证
+		// 把状态码带回去
 		hint := ""
-		if code == "407" {
-			hint = "（代理要求认证，检查上游 URL 里的用户名/口令）"
-		} else if code == "403" {
+		if code == "403" {
 			hint = "（代理拒绝该目标）"
 		}
 		return fmt.Errorf("CONNECT 被代理拒绝: %s%s", line, hint)
@@ -137,6 +138,18 @@ func readResponseHeader(conn net.Conn, max int) ([]byte, error) {
 		}
 	}
 	return buf, fmt.Errorf("响应头超过 %d 字节仍未结束", max)
+}
+
+// ProxyAuthError 代理明确拒绝了认证（HTTP 407）。
+//
+// 单独一个类型是为了让探活能区分两种“CONNECT 失败”：
+//   - 认证失败（407）→ 链路真的不可用，AuthOK 必须为 false；
+//   - 出口出不了公网（其他错误）→ 很多客户就是这样，不能因此报“链路坏”。
+// 旧版 ProbeAuth 把两者混为一谈，HTTP 代理口令错了也报“可用”。
+type ProxyAuthError struct{ Line string }
+
+func (e *ProxyAuthError) Error() string {
+	return "CONNECT 认证失败（407）: " + e.Line
 }
 
 // sessionCache TLS 会话复用（A13）：同一上游的下一条连接可以跳过完整握手

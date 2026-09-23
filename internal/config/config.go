@@ -1691,7 +1691,13 @@ func DefaultPath() string {
 //
 // 不改变 c.path —— 导出不应该影响程序正在用的配置。
 func (c *Config) SaveAs(path string) error {
-	b, err := yaml.Marshal(c)
+	// 在副本上把历史遗留的 secret: 引用摊平成明文 —— 否则导出的文件头声称
+	// “forward 里含凭据”，实际却是无凭据版，换台机器这条链必然认证失败。
+	// 必须在副本上做（deep-copy Chains），不能改动程序正在用的配置。
+	cp := *c
+	cp.Chains = append([]Chain(nil), c.Chains...)
+	cp.flattenSecrets()
+	b, err := yaml.Marshal(&cp)
 	if err != nil {
 		return err
 	}
@@ -1756,7 +1762,9 @@ func stripCreds(raw string) string {
 	}
 	up, err := upstream.Parse(raw)
 	if err != nil {
-		return raw // 解析不了就原样留着，让校验阶段给出更直白的报错
+		// 解析不了也不能原样返回 —— 这个函数存在的唯一理由就是“无凭据版”。
+		// 用兜底抹掉 userinfo 与 ?auth=，避免把 user:pass@ 带进导出文件。
+		return redactUserinfo(raw)
 	}
 	if up.Creds.User == "" && up.Creds.Pass == "" {
 		return raw
@@ -1773,6 +1781,36 @@ func stripCreds(raw string) string {
 	}
 }
 
+// redactUserinfo 解析失败时的兜底脱敏：去掉 ?auth=，抹掉 scheme://userinfo@ 里的 userinfo。
+// 宁可把地址弄得不完整（导入时校验会报），也不能把口令泄进“无凭据版”。
+func redactUserinfo(raw string) string {
+	s := raw
+	if i := strings.Index(s, "?"); i >= 0 {
+		base, q := s[:i], s[i+1:]
+		kept := make([]string, 0, 2)
+		for _, kv := range strings.Split(q, "&") {
+			k, _, _ := strings.Cut(kv, "=")
+			if k == "auth" {
+				continue
+			}
+			kept = append(kept, kv)
+		}
+		s = base
+		if len(kept) > 0 {
+			s += "?" + strings.Join(kept, "&")
+		}
+	}
+	if i := strings.Index(s, "://"); i >= 0 {
+		rest := s[i+3:]
+		if at := strings.Index(rest, "@"); at >= 0 {
+			if cut := strings.IndexAny(rest, "/?#"); cut < 0 || at < cut {
+				s = s[:i+3] + rest[at+1:]
+			}
+		}
+	}
+	return s
+}
+
 // SaveAsRedacted 导出一份"无凭据但可导入"的配置。
 func (c *Config) SaveAsRedacted(path string) error {
 	cp := *c
@@ -1786,6 +1824,9 @@ func (c *Config) SaveAsRedacted(path string) error {
 				n.Forwards = append(n.Forwards, stripCreds(f))
 			}
 		}
+		// 历史遗留的 secret: 引用也要清掉：导出文件不会带 secrets.dat，
+		// 留个悬空引用只会在目标机器上报“解不开”。
+		n.Secret = ""
 		cp.Chains[i] = n
 	}
 	b, err := yaml.Marshal(&cp)

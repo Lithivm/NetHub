@@ -374,6 +374,10 @@ func DialTLSHost(addr string, c Creds, tlsConf *tls.Config, host string, dstPort
 	if strings.Contains(host, ":") {
 		return nil, fmt.Errorf("域名里不该带端口: %q", host)
 	}
+	// 长度必须校验：ATYP=域名是 1 字节长度，256 会变成 0（空域名）+ 后续字节错位。
+	if len(host) == 0 || len(host) > 255 {
+		return nil, fmt.Errorf("域名长度需在 1-255 字节: %q", host)
+	}
 	body := append([]byte{byte(len(host))}, []byte(host)...)
 	return dialWith(addr, c, tlsConf, atypDomain, body, dstPort, timeout)
 }
