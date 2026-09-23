@@ -685,7 +685,8 @@ function wireRowDrag(tableId, onMove) {
     document.body.style.userSelect = 'none';
   };
 
-  // 根据鼠标纵向位置把原行实时插到该去的位置（这一步就是“挤开上下卡片”）
+  // 根据鼠标纵向位置把原行实时插到该去的位置（这一步就是“挤开上下卡片”）。
+  // 用 FLIP 让被挤开的行平滑滑动，而不是瞬间跳过去。
   const preview = clientY => {
     const others = rows().filter(r => r !== d.row);
     let ref = null;
@@ -693,8 +694,26 @@ function wireRowDrag(tableId, onMove) {
       const rect = r.getBoundingClientRect();
       if (clientY < rect.top + rect.height / 2) { ref = r; break; }
     }
+    // 位置没变就别白做动画（否则每一帧都在重置 transform）
+    if ((!ref && tableEl.lastElementChild === d.row) || (ref && d.row.nextElementSibling === ref)) return;
+
+    const list = rows();
+    const before = new Map(list.map(r => [r, r.getBoundingClientRect().top]));
     if (ref) tableEl.insertBefore(d.row, ref);
     else tableEl.appendChild(d.row);
+
+    for (const r of list) {
+      if (r === d.row) continue; // 被拖的行由浮动卡片代表，不参与滑动
+      const was = before.get(r);
+      const delta = was - r.getBoundingClientRect().top;
+      if (!delta) continue;
+      // FLIP：先无过渡地放到旧位置，强制回流，再带过渡回到 0
+      r.style.transition = 'none';
+      r.style.transform = 'translateY(' + delta + 'px)';
+      void r.offsetHeight;
+      r.style.transition = 'background var(--ease), transform .16s cubic-bezier(.2,.8,.2,1)';
+      r.style.transform = '';
+    }
   };
 
   const onMouseMove = e => {
@@ -723,6 +742,8 @@ function wireRowDrag(tableId, onMove) {
     if (d) {
       if (d.ghost) d.ghost.remove();
       d.row.classList.remove('is-dragging'); // 内容立刻回来 = “马上落下”
+      d.row.style.transition = '';
+      d.row.style.transform = '';
     }
     d = null;
   };
@@ -1495,6 +1516,8 @@ const HELP = {
       '观察不到的情形：应用用了加密 DNS（DoH/DoT）、或自己实现了解析器 → 那时靠嗅探的通配规则不生效\n（接管开着的话仍然生效）。',
       '一个 IP 被多个域名共用时：命中任一匹配的名字即可（同一个 IP 属于通配覆盖范围就算命中）。',
       '想要“更稳”的写法：把关键内网域名同时写一条具体域名规则，不依赖观察。',
+      '另外：TCP 7680（Windows 更新传递优化）是**内置直连**的，不需要在规则里写 —— 它在客户内网里不该进隧道。',
+      '要关掉这个内置行为：config.yaml 的 tuning 下加 builtin_direct_disabled: true。',
     ],
   },
   hosts: {

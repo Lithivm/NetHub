@@ -858,6 +858,9 @@ type Tuning struct {
 	RaceAfter string `yaml:"race_after,omitempty"`
 	// CountDirect 是否把直连流量也纳入统计（默认 false：直连不进内核过滤器，完全零开销）。
 	CountDirect bool `yaml:"count_direct,omitempty"`
+	// BuiltinDirectDisabled 关掉“内置直连端口”（默认不写 = 内置生效）。
+	// 目前内置的是 TCP 7680（Windows 更新传递优化）：它在客户内网里不该进隧道。
+	BuiltinDirectDisabled bool `yaml:"builtin_direct_disabled,omitempty"`
 	// TLSSniff 是否只读噢探 TLS SNI / HTTP Host（默认开，但**只有写了通配域名规则时才真的干活**）。
 	//
 	// 为什么需要：通配域名的名字原本靠“看明文 DNS 应答”学；一旦应用用了加密 DNS
@@ -2024,6 +2027,16 @@ func (c *Config) CountDirectEnabled() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.Tuning.CountDirect
+}
+
+// BuiltinDirectEnabled 是否启用“内置直连端口”（默认开）。
+//
+// 现在内置的是 TCP 7680（Windows 更新传递优化）：客户内网里这些连接不该走隧道。
+// 以前靠配置里写一条 direct 规则实现；现在内置，规则列表里少一条噪音。
+func (c *Config) BuiltinDirectEnabled() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return !c.Tuning.BuiltinDirectDisabled
 }
 
 // TLSSniffEnabled 是否只读嗅探 TLS SNI / HTTP Host（默认开）。

@@ -506,6 +506,10 @@ func (e *Engine) Start() error {
 		e.bus.Info("    链 %s：%d 个上游，策略 %s，探测 %s",
 			ch.Name, len(ch.Upstreams()), ch.StrategyName(), ch.ProbeInterval())
 	}
+	if e.cfg.BuiltinDirectEnabled() {
+		e.bus.Info("builtin.direct: tcp dport=%d 直连（Windows 更新传递优化；关掉：tuning.builtin_direct_disabled: true）",
+			builtinDirectPort)
+	}
 
 	e.startLoop(e.acceptLoop)
 	e.startLoop(func() { e.packetLoop(h, nil) })
@@ -1124,6 +1128,13 @@ func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}) {
 		// 出方向：这条连接属于哪个进程（只在规则里写了进程条件时才查表，其余情况零开销）。
 		// 优先用连接上缓存的结论，避免每个包都查。
 		procName, procPID := e.flowProc(sport)
+
+		// 内置直连：Windows 更新传递优化走 TCP 7680，客户内网里不该进隧道。
+		// 以前要在规则里写一条 direct 规则来实现；现在内置，规则列表干净。
+		if dport == builtinDirectPort && e.cfg.BuiltinDirectEnabled() {
+			e.passThrough(h, pkt, addr, t, src, dst, sport, dport, flags, rules.ActionDirect, procName, procPID)
+			continue
+		}
 
 		// 方向判定不依赖 addr.Flags 的位布局：目标落在规则内 = 应用发出的包。
 		// 名字：通配域名只能靠“这个 IP 是哪个域名”匹配。两个来源：
@@ -2131,6 +2142,10 @@ func (e *Engine) ProcPath(pid uint32) string {
 
 // isSyn 只看 SYN（不带 ACK）—— 新连接的第一个包。
 func isSyn(flags byte) bool { return flags&0x02 != 0 && flags&0x10 == 0 }
+
+// builtinDirectPort 内置直连端口：Windows 更新传递优化（Delivery Optimization）。
+// 这些连接在客户内网里应直连，不该进隧道 —— 以前靠配置里写 direct 规则，现在内置。
+const builtinDirectPort = 7680
 
 // rewriteOutbound 把应用发往内网目标的包改成"发给本机 relay"。
 func (e *Engine) rewriteOutbound(h *divert.Handle, pkt []byte, addr *divert.Address, t int,

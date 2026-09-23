@@ -441,11 +441,8 @@ code, .mono { font-family: var(--font-mono); }
 /* 可拖拽的行（仅规则表 / 链路表）给个抓手光标；拖拽中的浮动行由 JS 定位 */
 #ruleTable .trow:not(.thead), #chainTable .trow:not(.thead) { cursor: grab; }
 #ruleTable .trow:not(.thead):active, #chainTable .trow:not(.thead):active { cursor: grabbing; }
-/* 拖拽中的原行 = 落点空槽：内容隐藏、只剩一个高亮框，随鼠标上下“挤开”邻行 */
-.trow.is-dragging {
-  background: var(--primary-soft);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 35%, transparent);
-}
+/* 拖拽中的原行 = 落点空位：内容隐藏（体积还在，就是它把上下卡片挤开），
+   不再画蓝色高亮槽 —— 视觉上交由跟手的浮动卡片表示。 */
 .trow.is-dragging > * { visibility: hidden; }
 /* 跟随鼠标的浮动卡片：只上下动（top 由 JS 设，left/width 固定） */
 .trow.row-ghost {
