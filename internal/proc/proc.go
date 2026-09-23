@@ -119,6 +119,7 @@ type Resolver struct {
 	byPort   map[uint16]uint32 // 本地端口 → PID
 	byPID    map[uint32]string // PID → 进程名
 	byFull   map[uint32]string
+	failed   map[uint32]time.Time // 取不到名字的 PID 短暂负缓存（避免反复开进程）
 	lastFill time.Time
 	interval time.Duration
 
@@ -133,6 +134,7 @@ func NewResolver() *Resolver {
 		byPort:   map[uint16]uint32{},
 		byPID:    map[uint32]string{},
 		byFull:   map[uint32]string{},
+		failed:   map[uint32]time.Time{},
 		interval: 500 * time.Millisecond,
 		done:     make(chan struct{}),
 	}
@@ -249,14 +251,20 @@ func (r *Resolver) ByPort(port uint16) (name string, pid uint32, ok bool) {
 func (r *Resolver) nameOf(pid uint32) (string, bool) {
 	r.mu.RLock()
 	n, ok := r.byPID[pid]
+	fa := r.failed[pid]
 	r.mu.RUnlock()
 	if ok && n != "" {
 		return n, true
 	}
+	// 受保护进程会一直打不开 —— 短 TTL 负缓存，别每次都去 OpenProcess。
+	// 注意：不能把 "?" 当名字存进 byPID（调用方会把它当成“查到了，名字是问号”）。
+	if !fa.IsZero() && time.Since(fa) < 10*time.Second {
+		return "", false
+	}
 	full, okFull := processName(pid, true)
 	if !okFull {
 		r.mu.Lock()
-		r.byPID[pid] = "?" // 记下来，别每次都去开进程（受保护进程会一直失败）
+		r.failed[pid] = time.Now()
 		r.mu.Unlock()
 		return "", false
 	}
@@ -264,6 +272,7 @@ func (r *Resolver) nameOf(pid uint32) (string, bool) {
 	r.mu.Lock()
 	r.byPID[pid] = base
 	r.byFull[pid] = full
+	delete(r.failed, pid)
 	r.mu.Unlock()
 	return base, true
 }

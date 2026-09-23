@@ -153,19 +153,23 @@ func (b *Bus) log(level, format string, args ...any) {
 	if len(b.ring) > b.max {
 		b.ring = b.ring[len(b.ring)-b.max:]
 	}
-	subs := b.subs
 	f := b.file
 	b.mu.Unlock()
 
 	if f != nil {
 		b.writeFile(l)
 	}
-	for _, s := range subs {
+	// 在 RLock 下发送：Unsubscribe（持写锁）要么在发送前把通道摘掉，
+	// 要么等发送完才关 —— 否则往已关闭的通道发送会直接 panic。
+	// 发送是非阻塞的，不会把写锁饿死。
+	b.mu.RLock()
+	for _, s := range b.subs {
 		select {
 		case s <- l:
 		default: // 订阅者跟不上，丢这一条，不要卡住引擎
 		}
 	}
+	b.mu.RUnlock()
 }
 
 func (b *Bus) Info(format string, a ...any)  { b.log("INFO", format, a...) }

@@ -43,6 +43,10 @@ func (c *Config) CheckOverlaps() []Overlap {
 			if !a.IsEnabled() || !b.IsEnabled() {
 				continue // 停用的规则不参与“互相影响”的结论
 			}
+			// 带进程/本机网段条件的规则不是总能命中，覆盖/影子结论不再成立 —— 跳过。
+			if len(a.Apps) > 0 || len(b.Apps) > 0 || len(a.LocalNets) > 0 || len(b.LocalNets) > 0 {
+				continue
+			}
 			// 端口：两边都要"有交集"才可能互抢
 			if !portsIntersect(a.Ports, b.Ports) {
 				continue
@@ -86,10 +90,8 @@ func (c *Config) CheckOverlaps() []Overlap {
 func ruleSpecificity(r Route) int {
 	best := 0
 	for _, t := range r.Targets {
-		if n := targetNet(t); n != nil {
-			if ones, _ := n.Mask.Size(); ones > best {
-				best = ones
-			}
+		if n := targetPrefixLen(t); n > best {
+			best = n
 		}
 	}
 	score := best * 10

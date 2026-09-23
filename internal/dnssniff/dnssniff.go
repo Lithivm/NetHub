@@ -97,10 +97,10 @@ func Parse(msg []byte) (Result, error) {
 	for i := 0; i < n; i++ {
 		name, next, err := parseName(msg, off)
 		if err != nil {
-			return r, err
+			break // 尾部截断：保留已解析到的记录，不整个扔掉（观测学习宁可少不可无）
 		}
 		if next+10 > len(msg) {
-			return r, ErrShort
+			break
 		}
 		typ := binary.BigEndian.Uint16(msg[next : next+2])
 		// class 在 next+2..next+4（IN=1）
@@ -108,7 +108,7 @@ func Parse(msg []byte) (Result, error) {
 		rdlen := int(binary.BigEndian.Uint16(msg[next+8 : next+10]))
 		rd := next + 10
 		if rd+rdlen > len(msg) {
-			return r, ErrShort
+			break
 		}
 		switch typ {
 		case 1: // A
@@ -123,7 +123,7 @@ func Parse(msg []byte) (Result, error) {
 		case 5: // CNAME
 			target, _, err := parseName(msg, rd)
 			if err != nil {
-				return r, err
+				break // 这一条坏了就跳过，别丢掉整包
 			}
 			cname[name] = target
 		}

@@ -15,7 +15,6 @@
 package engine
 
 import (
-	"fmt"
 	"net"
 	"time"
 	"unsafe"
@@ -137,9 +136,4 @@ func dnsCacheLookupA(name string) []string {
 		out = append(out, net.IPv4(data[0], data[1], data[2], data[3]).String())
 	}
 	return out
-}
-
-// seedLogLine 给调用方拼一行日志用。
-func seedLogLine(n int) string {
-	return fmt.Sprintf("DNS 缓存种子：灌入 %d 个名字（启动前已解析过的名字也能命中）", n)
 }

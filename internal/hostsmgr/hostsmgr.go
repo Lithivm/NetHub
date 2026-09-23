@@ -51,20 +51,44 @@ func Path() string {
 	return filepath.Join(root, "System32", "drivers", "etc", "hosts")
 }
 
-// hostOf 取一行 hosts 记录里的主机名（第一个字段），注释/空行返回空串。
-func hostOf(line string) string {
+// hostsOf 取一行 hosts 记录里的**全部**主机名（别名行 `1.2.3.4 a b` 要全拿到）。
+// 注释/空行返回 nil。
+func hostsOf(line string) []string {
 	s := strings.TrimSpace(line)
 	if s == "" || strings.HasPrefix(s, "#") {
-		return ""
+		return nil
 	}
 	if i := strings.IndexByte(s, '#'); i >= 0 { // 行尾注释
 		s = strings.TrimSpace(s[:i])
 	}
 	f := strings.Fields(s)
 	if len(f) < 2 {
+		return nil
+	}
+	out := make([]string, 0, len(f)-1)
+	for _, h := range f[1:] {
+		out = append(out, strings.ToLower(h))
+	}
+	return out
+}
+
+// hostOf 取一行 hosts 记录里的第一个主机名（注释/空行返回空串）。
+func hostOf(line string) string {
+	hs := hostsOf(line)
+	if len(hs) == 0 {
 		return ""
 	}
-	return strings.ToLower(f[1])
+	return hs[0]
+}
+
+// hostHits 这一行有没有我们要管的名字（别名行任一命中即算）。
+func hostHits(line string, ours map[string]bool) bool {
+	for _, h := range hostsOf(line) {
+		if ours[h] {
+			return true
+		}
+	}
+	return false
 }
 
 // splitLines 拆行（统一成不带 \r 的行）。
@@ -165,10 +189,10 @@ func Apply(entries []string) (ApplyResult, error) {
 		if skip {
 			continue
 		}
-		if h := hostOf(t); h != "" && ours[h] {
+		if hit := hostHits(t, ours); hit {
 			// 块外已有同名记录 → 我们接管它（值相同的就不必惊动用户）
-			if want := firstIPOf(clean, h); want != "" && firstIPOf([]string{t}, h) != want {
-				res.TakenOver = append(res.TakenOver, fmt.Sprintf("%s → %s", strings.TrimSpace(t), want+" "+h))
+			if want := firstIPOf(clean, hostsOf(t)[0]); want != "" && firstIPOf([]string{t}, hostsOf(t)[0]) != want {
+				res.TakenOver = append(res.TakenOver, fmt.Sprintf("%s → %s", strings.TrimSpace(t), want+" "+hostsOf(t)[0]))
 			}
 			continue
 		}
@@ -214,10 +238,17 @@ func Apply(entries []string) (ApplyResult, error) {
 	return res, nil
 }
 
-// firstIPOf 取某组行里某个主机名对应的 IP（第一条）。
+// firstIPOf 取某组行里某个主机名对应的 IP（第一条）。别名行任一别名命中即可。
 func firstIPOf(lines []string, host string) string {
 	for _, l := range lines {
-		if hostOf(l) != host {
+		hit := false
+		for _, h := range hostsOf(l) {
+			if h == host {
+				hit = true
+				break
+			}
+		}
+		if !hit {
 			continue
 		}
 		if f := strings.Fields(strings.TrimSpace(l)); len(f) >= 2 {
@@ -243,7 +274,7 @@ func outsideConflict(full string, ours map[string]bool) []string {
 		if in {
 			continue
 		}
-		if h := hostOf(t); h != "" && ours[h] {
+		if hostHits(t, ours) {
 			out = append(out, strings.TrimSpace(t))
 		}
 	}

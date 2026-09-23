@@ -62,9 +62,10 @@ type Upstream struct {
 	ServerName string
 }
 
-// looksMasked 这串是不是脱敏占位符（`***` / `xxx` / `••••` 这类）。
+// looksMasked 这串是不是脱敏占位符（`***` / `••••` 这类）。
 //
-// 只认“全是同一种占位字符且长≥3”—— 避免把短口令（如 `xx`）误判。
+// 只认“全是同一种占位字符且长≥3”。**刻意不含 `x`/`X`** —— 真实口令里有
+// “xxxxxx” 这种（被当成占位符会直接被拒，而它其实是合法凭据）。
 func looksMasked(s string) bool {
 	s = strings.TrimSpace(s)
 	if len([]rune(s)) < 3 {
@@ -72,7 +73,7 @@ func looksMasked(s string) bool {
 	}
 	for _, r := range s {
 		switch r {
-		case '*', 'x', 'X', '•', '·', '▪', '■':
+		case '*', '•', '·', '▪', '■':
 		default:
 			return false
 		}

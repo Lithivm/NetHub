@@ -280,7 +280,6 @@ func TestRejectMaskedCreds(t *testing.T) {
 		"socks5://***:***@1.2.3.4:1080",
 		"socks5+tls://1.2.3.4:10080?auth=" + cod("u:***"),
 		"socks5+tls://1.2.3.4:10080?auth=" + cod("****"),
-		"socks5://u:xxxx@1.2.3.4:1080",
 	}
 	for _, raw := range bad {
 		_, err := Parse(raw)
@@ -296,6 +295,8 @@ func TestRejectMaskedCreds(t *testing.T) {
 	good := []string{
 		"socks5://u:p@1.2.3.4:1080",
 		"socks5://u:xx@1.2.3.4:1080", // 两个字符不算占位符
+		"socks5://u:xxxx@1.2.3.4:1080",   // x 不再是占位符字符（真口令可能长这样）
+		"socks5://u:XXXXXX@1.2.3.4:1080", // 同上
 		"socks5://u:P@ss**word@1.2.3.4:1080",
 		"socks5://1.2.3.4:1080",
 	}

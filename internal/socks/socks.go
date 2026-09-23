@@ -183,6 +183,9 @@ func connect(conn net.Conn, atyp byte, addr []byte, dstPort uint16) error {
 	if _, err := io.ReadFull(conn, head[:]); err != nil {
 		return fmt.Errorf("socks CONNECT 应答读取失败: %w", err)
 	}
+	if head[0] != 0x05 {
+		return fmt.Errorf("socks CONNECT 应答版本不对: %d", head[0])
+	}
 	if head[1] != 0x00 {
 		return fmt.Errorf("socks CONNECT 被拒: %s", replyText(head[1]))
 	}
@@ -226,6 +229,9 @@ func authUserPass(conn net.Conn, c Creds) error {
 	if rep[1] != 0x00 {
 		// 不把凭据打进错误里
 		return fmt.Errorf("socks 认证被拒（用户名或口令不对）")
+	}
+	if rep[0] != 0x01 {
+		return fmt.Errorf("socks 认证应答版本不对: %d", rep[0])
 	}
 	return nil
 }
@@ -317,8 +323,6 @@ func socks4Text(code byte) string {
 	}
 }
 
-// DialSOCKS4TLS 与 DialSOCKS4 相同，但可先在连接上做 TLS。
-// （SOCKS4 协议本身没有 TLS，这里是"TLS 传输层 + SOCKS4 协议"的组合，gost 也允许这么写。）
 // PrepareSOCKS4 先连上代理（+可选 TLS），不做 CONNECT —— 给预热连接池用。
 // SOCKS4 没有“方法协商”，所以预备阶段就是 TCP+TLS。
 func PrepareSOCKS4(proxy string, tlsConf *tls.Config, timeout time.Duration) (net.Conn, error) {
@@ -353,6 +357,8 @@ func ConnectSOCKS4On(conn net.Conn, user, host string, dstPort uint16, timeout t
 	return nil
 }
 
+// DialSOCKS4TLS 与 DialSOCKS4 相同，但可先在连接上做 TLS。
+// （SOCKS4 协议本身没有 TLS，这里是"TLS 传输层 + SOCKS4 协议"的组合，gost 也允许这么写。）
 func DialSOCKS4TLS(proxy, user, host string, dstPort uint16, tlsConf *tls.Config,
 	timeout time.Duration) (net.Conn, error) {
 	c, err := PrepareSOCKS4(proxy, tlsConf, timeout)

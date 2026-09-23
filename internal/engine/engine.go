@@ -1709,64 +1709,14 @@ func (e *Engine) noteDoH(name string, dst net.IP) {
 
 // ───────────────────────── DNS 接管（发假 IP） ─────────────────────────
 
-// dnsTakeoverFilter 【只看】句柄的过滤器：出方向的 DNS 查询（UDP 53）。
-//
-// 故意保持最简（和探针验证过的那条一模一样）：只用一个目的端口条件。
-// “排掉我们自己的解析查询”不写在这里，而是**在代码里**用源端口判断 ——
-// 过滤器越简，越不容易出“看似合理但把包吃了”这种怪事。
-const dnsTakeoverFilter = "outbound and udp and udp.DstPort == 53"
-
 // 我们自己的 DNS 解析专用源端口段（区间选在这种不常用的高位段）。
+//
+// 接管查询用的是 dnsLoop 那只**只读嗅探**句柄（dnsSniffFilter 已含
+// `outbound and udp and udp.DstPort == 53`）；这里不再单独定义过滤器。
 const (
 	dnsProbePortLo = 53901
 	dnsProbePortHi = 53910
 )
-
-// seenKey 用“源端口 + DNS事务ID + 名字”做去重键（重放/乒乓的包会完全一样）。
-func seenKey(pkt []byte) (string, bool) {
-	u, payload, ok := udpPayload(pkt)
-	if !ok || len(payload) < 12 {
-		return "", false
-	}
-	q, okq := dnssniff.ParseQuery(payload)
-	if !okq {
-		return "", false
-	}
-	return fmt.Sprintf("%d/%d/%s", u.sport, q.ID, q.Name), true
-}
-
-// buildFakeAnswer 判断这条查询要不要接管；要就造一条应答。
-//
-// 返回的 resp 需要在调用方清掉 Outbound 位并重算校验和后再注入。
-func (e *Engine) buildFakeAnswer(pkt []byte) (resp []byte, name string, ok bool) {
-	info, payload, okp := udpPayload(pkt)
-	if !okp {
-		return nil, "", false
-	}
-	q, okq := dnssniff.ParseQuery(payload)
-	if !okq {
-		return nil, "", false
-	}
-	if !e.rules.WildcardMatch(q.Name) {
-		return nil, "", false
-	}
-	// 只处理 A（1）与 AAAA（28）：
-	//  AAAA 必须答一个**空的 NOERROR**（不能放行）——
-	//  否则真域名有 AAAA 时应用会走 IPv6 绕过我们（引擎只做 IPv4）。
-	switch q.Type {
-	case 1:
-		ip := e.fake.Assign(q.Name, dnsFakeTTL)
-		if ip == nil {
-			e.bus.Warn("DNS 接管：假 IP 池已满，放行原查询：%s", q.Name)
-			return nil, "", false
-		}
-		return buildDNSResponse(pkt, info, q, ip), q.Name, true
-	case 28:
-		return buildDNSResponse(pkt, info, q, nil), q.Name, true
-	default:
-		return nil, "", false
-	}
-}
 
 // noteTookOver 第一次接管某个名字时说一行（带名字与假 IP），之后静默计数。
 func (e *Engine) noteTookOver(name string) {

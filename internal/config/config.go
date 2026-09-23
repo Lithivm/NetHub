@@ -517,8 +517,8 @@ func (c *Config) validateLocked() error {
 			}
 		}
 	}
-	if !strings.Contains(c.Relay, ":") {
-		return fmt.Errorf("relay 应为 host:port，当前 %q", c.Relay)
+	if err := validListen(c.Relay); err != nil {
+		return err
 	}
 	if iv := strings.TrimSpace(c.Patrol.Interval); iv != "" && !strings.EqualFold(iv, "off") {
 		if d, err := time.ParseDuration(iv); err != nil || d <= 0 {
@@ -1266,6 +1266,11 @@ func shadowedTargetsIn(routes []Route, i int) []string {
 	if !rt.IsEnabled() {
 		return nil // 停用的规则谈不上“被覆盖”
 	}
+	// 带进程/本机网段条件的规则，覆盖关系不再简单可比（它们不是总能命中），
+	// 轻率判“被覆盖”会误导用户去删一条实际在工作的规则。
+	if len(rt.Apps) > 0 || len(rt.LocalNets) > 0 {
+		return nil
+	}
 	var out []string
 	for _, t := range rt.Targets {
 		tn := targetNet(t)
@@ -1277,6 +1282,9 @@ func shadowedTargetsIn(routes []Route, i int) []string {
 			r := routes[j]
 			if !r.IsEnabled() {
 				continue // 前面那条本来就是关着的，盖不住谁
+			}
+			if len(r.Apps) > 0 || len(r.LocalNets) > 0 {
+				continue // 它只对某些进程/网段生效，盖不住整条
 			}
 			if !PortsCover(r.Ports, rt.Ports) {
 				continue // 端口没被盖住，那这条还有活干
@@ -1297,6 +1305,45 @@ func shadowedTargetsIn(routes []Route, i int) []string {
 		}
 	}
 	return out
+}
+
+// validListen 校验 relay 地址（host:port，端口 0 = 自动分配）。
+// 以前用 strings.Contains(s,":") 当校验，"abc:" / "::" 全放过，直到 net.Listen 才报错。
+func validListen(s string) error {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return fmt.Errorf("relay 不能为空")
+	}
+	_, port, err := net.SplitHostPort(s)
+	if err != nil {
+		return fmt.Errorf("relay 应为 host:port（如 127.0.0.1:0），当前 %q", s)
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 0 || n > 65535 {
+		return fmt.Errorf("relay 端口不合法（0-65535），当前 %q", s)
+	}
+	return nil
+}
+
+// targetPrefixLen 目标的具体度（前缀长度）：CIDR 取掩码位数，裸 IP = 32，域名/其他 = 0。
+// 统一“谁更具体”的尺子（排序按钮、体检、重叠报告共用）。
+func targetPrefixLen(t string) int {
+	t = strings.TrimSpace(t)
+	if t == "" {
+		return 0
+	}
+	if !strings.Contains(t, "/") {
+		if ip := net.ParseIP(t); ip != nil && ip.To4() != nil {
+			return 32
+		}
+		return 0
+	}
+	if _, n, err := net.ParseCIDR(t); err == nil {
+		if ones, bits := n.Mask.Size(); bits == 32 {
+			return ones
+		}
+	}
+	return 0
 }
 
 // targetNet 归一化后的 CIDR → *net.IPNet（解析失败返回 nil）。
@@ -1377,10 +1424,8 @@ func (c *Config) SortRoutesBySpecificity() bool {
 		live = append(live, i)
 		best := 0
 		for _, t := range r.Targets {
-			if j := strings.IndexByte(t, '/'); j >= 0 {
-				if n, err := strconv.Atoi(t[j+1:]); err == nil && n > best {
-					best = n
-				}
+			if n := targetPrefixLen(t); n > best {
+				best = n
 			}
 		}
 		keys[i] = key{best, len(r.Ports), false}
@@ -1533,7 +1578,7 @@ func (c *Config) Precheck() []string {
 		}
 		out = append(out, detail)
 	}
-	if !strings.Contains(snap.Relay, ":") {
+	if validListen(snap.Relay) != nil {
 		out = append(out, "✗ relay 不是 host:port")
 	}
 

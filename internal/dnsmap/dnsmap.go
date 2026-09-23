@@ -310,12 +310,6 @@ func IsHostname(s string) bool {
 // IsWildcard 通配域名（*.x.com / main.*.com）。
 func IsWildcard(s string) bool { return strings.Contains(s, "*") }
 
-// WildcardSuffix 校验并归一化一个通配域名，返回可用来做后缀匹配的串。
-//
-//	*.his.com  →  ".his.com"
-//
-// **只接受 `*.域名` 这一种写法**：`his.*.com`、`*`、`*.` 这类拒绝并给出原因 ——
-// 规则要能被人工一眼看懂，中间星号的语义（DNS 里星号只代表一个标签）跟直觉差太远。
 // WildcardPattern 校验并归一化一个通配域名，返回可直接用来匹配的模式串。
 //
 // **`*` 可以出现在任意位置**（不再只限 `*.域名` 开头那种写法）：
