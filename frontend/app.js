@@ -135,11 +135,16 @@ function showPage(name) {
 /* ═══════════════ 规则智能：最具体优先 / 命中查询 ═══════════════ */
 
 async function sortRoutes() {
+  let changed = false;
   try {
-    await call('SortRoutes');
+    changed = await call('SortRoutes');
     await loadRoutes();
+  } catch (e) { fail(e); return; }
+  if (changed) {
     toast('已整理规则顺序', '具体的排前面（/32、带端口），本机自身 / 环回类放最后', 'success');
-  } catch (e) { fail(e); }
+  } else {
+    toast('顺序已经是最具体优先', '不需要调整', 'success');
+  }
 }
 
 async function explainTarget() {

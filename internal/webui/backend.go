@@ -702,11 +702,17 @@ func (b *Backend) SetRouteEnabled(index int, on bool) error {
 }
 
 // SortRoutes 按“最具体优先”重排规则（等于帮用户点了几十次上下箭头）。
-func (b *Backend) SortRoutes() error {
+//
+// 返回是否真的改动了顺序：已经是目标顺序时返回 (false, nil) —— “本来就是对的”
+// 不是错误（以前拿 error 当“无需调整”的信号，前端只好弹一个红色的失败提示）。
+func (b *Backend) SortRoutes() (bool, error) {
 	if !b.a.Cfg.SortRoutesBySpecificity() {
-		return fmt.Errorf("顺序已经是“最具体优先”，不需要调整")
+		return false, nil
 	}
-	return b.save("按最具体优先整理规则顺序")
+	if err := b.save("按最具体优先整理规则顺序"); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // PrecheckConfig 配置体检：返回人话报告（不修任何东西）。

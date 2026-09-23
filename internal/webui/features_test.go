@@ -74,9 +74,14 @@ func TestFeatureWiring(t *testing.T) {
 		t.Error("体检不该是空报告")
 	}
 
-	// 排序：已经有序时会明确告诉你“不需要调整”（不是错误）
-	if err := b.SortRoutes(); err != nil && !strings.Contains(err.Error(), "不需要调整") {
+	// 排序：已经有序时返回 changed=false（不是错误）
+	if _, err := b.SortRoutes(); err != nil {
 		t.Errorf("排序失败: %v", err)
+	}
+	if changed, err := b.SortRoutes(); err != nil {
+		t.Errorf("再次排序不该出错: %v", err)
+	} else if changed {
+		t.Error("第二次排序应该返回 changed=false（已经有序）")
 	}
 	if list := b.ListBackups(); len(list) == 0 {
 		t.Error("保存过配置后应有备份")
