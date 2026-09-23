@@ -438,21 +438,20 @@ code, .mono { font-family: var(--font-mono); }
 .trow .cell.stack .sub { font-size: var(--fs-xs); color: var(--muted); font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 序号/数字等宽，避免刷新时抖动 */
 .trow .idx, .trow .cell.mono, .kv b { font-variant-numeric: tabular-nums; }
-/* 行内操作：上/下移默认藏起来，鼠标扫到这一行（或键盘落到行内按钮）才出现 ——
-   默认只留「编辑 / 删除」，降噪；用 visibility 而不是 opacity，避免不可见却可点。 */
-.trow .cell.actions .btn-move { visibility: hidden; opacity: 0; transition: opacity var(--ease); }
-.trow:hover .cell.actions .btn-move,
-.trow:focus-within .cell.actions .btn-move { visibility: visible; opacity: 1; }
-@media (prefers-reduced-motion: reduce) {
-  .trow .cell.actions .btn-move { transition: none; }
-}
+/* 行拖拽排序：整行可拖（按钮/开关/输入框上不起拖，见 JS）。
+   用一条内侧主色线做落点提示，不真改 DOM 顺序（拖拽中移动源节点会把拖拽打断）。 */
+.trow:not(.thead)[draggable="true"] { cursor: grab; }
+.trow:not(.thead)[draggable="true"]:active { cursor: grabbing; }
+.trow.is-dragging { opacity: .45; }
+.trow.drop-before { box-shadow: inset 0 2px 0 0 var(--primary); }
+.trow.drop-after  { box-shadow: inset 0 -2px 0 0 var(--primary); }
 .trow .idx {
   display: inline-flex; align-items: center; justify-content: center;
   width: 20px; height: 20px; border-radius: var(--r-pill);
   background: var(--card-strong); color: var(--muted);
   font-size: var(--fs-xs); font-weight: 700; font-family: var(--font-mono);
 }
-.chain-grid { grid-template-columns: 120px minmax(200px, 1.4fr) 92px minmax(110px, 1fr) 150px; }
+.chain-grid { grid-template-columns: 120px minmax(200px, 1.4fr) 92px minmax(110px, 1fr) 104px; }
 
 /* 装机包导出结果 */
 .export-list { margin: var(--s2) 0 var(--s2) var(--s4); padding: 0; max-height: 40vh; overflow: auto; }
@@ -475,7 +474,7 @@ code, .mono { font-family: var(--font-mono); }
 .sim-badge.direct { background: var(--success-soft); color: var(--success); }
 .sim-badge.bad { background: var(--error-soft); color: var(--error); }
 .sim-badge.none { background: var(--card-strong); color: var(--muted); }
-.rule-grid  { grid-template-columns: 34px 46px 200px minmax(220px, 1.5fr) 130px 132px; }
+.rule-grid  { grid-template-columns: 34px 46px 200px minmax(220px, 1.5fr) 130px 104px; }
 .conn-grid  { grid-template-columns: 40px 132px minmax(160px, 1.2fr) 62px 92px 74px 84px 84px 92px; }
 /* 上游健康的小圆点（只探测到代理这一段） */
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; vertical-align: middle; background: var(--muted-soft); }
