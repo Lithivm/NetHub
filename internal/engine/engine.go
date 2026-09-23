@@ -259,6 +259,12 @@ type Engine struct {
 	// fake/injector/tookOver/tookSeen：DNS 接管（发假 IP）。
 	fake     *fakeip.Pool
 	injector *divert.Handle // filter=false 的“只塞”句柄
+
+	// 只读噢探句柄（dnsLoop / sniLoop 各自 Open 的）：它们阻塞在自己的 Recv 上，
+	// 关 e.done 唤醒不了 —— Stop 必须主动 Close，否则 wg.Wait() 卡住、退不出去。
+	sniffMu      sync.Mutex
+	sniffHandles []*divert.Handle
+	sniffClosing bool
 	tookOver atomic.Uint64
 	tookSeen map[string]bool
 	dnsBox   *dnsBlackbox // 排查用：DNS 黑匣子（tuning.dns_blackbox 打开时才有）
@@ -343,6 +349,29 @@ func (e *Engine) startLoop(fn func()) {
 	go fn()
 }
 
+// trackSniff 登记一个只读噢探句柄；返回 false 表示已经在停止中（调用方直接退出即可）。
+func (e *Engine) trackSniff(h *divert.Handle) bool {
+	e.sniffMu.Lock()
+	defer e.sniffMu.Unlock()
+	if e.sniffClosing {
+		return false
+	}
+	e.sniffHandles = append(e.sniffHandles, h)
+	return true
+}
+
+// closeSniffHandles 关闭所有只读噢探句柄（Stop 时调，用来唤醒卡在 Recv 的循环）。
+func (e *Engine) closeSniffHandles() {
+	e.sniffMu.Lock()
+	e.sniffClosing = true
+	hs := e.sniffHandles
+	e.sniffHandles = nil
+	e.sniffMu.Unlock()
+	for _, h := range hs {
+		h.Close()
+	}
+}
+
 // PoolStats 预热连接池的近况：命中次数、建了多少、当前养着几条。
 func (e *Engine) PoolStats() (taken, made, warm uint64) { return e.pool.stats() }
 
@@ -391,6 +420,9 @@ func (e *Engine) Start() error {
 	// 于是通配域名的第二只句柄永远建不起来（静默失效）。
 	e.dynHandle, e.dynStop, e.dynFilter, e.dynAt = nil, nil, "", time.Time{}
 	e.mu.Unlock()
+	e.sniffMu.Lock()
+	e.sniffClosing, e.sniffHandles = false, nil
+	e.sniffMu.Unlock()
 	if e.proc != nil {
 		e.proc.Start() // 端口→进程 的后台刷新（幂等、可重启）
 	}
@@ -416,7 +448,9 @@ func (e *Engine) Start() error {
 	// 就被它噎住 16 秒（点完启动半天没反应）。它只动名字表，结果经
 	// applyHostIPs → 动态过滤器补上（先开新句柄再关旧的，零丢包）。
 	if e.rules.HasWildcards() {
-		e.startLoop(func() { defer e.wg.Done(); e.seedDNSCache() })
+		// seedDNSCache 要 16s 且中途不可中断：**不计入 wg**，否则退出/重启要等它。
+		// 它只写名字表（线程安全），跑完顺带重建过滤器，不跑完也不影响服务可用。
+		go e.seedDNSCache()
 	}
 
 	// DNS 接管（发假 IP）：池子在这里建，它覆盖的**整段**假 IP 要进主过滤器 ——
@@ -601,6 +635,8 @@ func (e *Engine) Stop() {
 	if ln != nil {
 		ln.Close()
 	}
+	// 只读噢探句柄也要关：它们阻塞在 Recv 上，不关就永远不返回（wg.Wait 卡住）。
+	e.closeSniffHandles()
 	e.wg.Wait()
 	if run {
 		e.bus.Info("engine.stop")
@@ -1144,6 +1180,9 @@ func (e *Engine) dnsLoop() {
 		return
 	}
 	defer h.Close()
+	if !e.trackSniff(h) {
+		return // 已经在停止：直接退出（defer 会关 h）
+	}
 	e.bus.Info("dns.sniff: started mode=read-only scope=answers+queries")
 
 	buf := make([]byte, divert.MTUMax)
@@ -1574,6 +1613,9 @@ func (e *Engine) sniLoop() {
 		return
 	}
 	defer h.Close()
+	if !e.trackSniff(h) {
+		return // 已经在停止：直接退出（defer 会关 h）
+	}
 	e.bus.Info("sni.sniff: started mode=read-only ports=%d filter=%s", len(sniSniffPorts), filter)
 
 	buf := make([]byte, divert.MTUMax)
