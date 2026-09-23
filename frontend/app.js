@@ -621,7 +621,6 @@ async function loadChains() {
     acts.appendChild(btn('编辑', 'btn btn-xs', () => chainForm(i)));
     acts.appendChild(btn('删除', 'btn btn-xs btn-danger', () => delChain(c.name)));
     row.appendChild(acts);
-    row.draggable = true;
     t.appendChild(row);
   });
 }
@@ -663,69 +662,112 @@ function btn(text, cls, fn) {
 }
 
 /* 行拖拽排序（规则/链路通用）：按住行内任意位置上下拖，按钮/开关/输入框上不起拖。
-   拖拽中只画一条落点线（不移动源节点 —— 移动它会把 HTML5 拖拽打断）；松手才调后端落库。 */
+   自己实现而不用 HTML5 draggable：原生拖拽的“影子”会跟着鼠标左右跑，
+   而这里只要**竖向** —— 横向位移为主时不起拖，且浮动行只改 translateY。
+   拖拽中只画一条落点线，松手才调后端落库。 */
 function wireRowDrag(tableId, onMove) {
   const tableEl = document.getElementById(tableId);
   if (!tableEl) return;
-  let dragRow = null;
-  let pending = null; // { row, after }
   const rows = () => [...tableEl.children].filter(r => r.classList.contains('trow') && !r.classList.contains('thead'));
   const clearMarks = () => rows().forEach(r => r.classList.remove('drop-before', 'drop-after'));
 
-  tableEl.addEventListener('dragstart', e => {
-    const row = e.target.closest('.trow');
-    if (!row || row.classList.contains('thead')) return;
-    // 从按钮/开关/输入框上起拖 = 那是点击，不是拖拽
-    if (e.target.closest('button, input, textarea, select, a, .rule-switch')) { e.preventDefault(); return; }
-    dragRow = row;
-    row.dataset.dragFrom = String(rows().indexOf(row));
-    row.classList.add('is-dragging');
-    e.dataTransfer.effectAllowed = 'move';
-    try { e.dataTransfer.setData('text/plain', 'row'); } catch (_) { /* 某些环境不让写 */ }
-  });
+  let d = null; // { row, from, x0, y0, listRect, rowRect, ghost, started }
 
-  tableEl.addEventListener('dragover', e => {
-    if (!dragRow) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
+  const mark = clientY => {
     clearMarks();
-    pending = null;
-    const over = e.target.closest('.trow');
-    if (over && !over.classList.contains('thead') && over !== dragRow) {
-      const rect = over.getBoundingClientRect();
-      const after = e.clientY > rect.top + rect.height / 2;
-      over.classList.add(after ? 'drop-after' : 'drop-before');
-      pending = { row: over, after };
-    } else if (!over) {
-      // 拖到列表空白处 → 落到最后一行之后
-      const list = rows();
-      const last = list[list.length - 1];
-      if (last && last !== dragRow) { last.classList.add('drop-after'); pending = { row: last, after: true }; }
+    const list = rows();
+    let target = null, after = false;
+    for (const r of list) {
+      if (r === d.row) continue;
+      const rect = r.getBoundingClientRect();
+      const mid = rect.top + rect.height / 2;
+      if (clientY >= rect.top && clientY <= rect.bottom) {
+        target = r; after = clientY > mid; break;
+      }
+      if (clientY < rect.top) { target = r; after = false; break; }
+      target = r; after = true; // 落在所有行下方
     }
-  });
-
-  const finish = async () => {
-    const r = dragRow;
-    const p = pending;
-    dragRow = null;
-    pending = null;
-    clearMarks();
-    if (!r) return;
-    r.classList.remove('is-dragging');
-    const from = parseInt(r.dataset.dragFrom || '-1', 10);
-    delete r.dataset.dragFrom;
-    if (!p || from < 0) return;
-    let to = rows().indexOf(p.row);
-    if (to < 0) return;
-    if (p.after) to += 1;
-    if (from < to) to -= 1; // 抽走源行后，目标下标左移一位
-    if (to !== from) await onMove(from, to);
-    else clearMarks();
+    if (target && target !== d.row) {
+      target.classList.add(after ? 'drop-after' : 'drop-before');
+      d.pending = { row: target, after };
+    } else {
+      d.pending = null;
+    }
   };
 
-  tableEl.addEventListener('drop', e => { if (dragRow) { e.preventDefault(); finish(); } });
-  tableEl.addEventListener('dragend', () => { finish(); });
-  tableEl.addEventListener('dragleave', e => { if (!tableEl.contains(e.relatedTarget)) clearMarks(); });
+  const startGhost = () => {
+    const g = d.row.cloneNode(true);
+    g.classList.add('row-ghost');
+    g.classList.remove('is-dragging');
+    g.style.left = d.rowRect.left + 'px';
+    g.style.top = d.rowRect.top + 'px';
+    g.style.width = d.rowRect.width + 'px';
+    g.style.height = d.rowRect.height + 'px';
+    document.body.appendChild(g);
+    d.ghost = g;
+    d.row.classList.add('is-dragging');
+    document.body.style.userSelect = 'none';
+  };
+
+  const onMouseMove = e => {
+    if (!d) return;
+    const dy = e.clientY - d.y0;
+    const dx = e.clientX - d.x0;
+    if (!d.started) {
+      if (Math.abs(dy) < 4) return;                 // 还没动够，先不启动
+      if (Math.abs(dx) > Math.abs(dy)) { abort(); return; } // 横向为主 → 不是排序意图
+      d.started = true;
+      startGhost();
+    }
+    e.preventDefault();
+    // 影子只竖向移动，并夹在列表可视范围内（不左右跟、不跑出列表）
+    const listRect = tableEl.getBoundingClientRect();
+    const maxDy = (listRect.bottom - d.rowRect.height) - d.rowRect.top;
+    const minDy = listRect.top - d.rowRect.top;
+    const cy = Math.max(minDy, Math.min(maxDy, dy));
+    d.ghost.style.transform = 'translateY(' + cy + 'px)';
+    mark(e.clientY);
+  };
+
+  const cleanup = () => {
+    document.removeEventListener('mousemove', onMouseMove);
+    document.removeEventListener('mouseup', onMouseUp);
+    document.body.style.userSelect = '';
+    clearMarks();
+    if (d) {
+      d.row.classList.remove('is-dragging');
+      if (d.ghost) d.ghost.remove();
+    }
+    d = null;
+  };
+  const abort = () => cleanup();
+
+  const onMouseUp = async () => {
+    const drag = d;
+    if (!drag || !drag.started) { cleanup(); return; }
+    const pending = drag.pending;
+    const from = drag.from;
+    cleanup();
+    if (!pending || from < 0) return;
+    let to = rows().indexOf(pending.row);
+    if (to < 0) return;
+    if (pending.after) to += 1;
+    if (from < to) to -= 1; // 抽走源行后，目标下标左移一位
+    if (to !== from) await onMove(from, to);
+  };
+
+  tableEl.addEventListener('mousedown', e => {
+    if (e.button !== 0) return;
+    const row = e.target.closest('.trow');
+    if (!row || row.classList.contains('thead')) return;
+    // 从按钮/开关/输入框上按下 = 点击，不是拖拽
+    if (e.target.closest('button, input, textarea, select, a, .rule-switch')) return;
+    d = { row, from: rows().indexOf(row), x0: e.clientX, y0: e.clientY,
+          rowRect: row.getBoundingClientRect(), ghost: null, started: false, pending: null };
+    e.preventDefault();
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  });
 }
 
 /* ═══════════════ 空状态 ═══════════════ */
@@ -961,7 +1003,6 @@ async function loadRoutes() {
     acts.appendChild(btn('编辑', 'btn btn-xs', () => ruleForm(r.index)));
     acts.appendChild(btn('删除', 'btn btn-xs btn-danger', () => delRoute(r.index)));
     row.appendChild(acts);
-    row.draggable = true; // 整行按住可拖拽调顺序（按钮/开关上不起拖，见 wireRowDrag）
     t.appendChild(row);
   });
 }

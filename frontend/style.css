@@ -438,13 +438,19 @@ code, .mono { font-family: var(--font-mono); }
 .trow .cell.stack .sub { font-size: var(--fs-xs); color: var(--muted); font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 序号/数字等宽，避免刷新时抖动 */
 .trow .idx, .trow .cell.mono, .kv b { font-variant-numeric: tabular-nums; }
-/* 行拖拽排序：整行可拖（按钮/开关/输入框上不起拖，见 JS）。
-   用一条内侧主色线做落点提示，不真改 DOM 顺序（拖拽中移动源节点会把拖拽打断）。 */
-.trow:not(.thead)[draggable="true"] { cursor: grab; }
-.trow:not(.thead)[draggable="true"]:active { cursor: grabbing; }
+/* 可拖拽的行（仅规则表 / 链路表）给个抓手光标；拖拽中的浮动行由 JS 定位 */
+#ruleTable .trow:not(.thead), #chainTable .trow:not(.thead) { cursor: grab; }
+#ruleTable .trow:not(.thead):active, #chainTable .trow:not(.thead):active { cursor: grabbing; }
 .trow.is-dragging { opacity: .45; }
 .trow.drop-before { box-shadow: inset 0 2px 0 0 var(--primary); }
 .trow.drop-after  { box-shadow: inset 0 -2px 0 0 var(--primary); }
+/* 拖拽时跟随鼠标的“浮动行”：只上下动（transform 由 JS 只设 translateY） */
+.trow.row-ghost {
+  position: fixed; z-index: 80; pointer-events: none;
+  background: var(--card); border: 1px solid var(--hairline);
+  border-radius: var(--r-btn); box-shadow: var(--shadow-pop);
+  box-sizing: border-box;
+}
 .trow .idx {
   display: inline-flex; align-items: center; justify-content: center;
   width: 20px; height: 20px; border-radius: var(--r-pill);
