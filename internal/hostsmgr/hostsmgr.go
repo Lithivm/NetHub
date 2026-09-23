@@ -4,7 +4,7 @@
 // 唯一的例外见 Apply 里的"同名接管"：块外如果已经有一条同名记录，Windows 会**先**用
 // 那条（hosts 自上而下第一条生效），我们写的就没用了 —— 所以必须把它挪进我们的块。
 //
-// 写入用"临时文件 + 替换"（失败退化为原地写），写后回读校验，并刷一次 DNS 缓存
+// 写入用"唯一临时文件 + 原子替换"（失败重试，绝不原地截断写），写后回读校验，并刷一次 DNS 缓存
 // （否则系统缓存的旧解析会继续生效，表现成"改了没反应"）。
 package hostsmgr
 
@@ -13,7 +13,16 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 )
+
+// mu 串行化对 hosts 的读-改-写。
+//
+// 并发来源：后台 60s 自愈协程 + 界面保存/启停都在调 Apply/Remove/Verify。
+// 不加锁的后果很脏：① 自愈拿着旧条目把用户刚存的覆盖回去；
+// ② 两个写各写同一个临时文件、互相踩；③ 读到别人写到一半的内容。
+var mu sync.Mutex
 
 const (
 	beginMark = "# >>> NetHub 自动维护开始（勿手改本段内的内容）"
@@ -106,6 +115,9 @@ type ApplyResult struct {
 //
 // 首次会备份到 hosts.nethub.bak（只在备份不存在时创建，避免覆盖最初的原件）。
 func Apply(entries []string) (ApplyResult, error) {
+	mu.Lock()
+	defer mu.Unlock()
+
 	var res ApplyResult
 	p := Path()
 	_, _, full, err := Read()
@@ -238,26 +250,48 @@ func outsideConflict(full string, ours map[string]bool) []string {
 	return out
 }
 
-// writeFile 先临时文件 + 替换；替换失败（被别的程序/杀软占着）退化为原地覆盖。
+// writeFile 先写唯一临时文件 + 原子替换。
+//
+// 两个必须：
+//   - 临时文件用 CreateTemp 的**唯一名**（以前固定叫 hosts.nethub.tmp，两个写并发时互相踩）；
+//   - 替换失败时**绝不原地截断写** —— os.WriteFile 是 O_TRUNC，写到一半被杀软/断电打断
+//     会把客户的 hosts 弄成半截，那台机器解析全乱。宁可报错让人/自愈重试。
 func writeFile(p, content string) error {
-	tmp := p + ".nethub.tmp"
-	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {
-		return fmt.Errorf("写临时文件失败: %w", err)
+	dir := filepath.Dir(p)
+	f, err := os.CreateTemp(dir, "nethub-hosts-*.tmp")
+	if err != nil {
+		return fmt.Errorf("建临时文件失败: %w", err)
 	}
-	if err := os.Rename(tmp, p); err == nil {
-		return nil
-	}
-	// 原地写：先清空再写，避免留下半截
-	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+	tmp := f.Name()
+	_, werr := f.WriteString(content)
+	cerr := f.Close()
+	if werr != nil || cerr != nil {
 		_ = os.Remove(tmp)
-		return fmt.Errorf("替换 hosts 失败（原位写入也失败，可能被杀软/其他程序占用）: %w", err)
+		if werr != nil {
+			return fmt.Errorf("写临时文件失败: %w", werr)
+		}
+		return fmt.Errorf("关闭临时文件失败: %w", cerr)
+	}
+	_ = os.Chmod(tmp, 0o644)
+
+	// 替换可能被其他程序/杀软短暂占用 → 退避重试几次
+	var lastErr error
+	for i := 0; i < 5; i++ {
+		if err := os.Rename(tmp, p); err == nil {
+			return nil
+		}
+		lastErr = err
+		time.Sleep(time.Duration(50*(i+1)) * time.Millisecond)
 	}
 	_ = os.Remove(tmp)
-	return nil
+	return fmt.Errorf("替换 hosts 失败（可能被其他程序/杀软占用，已重试 5 次）: %w", lastErr)
 }
 
 // Remove 删掉我们的标记块（卸载/停用时调用）。
 func Remove() error {
+	mu.Lock()
+	defer mu.Unlock()
+
 	p := Path()
 	_, exists, full, err := Read()
 	if err != nil {
@@ -314,6 +348,9 @@ func Same(block []string, want []string) bool {
 // 为什么要定期查：改 hosts 的程序不止我们（杀软、微信 pin、Clash、VPN 都会写这个文件），
 // 而它一旦被改，表现就是"域名解析莫名其妙不对/时好时坏"—— 必须能改回来并说出来。
 func Verify(entries []string) (bool, string) {
+	mu.Lock()
+	defer mu.Unlock()
+
 	want := make([]string, 0, len(entries))
 	ours := map[string]bool{}
 	for _, e := range entries {

@@ -36,6 +36,10 @@ type App struct {
 	running   bool
 	lastErr   string        // 最近一次失败的原因（启动失败 / 拦截中断）；成功启动后清空
 	hostsStop chan struct{} // 停 hosts 定期自检
+
+	// opMu 串行化 Start/Stop/Restart（托盘、界面、-quit 都会分别调）。
+	// 不加锁时，“停止”与“启动”会同时动 Engine 与 hosts 自检，结果是半死状态。
+	opMu sync.Mutex
 }
 
 // startHostsWatch 定期检查 hosts 是否还是我们要的样子。
@@ -159,6 +163,12 @@ func (a *App) Running() bool {
 
 // Start 按顺序拉起：写 hosts → 起 gost → 等端口就绪 → 开拦截。
 func (a *App) Start() error {
+	a.opMu.Lock()
+	defer a.opMu.Unlock()
+	return a.startLocked()
+}
+
+func (a *App) startLocked() error {
 	a.setLastError("") // 重新启动就清掉上次的错
 	a.mu.Lock()
 	if a.running {
@@ -225,6 +235,12 @@ func (a *App) Start() error {
 
 // Stop 逆序收尾：停拦截 → 清 hosts（如果由我们托管）。
 func (a *App) Stop() {
+	a.opMu.Lock()
+	defer a.opMu.Unlock()
+	a.stopLocked()
+}
+
+func (a *App) stopLocked() {
 	a.mu.Lock()
 	was := a.running
 	a.running = false
@@ -244,11 +260,14 @@ func (a *App) Stop() {
 }
 
 // Restart 重启（改完配置后调用）。
+//
+// 引擎本身可重复启停（见 engine.Start/Stop），所以这里不再重建 Engine ——
+// 重建会把 a.Engine 指针换掉，而界面线程正无锁读它，那是一个数据竞争。
 func (a *App) Restart() error {
-	a.Stop()
-	// 允许再次启动：重置 bus 的一次性状态不存在，但 Engine 需要重建
-	a.Engine = engine.New(a.Bus, a.Rules, a.Cfg)
-	return a.Start()
+	a.opMu.Lock()
+	defer a.opMu.Unlock()
+	a.stopLocked()
+	return a.startLocked()
 }
 
 // SaveConfig 保存配置并同步内存副本。

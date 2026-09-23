@@ -1178,13 +1178,25 @@ func (b *Backend) ImportBatDir() (*ImportResult, error) {
 	if len(got) == 0 {
 		return nil, fmt.Errorf("这个目录里没找到含成对 -L/-F 的 gost 批处理：\n%s", dir)
 	}
+	res, err := b.applyBatEntries(got)
+	if err != nil {
+		return res, err
+	}
+	if err := b.save("从 .bat 导入"); err != nil {
+		return res, err
+	}
+	return res, nil
+}
+
+// applyBatEntries 把扫描到的 gost 批处理套到配置上（不落盘，便于测试）。
+func (b *Backend) applyBatEntries(got []gostbat.BatEntry) (*ImportResult, error) {
 	res := &ImportResult{}
 	for _, be := range got {
 		name := be.Name()
 		if idx := b.a.Cfg.FindChain(name); idx >= 0 {
-			// 同名链已存在 → 只更新 listen/forward（最常见的"换服务器"场景）
+			// 同名链已存在 → 只更新 upstream（最常见的"换服务器"场景）
 			cur := b.a.Cfg.Chains[idx]
-			cur.Forward = be.Forward
+			cur.SetUpstreams([]string{be.Forward}) // 必须整体替换，不能只写 Forward（见 SetUpstreams 注释）
 			if err := b.a.Cfg.UpdateChain(name, cur); err != nil {
 				res.Skipped = append(res.Skipped, fmt.Sprintf("%s：更新失败（%v）", name, err))
 			} else {
@@ -1201,9 +1213,6 @@ func (b *Backend) ImportBatDir() (*ImportResult, error) {
 		} else {
 			res.Added = append(res.Added, fmt.Sprintf("%s：已更新上游（来自 %s）", name, be.File))
 		}
-	}
-	if err := b.save("从 .bat 导入"); err != nil {
-		return res, err
 	}
 	return res, nil
 }

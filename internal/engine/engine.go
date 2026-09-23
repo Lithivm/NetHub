@@ -262,7 +262,10 @@ type Engine struct {
 	statActive  int
 	statPerRule map[string]uint64
 
-	stopOnce sync.Once
+	// startMu 串行化 Start/Stop：两者都要能在同一个 Engine 上反复调用
+	// （托盘“停止 → 启动”、界面重启都会走到），且不能互相插队。
+	startMu sync.Mutex
+	stopped bool // 已停过（Stop 幂等用；Start 时清掉）
 
 	// fatalMu/fatal 记下“拦截已中断”的原因（驱动被卸载、句柄被抢等）
 	fatalMu sync.Mutex
@@ -309,6 +312,16 @@ func New(bus *logbus.Bus, rs *rules.Set, cfg *config.Config) *Engine {
 	}
 }
 
+// startLoop 起一个受 WaitGroup 跟踪的协程。
+//
+// 每个循环各自 Add(1)，**不要用固定数字** —— 条件分支一多就必然算错：曾经写成
+// Add(10)，而没有通配域名规则（或命中 TUN 让路）时只起了 8 个，于是 Stop 里的
+// wg.Wait() 永远不返回；开了 TLS 嗅探又多一次 Done，直接把计数打成负数 panic。
+func (e *Engine) startLoop(fn func()) {
+	e.wg.Add(1)
+	go fn()
+}
+
 // PoolStats 预热连接池的近况：命中次数、建了多少、当前养着几条。
 func (e *Engine) PoolStats() (taken, made, warm uint64) { return e.pool.stats() }
 
@@ -335,13 +348,31 @@ func (e *Engine) Stats() (uint64, int) {
 
 // Start 启动拦截。返回后即处于运行状态。
 func (e *Engine) Start() error {
+	e.startMu.Lock()
+	defer e.startMu.Unlock()
+
 	e.setFatal(nil) // 重新启动就清掉“已中断”状态
 	e.mu.Lock()
 	if e.run {
 		e.mu.Unlock()
 		return fmt.Errorf("已在运行")
 	}
+	// 允许 Stop 之后再 Start：done/stopped 是“一次性”的，在这里重置。
+	// 托盘与界面都有“停止 → 启动”这条路径，不重置的话新协程会立刻读到已关闭的 done。
+	e.done = make(chan struct{})
+	e.stopped = false
+	// 清掉上一轮遗留的连接表与活跃计数（句柄、relay 都是新的）
+	e.conns = map[uint16]*connState{}
+	e.notices = nil
+	e.statActive = 0
+	// 动态过滤器也要清：旧句柄已在 Stop 里关了，如果不清 dynFilter，
+	// 重启后 rebuildDynFilter 会因为“过滤器字符串没变”直接 return，
+	// 于是通配域名的第二只句柄永远建不起来（静默失效）。
+	e.dynHandle, e.dynStop, e.dynFilter, e.dynAt = nil, nil, "", time.Time{}
 	e.mu.Unlock()
+	if e.proc != nil {
+		e.proc.Start() // 端口→进程 的后台刷新（幂等、可重启）
+	}
 
 	// 1) 先起 relay，拿到真实端口（端口可能配的是 0=自动分配，过滤器要用它）
 	ln, err := net.Listen("tcp", e.cfg.Relay)
@@ -364,7 +395,7 @@ func (e *Engine) Start() error {
 	// 就被它噎住 16 秒（点完启动半天没反应）。它只动名字表，结果经
 	// applyHostIPs → 动态过滤器补上（先开新句柄再关旧的，零丢包）。
 	if e.rules.HasWildcards() {
-		go e.seedDNSCache()
+		e.startLoop(func() { defer e.wg.Done(); e.seedDNSCache() })
 	}
 
 	// DNS 接管（发假 IP）：池子在这里建，它覆盖的**整段**假 IP 要进主过滤器 ——
@@ -421,15 +452,14 @@ func (e *Engine) Start() error {
 			ch.Name, len(ch.Upstreams()), ch.StrategyName(), ch.ProbeInterval())
 	}
 
-	e.wg.Add(10)
-	go e.acceptLoop()
-	go e.packetLoop(h, nil)
-	go e.janitor()
-	go e.relayWatch()
-	go e.nameLoop()
-	go e.healthLoop()
-	go e.targetLoop()
-	go e.localNetLoop()
+	e.startLoop(e.acceptLoop)
+	e.startLoop(func() { e.packetLoop(h, nil) })
+	e.startLoop(e.janitor)
+	e.startLoop(e.relayWatch)
+	e.startLoop(e.nameLoop)
+	e.startLoop(e.healthLoop)
+	e.startLoop(e.targetLoop)
+	e.startLoop(e.localNetLoop)
 	// 只读嗅探 DNS + SNI/Host：只有真的用了通配域名才开（否则一分钱不花）。
 	// 它们负责把“应用实际要去哪个名字”学回来，并维护动态过滤器。
 	if e.rules.HasWildcards() {
@@ -445,13 +475,16 @@ func (e *Engine) Start() error {
 		}
 	}
 	if e.rules.HasWildcards() && !e.tunBlocked {
-		go e.dnsLoop()
-		go e.dynFilterLoop()
+		e.startLoop(e.dnsLoop)
+		e.startLoop(e.dynFilterLoop)
 		// SNI/Host：应对加密 DNS（DoH/DoT）与自带解析器的客户端 ——
 		// 那条路看不了 DNS，但握手是明文的。可在设置里关掉。
 		if e.cfg.TLSSniffEnabled() {
-			go e.sniLoop()
+			e.startLoop(e.sniLoop)
 		}
+		// 名字表跨重启保留着（学习结果不清空），但动态过滤器是上一轮关掉的，
+		// 这里按当前已覆盖到的 IP 直接建起来，否则得等下一次 DNS 观测才恢复。
+		e.rebuildDynFilter()
 	}
 	// DNS 接管：不再新开“看”的句柄（实测过：再开一只句柄即使只读，也会把整个 DNS
 	// 搞熄）——看查询复用上面那只早已跑通的 dnsLoop 嗅探句柄；
@@ -480,15 +513,13 @@ func (e *Engine) Start() error {
 					e.bus.Info("DNS 接管：黑匣子已开启（%s）—— 每个查询/每次回答都记在里面", dnsBlackboxPath())
 				}
 				e.bus.Info("dns.takeover: started observe=shared-sniff inject=filter-false range=%s", e.fake.Range())
-				e.wg.Add(1)
-				go e.dnsTakeoverGuard()
+				e.startLoop(e.dnsTakeoverGuard)
 			}
 		}
 	}
 	return nil
 }
 
-// Stop 停止拦截并回收资源。
 // setFatal 记下“拦截已中断”的原因（nil = 正常）。
 func (e *Engine) setFatal(err error) {
 	e.fatalMu.Lock()
@@ -504,44 +535,55 @@ func (e *Engine) Fatal() error {
 }
 
 // Stop 停止拦截：关句柄（让 packetLoop 的 Recv 立刻返回）、关 relay、等协程退完。
+//
+// 幂等，且 Stop 之后可以再次 Start（状态在 Start 里重置）。
 func (e *Engine) Stop() {
+	e.startMu.Lock()
+	defer e.startMu.Unlock()
+
+	e.mu.Lock()
+	if e.stopped {
+		e.mu.Unlock()
+		return // 已经停过了
+	}
+	e.stopped = true
+	h, ln, run := e.handle, e.ln, e.run
+	dyn, dynStop := e.dynHandle, e.dynStop
+	inj := e.injector
+	done := e.done
+	e.handle, e.ln, e.run = nil, nil, false
+	e.dynHandle, e.dynStop = nil, nil
+	e.injector = nil
+	e.mu.Unlock()
+
 	e.pool.closeAll() // 池里的会话要主动关，否则退出时留下悬挂连接
 	if e.proc != nil {
 		e.proc.Stop()
 	}
-	e.stopOnce.Do(func() {
-		close(e.done)
 
-		e.mu.Lock()
-		h, ln, run := e.handle, e.ln, e.run
-		dyn, dynStop := e.dynHandle, e.dynStop
-		inj := e.injector
-		e.handle, e.ln, e.run = nil, nil, false
-		e.dynHandle, e.dynStop = nil, nil
-		e.injector = nil
-		e.mu.Unlock()
-
-		if h != nil {
-			h.Close() // 让 packetLoop 的 Recv 立刻返回错误
-		}
-		if inj != nil {
-			inj.Close()
-		}
-		e.dnsBox.Close()
-		if dynStop != nil {
-			close(dynStop) // 告诉动态句柄的循环“不是出错，是我们在换它”
-		}
-		if dyn != nil {
-			dyn.Close()
-		}
-		if ln != nil {
-			ln.Close()
-		}
-		e.wg.Wait()
-		if run {
-			e.bus.Info("engine.stop")
-		}
-	})
+	if done != nil {
+		close(done)
+	}
+	if h != nil {
+		h.Close() // 让 packetLoop 的 Recv 立刻返回错误
+	}
+	if inj != nil {
+		inj.Close()
+	}
+	e.dnsBox.Close()
+	if dynStop != nil {
+		close(dynStop) // 告诉动态句柄的循环“不是出错，是我们在换它”
+	}
+	if dyn != nil {
+		dyn.Close()
+	}
+	if ln != nil {
+		ln.Close()
+	}
+	e.wg.Wait()
+	if run {
+		e.bus.Info("engine.stop")
+	}
 }
 
 // ───────────────────────── relay ─────────────────────────

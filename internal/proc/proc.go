@@ -122,8 +122,9 @@ type Resolver struct {
 	lastFill time.Time
 	interval time.Duration
 
-	stopOnce sync.Once
-	done     chan struct{}
+	// started/done：可在 Stop 之后再次 Start（引擎启停是可重复的）。
+	started bool
+	done    chan struct{}
 }
 
 // NewResolver 建一个解析器（不自动开始刷新；用 Start 起后台循环）。
@@ -137,15 +138,25 @@ func NewResolver() *Resolver {
 	}
 }
 
-// Start 起后台刷新（幂等）。
+// Start 起后台刷新（幂等；Stop 之后可再次 Start）。
 func (r *Resolver) Start() {
+	r.mu.Lock()
+	if r.started {
+		r.mu.Unlock()
+		return
+	}
+	r.started = true
+	r.done = make(chan struct{})
+	done := r.done
+	r.mu.Unlock()
+
 	go func() {
 		tk := time.NewTicker(r.interval)
 		defer tk.Stop()
 		for {
 			r.refresh()
 			select {
-			case <-r.done:
+			case <-done:
 				return
 			case <-tk.C:
 			}
@@ -153,15 +164,30 @@ func (r *Resolver) Start() {
 	}()
 }
 
-// Stop 停掉后台刷新。
+// Stop 停掉后台刷新（幂等）。
 func (r *Resolver) Stop() {
-	r.stopOnce.Do(func() { close(r.done) })
+	r.mu.Lock()
+	if !r.started {
+		r.mu.Unlock()
+		return
+	}
+	r.started = false
+	done := r.done
+	r.done = nil
+	r.mu.Unlock()
+	if done != nil {
+		close(done)
+	}
 }
 
 // refresh 重读整张表（只保留出方向连接的本地端口；同端口以 LISTEN 之外的状态优先）。
 func (r *Resolver) refresh() {
 	rows, err := table()
+	r.mu.Lock()
+	// 失败也要推进 lastFill：否则 ByPort 里 fresh 恒为 false，每个连接都全量枚举一次 TCP 表。
+	r.lastFill = time.Now()
 	if err != nil {
+		r.mu.Unlock()
 		return
 	}
 	next := make(map[uint16]uint32, len(rows))
@@ -173,9 +199,7 @@ func (r *Resolver) refresh() {
 		// 同一端口可能同时有 LISTEN 与 ESTABLISHED（少见）——后写的覆盖，够用
 		next[port] = row.PID
 	}
-	r.mu.Lock()
 	r.byPort = next
-	r.lastFill = time.Now()
 	r.mu.Unlock()
 }
 
@@ -197,6 +221,9 @@ func (r *Resolver) ByPort(port uint16) (name string, pid uint32, ok bool) {
 	}
 
 	rows, err := table()
+	r.mu.Lock()
+	// 失败也推进 lastFill（理由同 refresh：避免退化成“每连接一次全表读”）
+	r.lastFill = time.Now()
 	if err == nil {
 		next := make(map[uint16]uint32, len(rows))
 		for _, row := range rows {
@@ -205,12 +232,10 @@ func (r *Resolver) ByPort(port uint16) (name string, pid uint32, ok bool) {
 				next[p] = row.PID
 			}
 		}
-		r.mu.Lock()
 		r.byPort = next
-		r.lastFill = time.Now()
 		pid, hit = next[port]
-		r.mu.Unlock()
 	}
+	r.mu.Unlock()
 	if !hit || pid == 0 {
 		return "", 0, false
 	}

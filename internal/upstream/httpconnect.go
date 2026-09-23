@@ -7,7 +7,7 @@
 package upstream
 
 import (
-	"bufio"
+	"bytes"
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
@@ -77,11 +77,18 @@ func sendConnectRequest(u *Upstream, conn net.Conn, target string, timeout time.
 		return fmt.Errorf("CONNECT 请求写入失败: %w", err)
 	}
 
-	// 只读状态行；2xx 表示隧道已建立
-	br := bufio.NewReader(conn)
-	line, err := br.ReadString('\n')
+	// 只读状态行；2xx 表示隧道已建立。
+	//
+	// 必须**只读到头部结束、不多读一个字节**：代理完全可能把 `200 ...\r\n\r\n`
+	// 与目标先发来的数据放在同一段里；用 bufio.Reader 会把这些数据一并吞进它自己的
+	// 缓冲区然后随缓冲丢弃，表现为“CONNECT 成功，但业务首包永远收不到”。
+	head, err := readResponseHeader(conn, 8192)
 	if err != nil {
 		return fmt.Errorf("读 CONNECT 响应失败: %w", err)
+	}
+	line := string(head)
+	if i := strings.Index(line, "\r\n"); i >= 0 {
+		line = line[:i]
 	}
 	line = strings.TrimRight(line, "\r\n")
 	if !strings.HasPrefix(line, "HTTP/") {
@@ -102,18 +109,34 @@ func sendConnectRequest(u *Upstream, conn net.Conn, target string, timeout time.
 		}
 		return fmt.Errorf("CONNECT 被代理拒绝: %s%s", line, hint)
 	}
-	// 读完响应头（到空行），否则残留的头部字节会被当成隧道数据
-	for {
-		l, err := br.ReadString('\n')
-		if err != nil {
-			return fmt.Errorf("读 CONNECT 响应头失败: %w", err)
-		}
-		if strings.TrimSpace(l) == "" {
-			break
-		}
-	}
 	_ = conn.SetDeadline(time.Time{})
 	return nil
+}
+
+// readResponseHeader 逐字节读到 HTTP 响应头结束（\r\n\r\n）。
+//
+// 为什么逐字节：net.Conn 没有 peek，任何带缓冲的读都可能把“隧道里的第一个数据字节”
+// 提前吃掉。响应头只有几百字节，代价可以忽略（TLS 连接内部有 record 缓冲，不会增加系统调用）。
+func readResponseHeader(conn net.Conn, max int) ([]byte, error) {
+	if max <= 0 {
+		max = 8192
+	}
+	buf := make([]byte, 0, 256)
+	one := make([]byte, 1)
+	end := []byte("\r\n\r\n")
+	for len(buf) < max {
+		n, err := conn.Read(one)
+		if n > 0 {
+			buf = append(buf, one[0])
+			if len(buf) >= 4 && bytes.Equal(buf[len(buf)-4:], end) {
+				return buf, nil
+			}
+		}
+		if err != nil {
+			return buf, err
+		}
+	}
+	return buf, fmt.Errorf("响应头超过 %d 字节仍未结束", max)
 }
 
 // sessionCache TLS 会话复用（A13）：同一上游的下一条连接可以跳过完整握手

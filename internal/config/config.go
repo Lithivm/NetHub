@@ -61,6 +61,22 @@ func (ch Chain) Upstreams() []string {
 	return nil
 }
 
+// SetUpstreams 用给定上游整体替换这条链的上游列表。
+//
+// 必须同时清掉 Forwards —— Upstreams() 优先返回 Forwards，只写 Forward 的话
+// 会被旧值盖住（“从 .bat 导入”曾经就是这样：界面报“已更新”，实际什么都没变）。
+func (ch *Chain) SetUpstreams(list []string) {
+	ch.Forward, ch.Forwards = "", nil
+	switch len(list) {
+	case 0:
+		return
+	case 1:
+		ch.Forward = list[0]
+	default:
+		ch.Forwards = append([]string(nil), list...)
+	}
+}
+
 // StrategyName 归一化后的策略名（默认 failover）。
 func (ch Chain) StrategyName() string {
 	switch strings.ToLower(strings.TrimSpace(ch.Strategy)) {

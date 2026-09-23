@@ -393,7 +393,7 @@ func doImportBats(cfgPath, dir string) error {
 		if i >= len(got) {
 			break
 		}
-		cfg.Chains[i].Forward = got[i].Forward
+		cfg.Chains[i].SetUpstreams([]string{got[i].Forward})
 	}
 	if err := cfg.Save(); err != nil {
 		return err

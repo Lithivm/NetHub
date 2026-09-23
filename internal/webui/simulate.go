@@ -129,7 +129,17 @@ func (b *Backend) simOne(tok string) SimRow {
 			row.Err = "不是合法的网段（如 10.0.0.0/24）"
 			return row
 		}
+		// 本工具只处理 IPv4：IPv6 网段（fe80::/10）能 ParseCIDR 成功，
+		// 但后面按 4 字节解析会直接 panic，所以必须在这里拦下。
+		if ipnet.IP.To4() == nil {
+			row.Err = "只支持 IPv4 网段（本工具不处理 IPv6）"
+			return row
+		}
 		ips := sampleCIDR(ipnet, simSample)
+		if len(ips) == 0 {
+			row.Err = "这个网段取不出可用地址"
+			return row
+		}
 		type verdict struct {
 			rule   string
 			ruleNo int
@@ -230,9 +240,21 @@ func splitSimTarget(tok string) (host string, port uint16, hasPort bool, err err
 
 // sampleCIDR 在一个网段里取最多 max 个代表性地址（首、尾，中间均匀取样）。
 func sampleCIDR(n *net.IPNet, max int) []net.IP {
+	if n == nil || n.IP.To4() == nil {
+		return nil // 只处理 IPv4（调用方已拦，这里再兜一道）
+	}
+	if max < 2 {
+		max = 2 // 下面有 max-1 做除数
+	}
 	base := binary.BigEndian.Uint32(n.IP.To4())
 	ones, bits := n.Mask.Size()
+	if ones < 0 || bits != 32 || ones > bits {
+		return nil
+	}
 	size := uint64(1) << uint(bits-ones)
+	if size == 0 {
+		return nil
+	}
 	if size <= uint64(max) {
 		out := make([]net.IP, 0, size)
 		for i := uint64(0); i < size; i++ {
