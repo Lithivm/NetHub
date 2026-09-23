@@ -271,14 +271,18 @@ func (a *App) Restart() error {
 }
 
 // SaveConfig 保存配置并同步内存副本。
+//
+// 顺序有讲究：**先编译规则、再落盘**。rules.Load 比 Validate 多查一些东西
+// （链名非空、local_nets 合法…），以前先写文件后编译，会出现“文件已经改了、
+// 界面却显示保存失败”—— 下次启动引擎直接起不来。现在编译不过就一个字节也不写。
 func (a *App) SaveConfig() error {
 	if err := a.Cfg.Validate(); err != nil {
 		return err
 	}
-	if err := a.Cfg.Save(); err != nil {
+	if err := a.Rules.Load(toRules(a.Cfg.Routes)); err != nil {
 		return err
 	}
-	return a.Rules.Load(toRules(a.Cfg.Routes))
+	return a.Cfg.Save()
 }
 
 // toRules 把配置层的规则转成规则引擎的类型（两层各保持独立，避免互相依赖）。

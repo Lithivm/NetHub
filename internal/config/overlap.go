@@ -113,7 +113,7 @@ func overlapTargets(a, b []string) (shared []string, aCoversB, bCoversA bool) {
 			if an == nil {
 				continue
 			}
-			if an.Contains(bn.IP) {
+			if netContains(an, bn) {
 				covered = true
 				if len(shared) < 4 {
 					shared = append(shared, describeNet(bn))
@@ -140,7 +140,7 @@ func overlapTargets(a, b []string) (shared []string, aCoversB, bCoversA bool) {
 		covered := false
 		for _, bt := range b {
 			bn := targetNet(bt)
-			if bn != nil && bn.Contains(an.IP) {
+			if bn != nil && netContains(bn, an) {
 				covered = true
 				break
 			}

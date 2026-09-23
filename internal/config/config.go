@@ -476,6 +476,16 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("第 %d 条规则%s: 端口 %q 不合法（%v）", i+1, r.Describe(), p, err)
 			}
 		}
+		// 下面两项 rules.Load 会报错，但以前 Validate 不查 —— 于是界面能把这种规则
+		// 存进 config.yaml，之后启动引擎直接起不来。校验集合必须和 rules.Load 对齐。
+		if r.IsEnabled() && strings.TrimSpace(r.Chain) == "" {
+			return fmt.Errorf("第 %d 条规则%s: 必须选一个动作（链 / 直连 / 阻断）", i+1, r.Describe())
+		}
+		for _, ln := range r.LocalNets {
+			if err := validLocalNet(ln); err != nil {
+				return fmt.Errorf("第 %d 条规则%s: 本机网段 %q 不合法（%v）", i+1, r.Describe(), ln, err)
+			}
+		}
 	}
 	if !strings.Contains(c.Relay, ":") {
 		return fmt.Errorf("relay 应为 host:port，当前 %q", c.Relay)
@@ -537,10 +547,13 @@ func NormalizeTarget(s string) (string, error) {
 	if !strings.Contains(s, "/") && !isHostname(s) {
 		s += "/32"
 	} else if isHostname(s) {
+		// 统一去掉尾点：名字表（dnsmap）的 key 都是不带尾点的，
+		// 否则 "main.his.com." 这条规则会静默地永不匹配（也查不出原因）。
+		s = strings.TrimSuffix(strings.ToLower(s), ".")
 		if !validHostname(s) {
 			return "", fmt.Errorf("不是合法的域名")
 		}
-		return strings.ToLower(s), nil
+		return s, nil
 	}
 	ip, n, err := net.ParseCIDR(s)
 	if err != nil {
@@ -988,6 +1001,7 @@ func (c *Config) UpdateChain(oldName string, ch Chain) error {
 		return fmt.Errorf("链名 %q 已存在", ch.Name)
 	}
 	old := c.Chains[i]
+	oldRoutes := append([]Route(nil), c.Routes...) // 改名会连带改规则引用，回滚时要一起还原
 	// ⚠ 关键：界面上编辑链路时，表单里看不到已封存的口令（forward 只剩 host:port），
 	// 如果直接整体替换，就会把 secret: 引用一并抹掉 —— 那才是真丢口令。
 	// 所以：新写法里没有凭据时，继承旧的 secret 引用；
@@ -1008,7 +1022,9 @@ func (c *Config) UpdateChain(oldName string, ch Chain) error {
 		}
 	}
 	if err := c.Validate(); err != nil {
-		c.Chains[i] = old // 回滚，不要留下非法状态
+		// 回滚：链本体 + 改名连带改过的规则引用（只还原链会留下“规则指向不存在的链”）
+		c.Chains[i] = old
+		c.Routes = oldRoutes
 		return err
 	}
 	return nil
@@ -1220,6 +1236,28 @@ func netContains(outer, inner *net.IPNet) bool {
 	oo, _ := outer.Mask.Size()
 	io, _ := inner.Mask.Size()
 	return oo <= io && outer.Contains(inner.IP)
+}
+
+// validLocalNet 校验一条“本机网段”条件（只允许 IPv4 的 IP/CIDR）。
+func validLocalNet(s string) error {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return fmt.Errorf("不能为空")
+	}
+	if ip := net.ParseIP(s); ip != nil {
+		if ip.To4() == nil {
+			return fmt.Errorf("只支持 IPv4")
+		}
+		return nil
+	}
+	ip, n, err := net.ParseCIDR(s)
+	if err != nil || ip.To4() == nil {
+		return fmt.Errorf("不是合法 IP 或 CIDR，且只支持 IPv4")
+	}
+	if _, bits := n.Mask.Size(); bits != 32 {
+		return fmt.Errorf("只支持 IPv4")
+	}
+	return nil
 }
 
 // SortRoutesBySpecificity 按“最具体优先”重排：前缀长（/32 → /24）的靠前，
@@ -1533,8 +1571,8 @@ func (c *Config) occupiedHint(rt Route, skip int) []string {
 	}
 	var out []string
 	for j, r := range c.Routes {
-		if j == skip || !r.IsEnabled() {
-			continue
+		if j == skip || j > skip || !r.IsEnabled() {
+			continue // 只看“排在它前面”的：后面的盖不住它
 		}
 		for _, t := range rt.Targets {
 			for _, o := range r.Targets {

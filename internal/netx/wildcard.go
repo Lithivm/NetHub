@@ -27,10 +27,15 @@ func WildcardToCIDR(s string) (string, error) {
 		if p == "" || len(p) > 3 {
 			return "", fmt.Errorf("%q 不是合法的 IP 段", s)
 		}
+		n := 0
 		for _, c := range p {
 			if c < '0' || c > '9' {
 				return "", fmt.Errorf("%q 不是合法的 IP 段（* 只能出现在最后一段）", s)
 			}
+			n = n*10 + int(c-'0')
+		}
+		if n > 255 {
+			return "", fmt.Errorf("%q 不是合法的 IP 段（%s 超出 0-255）", s, p)
 		}
 	}
 	return strings.Join(parts[:3], ".") + ".0/24", nil

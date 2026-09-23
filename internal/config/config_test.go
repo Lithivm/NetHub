@@ -858,7 +858,7 @@ func TestTargetAcceptsHostname(t *testing.T) {
 	for in, want := range map[string]string{
 		"main.his.com":    "main.his.com",
 		"MAIN.HIS.COM":    "main.his.com",
-		"opm.his.com.":    "opm.his.com.",
+		"opm.his.com.":    "opm.his.com",
 		"10.0.0.5":        "10.0.0.5/32",
 		"10.0.0.0/24":     "10.0.0.0/24",
 		"main-wbzxyy.cn":  "main-wbzxyy.cn",

@@ -7,6 +7,7 @@ package rules
 
 import (
 	"fmt"
+	"math"
 	"net"
 	"nethub/internal/dnsmap"
 	"nethub/internal/netx"
@@ -344,7 +345,7 @@ func (s *Set) Load(routes []Route) error {
 					wildcards = append(wildcards, pattern)
 					continue
 				}
-				hosts = append(hosts, strings.ToLower(t))
+				hosts = append(hosts, strings.TrimSuffix(strings.ToLower(t), "."))
 				continue
 			}
 			ipnet, err := parseTarget(t)
@@ -513,6 +514,11 @@ func (s *Set) FilterRanges(includeDirect bool) []Range {
 		if r.Action == ActionDirect && !includeDirect {
 			continue
 		}
+		// 注意：这里**不能**跳过“当前本机网络下不生效的规则”（LocalNets 不匹配）。
+		// 静态过滤器只在启动时装配一次，而 s.localIPs 会随换网变化（localNetLoop）；
+		// A16 的语义正是“换到公司网才生效”。若建过滤器时把它们排除，
+		// 换网后规则虽已 active，包却根本到不了用户态 —— 静默失效。
+		// 代价只是这些包多走一趟用户态（多余范围在 packetLoop 里会被原样放回）。
 		var ports []PortRange
 		for _, p := range r.ports {
 			ports = append(ports, PortRange{p.first, p.last})
@@ -541,19 +547,7 @@ func (s *Set) FilterRanges(includeDirect bool) []Range {
 			rs = append(rs, Range{first, last, ports})
 		}
 	}
-	sort.Slice(rs, func(i, j int) bool { return rs[i].First < rs[j].First })
-
-	var out []Range
-	for _, r := range rs {
-		if n := len(out); n > 0 && samePorts(out[n-1].Ports, r.Ports) && r.First <= out[n-1].Last+1 {
-			if r.Last > out[n-1].Last {
-				out[n-1].Last = r.Last
-			}
-			continue
-		}
-		out = append(out, r)
-	}
-	return out
+	return mergeRanges(rs)
 }
 
 // WildcardRanges 只取「通配域名规则」当前覆盖到的区间 —— 引擎用它拼**动态过滤器**。
@@ -591,11 +585,19 @@ func (s *Set) WildcardRanges(includeDirect bool) []Range {
 			rs = append(rs, Range{first, last, ports})
 		}
 	}
-	sort.Slice(rs, func(i, j int) bool { return rs[i].First < rs[j].First })
+	return mergeRanges(rs)
+}
 
+// mergeRanges 合并相邻/重叠且端口条件一致的区间（缩短过滤器长度）。
+//
+// 必须防 uint32 回绕：r.Last == 0xFFFFFFFF（0.0.0.0/0）时 Last+1 会变成 0，
+// 之后任何区间都合不进来，过滤器里就会堆一堆重复段（功能不坏，但很浪费）。
+func mergeRanges(rs []Range) []Range {
+	sort.Slice(rs, func(i, j int) bool { return rs[i].First < rs[j].First })
 	var out []Range
 	for _, r := range rs {
-		if n := len(out); n > 0 && samePorts(out[n-1].Ports, r.Ports) && r.First <= out[n-1].Last+1 {
+		if n := len(out); n > 0 && samePorts(out[n-1].Ports, r.Ports) &&
+			(r.First <= out[n-1].Last || (out[n-1].Last != math.MaxUint32 && r.First == out[n-1].Last+1)) {
 			if r.Last > out[n-1].Last {
 				out[n-1].Last = r.Last
 			}
@@ -625,32 +627,11 @@ func MatchAppName(cond, name string) bool {
 }
 
 // matchWild 支持 * 的简单通配（不引入正则：规则要能被人工一眼看懂）。
+//
+// 直接复用 dnsmap.MatchWildcard —— 双指针实现，本仓库里只保留这一份正确的通配逻辑。
+// （旧的贪心实现有假阳性：前缀与后缀会重复消费同一段字符，`ab*bc` 能匹配 `abc`。）
 func matchWild(pat, s string) bool {
-	if pat == "*" {
-		return true
-	}
-	if !strings.Contains(pat, "*") {
-		return pat == s
-	}
-	parts := strings.Split(pat, "*")
-	if parts[0] != "" && !strings.HasPrefix(s, parts[0]) {
-		return false
-	}
-	if last := parts[len(parts)-1]; last != "" && !strings.HasSuffix(s, last) {
-		return false
-	}
-	pos := len(parts[0])
-	for i := 1; i < len(parts)-1; i++ {
-		if parts[i] == "" {
-			continue
-		}
-		idx := strings.Index(s[pos:], parts[i])
-		if idx < 0 {
-			return false
-		}
-		pos += idx + len(parts[i])
-	}
-	return true
+	return dnsmap.MatchWildcard(pat, s)
 }
 
 // samePorts 两组端口集合是否完全一致（只有一致的两段才能合并区间）。
@@ -714,6 +695,12 @@ func parseTarget(t string) (*net.IPNet, error) {
 			return nil, fmt.Errorf("CIDR 非法: %w", err)
 		}
 		if n.IP.To4() == nil {
+			return nil, fmt.Errorf("仅支持 IPv4")
+		}
+		// v4-mapped 写法（::ffff:10.0.0.0/104）能过 To4()，但掩码是 16 字节：
+		// 留着会让 Contains 因长度不等恒为 false（规则静默不生效），
+		// 或在 FilterRanges 里把掩码算成 0（拦掉整个 IPv4 空间）。
+		if _, bits := n.Mask.Size(); bits != 32 {
 			return nil, fmt.Errorf("仅支持 IPv4")
 		}
 		return n, nil

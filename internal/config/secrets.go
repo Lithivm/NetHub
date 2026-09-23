@@ -27,7 +27,6 @@ var (
 	secretMu    sync.Mutex
 	secretStore *secret.Store
 	secretDir   string
-	secretErr   error
 )
 
 // Secrets 取本配置目录下的凭据保险箱（惰性加载，加载失败返回 nil + 记下错误）。
@@ -42,11 +41,13 @@ func (c *Config) Secrets() *secret.Store {
 		return secretStore
 	}
 	s, err := secret.Load(dir)
-	secretDir, secretErr = dir, err
 	if err != nil {
+		// 失败时把缓存整体清掉：否则 secretDir 会被改成新目录，而 secretStore
+		// 还是上一个目录的箱子 —— 下一次访问就会串用别的目录的口令。
+		secretStore, secretDir = nil, ""
 		return nil
 	}
-	secretStore = s
+	secretStore, secretDir = s, dir
 	return s
 }
 

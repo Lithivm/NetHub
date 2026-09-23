@@ -183,7 +183,7 @@ func (m *Map) Resolve(host string, prio int) ([]string, error) {
 		if err != nil {
 			msg = err.Error()
 		}
-		m.MarkFailed(host, msg)
+		m.MarkFailedPrio(host, msg, prio)
 		return nil, err
 	}
 	m.Set(host, ips, prio)
