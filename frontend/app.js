@@ -36,9 +36,10 @@ function toast(title, text, kind = 'info') {
   const t = el('div', 'toast ' + kind);
   t.appendChild(el('h4', null, title));
   if (text) t.appendChild(el('p', null, text));
+  t.appendChild(el('span', 'toast-bar')); // 倒计时进度条，让“它什么时候会消失”看得见
   host.appendChild(t);
-  setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity .2s'; }, 4200);
-  setTimeout(() => t.remove(), 4500);
+  setTimeout(() => t.classList.add('is-out'), 4000);
+  setTimeout(() => t.remove(), 4300);
 }
 
 function fail(e) {
@@ -109,11 +110,23 @@ async function setTheme(mode) {
 
 /* ═══════════════ 标签页 ═══════════════ */
 
+// 顶部标签条的滑动指示块：跟着当前 tab 走（宽度/位置由 JS 量出来，不写死）
+function positionTabThumb() {
+  const nav = document.getElementById('tabs');
+  if (!nav) return;
+  const thumb = nav.querySelector('.tab-thumb');
+  const active = nav.querySelector('.tab.is-active');
+  if (!thumb || !active) return;
+  thumb.style.left = active.offsetLeft + 'px';
+  thumb.style.width = active.offsetWidth + 'px';
+}
+
 function showPage(name) {
   // 选项卡 + 顶部栏里的「设置」（它不在 tab 组里，但用的是同一套切换）
   document.querySelectorAll('.tab, .tab-top').forEach(t =>
     t.classList.toggle('is-active', t.dataset.page === name));
   document.querySelectorAll('.page').forEach(p => p.classList.toggle('is-active', p.id === 'page-' + name));
+  positionTabThumb();
   if (name === 'log') scrollLogToEnd();
   if (name === 'conn') { loadConns(); loadCountDirect(); }
   if (name === 'diag') { precheckConfig(true); loadTargetHealth(); loadPatrol(); loadLastSelfTest(); }
@@ -366,7 +379,7 @@ async function loadTargetHealth() {
   ['目标', '链', '状态', '延迟', '检查时间'].forEach(h => head.appendChild(el('div', 'cell', h)));
   t.appendChild(head);
   if (!list || !list.length) {
-    t.appendChild(el('div', 'empty', '还没有可以巡检的目标 —— 等有内网连接之后（或点「立即巡检」）。'));
+    t.appendChild(emptyState(ICON_TARGET, '还没有可以巡检的目标', '等有内网连接之后，或点「立即巡检」。', null, null));
     return;
   }
   list.forEach(x => {
@@ -415,7 +428,7 @@ async function loadConns() {
   t.appendChild(head);
 
   if (!conns.length) {
-    t.appendChild(el('div', 'empty', '还没有连接。命中规则的连接会实时出现在这里。'));
+    t.appendChild(emptyState(ICON_LINK, '还没有连接', '命中规则的连接会实时出现在这里。', null, null));
     return;
   }
 
@@ -572,7 +585,7 @@ async function loadChains() {
   t.appendChild(head);
 
   if (!chains.length) {
-    const e = el('div', 'empty', '还没有链路。点「添加链路」或「从 .bat 批量导入」。');
+    const e = emptyState(ICON_CHAIN, '还没有链路', '点「添加链路」，或「从 gost .bat 导入」。', '添加链路', () => chainForm(null));
     t.appendChild(e);
     return;
   }
@@ -606,8 +619,12 @@ async function loadChains() {
 
     const acts = el('div', 'cell actions');
     acts.appendChild(btn('编辑', 'btn btn-xs', () => chainForm(i)));
-    acts.appendChild(btn('↑', 'btn btn-xs', () => moveChain(i, -1)));
-    acts.appendChild(btn('↓', 'btn btn-xs', () => moveChain(i, 1)));
+    const cup = btn('↑', 'btn btn-xs btn-move', () => moveChain(i, -1));
+    cup.title = '上移一位';
+    const cdown = btn('↓', 'btn btn-xs btn-move', () => moveChain(i, 1));
+    cdown.title = '下移一位';
+    acts.appendChild(cup);
+    acts.appendChild(cdown);
     acts.appendChild(btn('删除', 'btn btn-xs btn-danger', () => delChain(c.name)));
     row.appendChild(acts);
     t.appendChild(row);
@@ -649,6 +666,26 @@ function btn(text, cls, fn) {
   b.onclick = fn;
   return b;
 }
+
+/* ═══════════════ 空状态 ═══════════════ */
+
+// 统一的空状态：淡图标 + 标题 + 一句说明 + 可选的引导按钮。
+// 以前只有一行灰字，用户得自己猜到右上角去点“添加”。
+// 图标是固定内嵌 SVG，不含任何用户数据（innerHTML 在这只是搬常量）。
+function emptyState(icon, title, hint, actionLabel, actionFn) {
+  const box = el('div', 'empty');
+  const ic = el('div', 'empty-icon');
+  ic.innerHTML = icon;
+  box.appendChild(ic);
+  box.appendChild(el('div', 'empty-title', title));
+  if (hint) box.appendChild(el('div', 'empty-hint', hint));
+  if (actionLabel && actionFn) box.appendChild(btn(actionLabel, 'btn btn-sm btn-primary', actionFn));
+  return box;
+}
+const ICON_RULE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><circle cx="3.5" cy="6" r="1.4"/><circle cx="3.5" cy="12" r="1.4"/><circle cx="3.5" cy="18" r="1.4"/></svg>';
+const ICON_CHAIN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 14.5 14.5 9.5"/><path d="M8 12 5.5 14.5a3.5 3.5 0 0 0 5 5L13 17"/><path d="M16 12 18.5 9.5a3.5 3.5 0 0 0-5-5L11 7"/></svg>';
+const ICON_LINK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2.5-6 4 12L16 12h5"/></svg>';
+const ICON_TARGET = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/></svg>';
 
 /* 链路编辑表单 —— 也用于"从 bat 导入后回填" */
 async function chainForm(index, preset) {
@@ -808,12 +845,12 @@ async function loadRoutes() {
   const head = el('div', 'trow thead rule-grid');
   // 第一列是开关，表头也跟着居中，否则“开”字会和开关错开一格
   head.appendChild(el('div', 'cell center', '开'));
-  ['#', '规则名', '目标 IP / CIDR', '走哪条链 / 直连', '说明（该链备注）', ''].forEach(h =>
+  ['#', '规则名', '目标 IP / CIDR', '走哪条链 / 直连', ''].forEach(h =>
     head.appendChild(el('div', 'cell', h)));
   t.appendChild(head);
 
   if (!routes.length) {
-    t.appendChild(el('div', 'empty', '还没有规则。点「添加规则」把内网网段指到某条链；本机网段 / 局域网邻居选「直连」。'));
+    t.appendChild(emptyState(ICON_RULE, '还没有规则', '把内网网段指到某条链；本机网段 / 局域网邻居选「直连」。', '添加规则', () => ruleForm(null)));
     return;
   }
 
@@ -848,15 +885,25 @@ async function loadRoutes() {
     const idxCell = el('div', 'cell');
     idxCell.appendChild(el('span', 'idx', String(r.index + 1)));
     row.appendChild(idxCell);
-    row.appendChild(el('div', 'cell' + (r.name ? ' strong' : ' dim'), r.name || '（未命名）'));
+
+    // 规则名 + 链备注两行显示（原“说明”单独一列；合并后目标列能宽很多、视觉噪音更少）
+    const nameCell = el('div', 'cell stack');
+    nameCell.appendChild(el('div', 'name' + (r.name ? '' : ' dim'), r.name || '（未命名）'));
+    if (r.note) nameCell.appendChild(el('div', 'sub', r.note));
+    nameCell.title = [r.name || '（未命名）', r.note].filter(Boolean).join(' — ');
+    row.appendChild(nameCell);
+
     row.appendChild(targetsCell(r.targets || [], r.ports || [], r.shadowed || [], r.localNets || [], r.inactive, r.apps || [], r.hostResolves || [], r.wildcards || []));
     row.appendChild(el('div', 'cell' + (r.direct || r.block ? ' dim' : ''), actionLabel(r)));
-    row.appendChild(el('div', 'cell dim', r.note || ''));
 
     const acts = el('div', 'cell actions');
     acts.appendChild(btn('编辑', 'btn btn-xs', () => ruleForm(r.index)));
-    acts.appendChild(btn('↑', 'btn btn-xs', () => moveRoute(r.index, -1)));
-    acts.appendChild(btn('↓', 'btn btn-xs', () => moveRoute(r.index, 1)));
+    const up = btn('↑', 'btn btn-xs btn-move', () => moveRoute(r.index, -1));
+    up.title = '上移一位（越靠前越先命中）';
+    const down = btn('↓', 'btn btn-xs btn-move', () => moveRoute(r.index, 1));
+    down.title = '下移一位';
+    acts.appendChild(up);
+    acts.appendChild(down);
     acts.appendChild(btn('删除', 'btn btn-xs btn-danger', () => delRoute(r.index)));
     row.appendChild(acts);
     t.appendChild(row);
@@ -1446,6 +1493,8 @@ function wire() {
 
   // 标签
   document.querySelectorAll('.tab').forEach(t => t.onclick = () => showPage(t.dataset.page));
+  window.addEventListener('resize', positionTabThumb);
+  positionTabThumb();
   document.getElementById('btnSettings').onclick = () => showPage('settings');
 
   // 主操作

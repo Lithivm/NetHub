@@ -5,7 +5,7 @@
 
 :root {
   /* 字体：DESIGN.md 的字体栈（浏览器原生支持回退链，这是 Web 方案相对原生控件的优势） */
-  --font-ui: "HarmonyOS Sans SC", "Noto Sans SC", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  --font-ui: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
   --font-mono: "Cascadia Code", "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
   --fs: 13px;          /* 正文 */
   --fs-sm: 12px;       /* 次要 */
@@ -194,7 +194,16 @@ code, .mono { font-family: var(--font-mono); }
   background: var(--canvas);
 }
 .statusline { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; }
-.runstate { display: inline-flex; align-items: center; gap: var(--s2); font-weight: 700; color: var(--ink); }
+.runstate {
+  display: inline-flex; align-items: center; gap: var(--s2);
+  font-weight: 700; color: var(--ink);
+  padding: 3px 10px 3px 8px; border-radius: var(--r-pill);
+  background: var(--canvas-soft); border: 1px solid var(--hairline);
+  transition: background var(--ease), border-color var(--ease);
+}
+.runstate.is-on { background: var(--success-soft); border-color: color-mix(in srgb, var(--success) 28%, transparent); }
+.runstate.is-busy { background: var(--warning-soft); border-color: color-mix(in srgb, var(--warning) 28%, transparent); }
+.runstate.is-bad { background: var(--error-soft); border-color: color-mix(in srgb, var(--error) 28%, transparent); }
 .dot {
   width: 8px; height: 8px; border-radius: 50%;
   background: var(--muted-soft);
@@ -294,6 +303,18 @@ code, .mono { font-family: var(--font-mono); }
 .btn-icon svg { display: block; }
 .tab-top.is-active { background: var(--primary-soft); color: var(--primary); border-color: var(--primary); }
 .tab-top.is-active:hover { background: var(--primary-soft); color: var(--primary); }
+.tabs { position: relative; }
+.tabs .tab-thumb {
+  position: absolute; top: 0; left: 0; height: 100%; width: 0;
+  background: var(--primary); border-radius: var(--r-chip);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .18);
+  transition: left .18s var(--ease), width .18s var(--ease);
+  z-index: 0; pointer-events: none;
+}
+.tabs .tab { position: relative; z-index: 1; }
+.tabs .tab.is-active { background: transparent; box-shadow: none; color: var(--on-primary); }
+.tabs .tab.is-active:hover { background: transparent; color: var(--on-primary); }
+@media (prefers-reduced-motion: reduce) { .tabs .tab-thumb { transition: none; } }
 .tabs .tab {
   /* 紧凑：横向内边距用 --s3（比默认 --s4 窄 8px） */
   padding: 6px var(--s3);
@@ -393,7 +414,7 @@ code, .mono { font-family: var(--font-mono); }
   gap: var(--s3);
   padding: var(--s2) var(--s4);
   border-bottom: 1px solid var(--hairline-soft);
-  min-height: 46px;
+  min-height: 42px;
   transition: background var(--ease);
 }
 .trow:not(.thead):hover { background: var(--canvas-soft); }
@@ -402,14 +423,29 @@ code, .mono { font-family: var(--font-mono); }
   background: var(--card-strong);
   font-size: var(--fs-xs); font-weight: 700; color: var(--muted);
   text-transform: uppercase; letter-spacing: .03em;
-  min-height: 34px;
+  min-height: 32px;
   border-bottom: 1px solid var(--hairline);
 }
 .trow .cell { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .trow .cell.mono { font-family: var(--font-mono); font-size: var(--fs-xs); }
 .trow .cell.dim { color: var(--muted); }
 .trow .cell.strong { font-weight: 700; color: var(--ink); }
-.trow .cell.actions { overflow: visible; display: flex; gap: var(--s1); justify-content: flex-end; }
+.trow .cell.actions { overflow: visible; display: flex; gap: var(--s1); justify-content: flex-end; align-items: center; }
+/* 两行单元：主行（规则名）+ 副行（链备注），替掉单独一列“说明” */
+.trow .cell.stack { display: flex; flex-direction: column; justify-content: center; gap: 1px; line-height: 1.25; }
+.trow .cell.stack .name { font-weight: 700; color: var(--ink); }
+.trow .cell.stack .name.dim { font-weight: 400; color: var(--muted); }
+.trow .cell.stack .sub { font-size: var(--fs-xs); color: var(--muted); font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 序号/数字等宽，避免刷新时抖动 */
+.trow .idx, .trow .cell.mono, .kv b { font-variant-numeric: tabular-nums; }
+/* 行内操作：上/下移默认藏起来，鼠标扫到这一行（或键盘落到行内按钮）才出现 ——
+   默认只留「编辑 / 删除」，降噪；用 visibility 而不是 opacity，避免不可见却可点。 */
+.trow .cell.actions .btn-move { visibility: hidden; opacity: 0; transition: opacity var(--ease); }
+.trow:hover .cell.actions .btn-move,
+.trow:focus-within .cell.actions .btn-move { visibility: visible; opacity: 1; }
+@media (prefers-reduced-motion: reduce) {
+  .trow .cell.actions .btn-move { transition: none; }
+}
 .trow .idx {
   display: inline-flex; align-items: center; justify-content: center;
   width: 20px; height: 20px; border-radius: var(--r-pill);
@@ -436,19 +472,19 @@ code, .mono { font-family: var(--font-mono); }
   background: var(--card-strong); color: var(--muted);
 }
 .sim-badge.tunnel { background: var(--primary-soft); color: var(--primary); }
-.sim-badge.direct { background: var(--ok-soft, var(--card-strong)); color: var(--ok, var(--ink)); }
+.sim-badge.direct { background: var(--success-soft); color: var(--success); }
 .sim-badge.bad { background: var(--error-soft); color: var(--error); }
 .sim-badge.none { background: var(--card-strong); color: var(--muted); }
-.rule-grid  { grid-template-columns: 34px 46px 160px minmax(200px, 1.5fr) 130px minmax(120px, 1fr) 150px; }
+.rule-grid  { grid-template-columns: 34px 46px 200px minmax(220px, 1.5fr) 130px 132px; }
 .conn-grid  { grid-template-columns: 40px 132px minmax(160px, 1.2fr) 62px 92px 74px 84px 84px 92px; }
 /* 上游健康的小圆点（只探测到代理这一段） */
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; vertical-align: middle; background: var(--muted-soft); }
-.dot.ok  { background: #2f9e5e; }
-.dot.bad { background: #d64545; }
+.dot.ok  { background: var(--success); }
+.dot.bad { background: var(--error); }
 /* headless 模式的安装状态行：红 ✗ / 绿 ✓ */
 .svc-state { display: flex; align-items: center; font-size: var(--fs-sm); font-weight: 600; }
-.svc-ok  { color: #2f9e5e; }
-.svc-bad { color: #d64545; }
+.svc-ok  { color: var(--success); }
+.svc-bad { color: var(--error); }
 /* 业务目标巡检表 */
 .target-grid { grid-template-columns: minmax(150px, 1.2fr) 110px 80px 90px 110px; }
 /* 只读解释输出（“这个目标怎么走” / 配置体检） */
@@ -458,13 +494,23 @@ code, .mono { font-family: var(--font-mono); }
   white-space: pre-wrap; max-height: 52vh; overflow: auto;
 }
 /* 被前面规则完全覆盖、永远不会生效的目标 */
-.shadow-warn { color: #b26a00; }
+.shadow-warn { color: var(--warning); }
 
 .empty {
-  padding: var(--s6);
+  padding: var(--s6) var(--s4);
   text-align: center; color: var(--muted);
   font-size: var(--fs-sm);
+  display: flex; flex-direction: column; align-items: center; gap: var(--s2);
 }
+.empty .empty-icon {
+  width: 42px; height: 42px; border-radius: var(--r-card);
+  display: flex; align-items: center; justify-content: center;
+  background: var(--canvas-soft); color: var(--muted-soft);
+}
+.empty .empty-icon svg { width: 21px; height: 21px; }
+.empty .empty-title { color: var(--body); font-weight: 600; }
+.empty .empty-hint { max-width: 48ch; line-height: 1.65; }
+.empty .btn { margin-top: var(--s2); }
 
 
 /* ═══════════════ 表单 ═══════════════ */
@@ -580,6 +626,7 @@ code, .mono { font-family: var(--font-mono); }
   z-index: 60; pointer-events: none;
 }
 .toast {
+  position: relative; overflow: hidden;
   min-width: 260px; max-width: 380px;
   background: var(--card);
   border: 1px solid var(--hairline);
@@ -588,7 +635,19 @@ code, .mono { font-family: var(--font-mono); }
   box-shadow: var(--shadow-pop);
   padding: var(--s3) var(--s4);
   animation: slidein 180ms cubic-bezier(.2, .8, .2, 1);
+  transition: opacity .2s var(--ease), transform .2s var(--ease);
 }
+.toast.is-out { opacity: 0; transform: translateY(4px); }
+.toast .toast-bar {
+  position: absolute; left: 0; bottom: 0; height: 2px;
+  background: var(--primary); opacity: .5;
+  animation: toastbar 4.2s linear forwards;
+}
+.toast.warn .toast-bar { background: var(--warning); }
+.toast.error .toast-bar { background: var(--error); }
+.toast.success .toast-bar { background: var(--success); }
+@keyframes toastbar { from { width: 100%; } to { width: 0; } }
+@media (prefers-reduced-motion: reduce) { .toast .toast-bar { animation: none; width: 0; } }
 .toast.warn { border-left-color: var(--warning); }
 .toast.error { border-left-color: var(--error); }
 .toast.success { border-left-color: var(--success); }
@@ -642,7 +701,7 @@ code, .mono { font-family: var(--font-mono); }
 .ov-grid { grid-template-columns: minmax(160px, 1.1fr) minmax(140px, 1fr) minmax(200px, 1.4fr) minmax(220px, 1.4fr); }
 
 /* 链路表里的「凭据已加密」标签（口令封存后地址里就没有 auth= 了，必须说清楚） */
-.cred-tag { color: var(--ok, #2f9e5e); font-size: var(--fs-xs); font-weight: 600; }
+.cred-tag { color: var(--success); font-size: var(--fs-xs); font-weight: 600; }
 
 /* 关于卡：GitHub 标识 + 链接（内嵌 SVG，不依赖网络） */
 .repo-link {
@@ -677,9 +736,9 @@ code, .mono { font-family: var(--font-mono); }
 
 /* 多选列表（A20 选进程用） */
 .pick-list { display: flex; flex-direction: column; gap: 2px; max-height: 260px; overflow: auto;
-  border: 1px solid var(--line); border-radius: var(--r); padding: var(--s2); }
+  border: 1px solid var(--hairline); border-radius: var(--r-chip); padding: var(--s2); }
 .pick-row { display: flex; align-items: center; gap: var(--s2); padding: 3px 4px; border-radius: 4px; cursor: pointer; }
-.pick-row:hover { background: var(--bg-soft); }
+.pick-row:hover { background: var(--canvas-soft); }
 .pick-row .dim { margin-left: auto; font-size: var(--fs-xs); }
 
 /* 规则开关（点一下即存）：只表示"这条规则现在生效吗"，不抢主操作的视觉重量 */
@@ -687,7 +746,7 @@ code, .mono { font-family: var(--font-mono); }
   border-radius: 9px;
   /* 用 inset 阴影代替边框：边框参与盒模型，会让“圆点碰不碰得到边”变得难算。
      用阴影后内容盒就是 30×16，定位量都相对它，左右完全对称。 */
-  border: 0; box-shadow: inset 0 0 0 1px var(--line);
+  border: 0; box-shadow: inset 0 0 0 1px var(--hairline);
   background: var(--muted-soft); position: relative; cursor: pointer; padding: 0; }
 /* 圆点：关在左、开在右，两边都用同一个 2px 内缩 ——
    靠 left/right 对称，而不是“算好的偏移”（button 默认 content-box，算偏移一定会偏）。 */
@@ -703,17 +762,12 @@ code, .mono { font-family: var(--font-mono); }
 
 /* 常驻告警条：只在红线问题（内网被别的代理接管）出现，修好自动消失 */
 .noticebar { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap;
-  padding: 6px var(--s4); font-size: var(--fs-sm); border-bottom: 1px solid var(--line); }
-.noticebar.is-error { background: #fdeaea; color: #8a1f1f; border-bottom-color: #f3c9c9; }
-.noticebar.is-warn  { background: #fdf6e3; color: #7a5a12; border-bottom-color: #f0e0b0; }
+  padding: 6px var(--s4); font-size: var(--fs-sm); border-bottom: 1px solid var(--hairline); }
+.noticebar.is-error { background: var(--error-soft); color: var(--error); border-bottom-color: color-mix(in srgb, var(--error) 30%, transparent); }
+.noticebar.is-warn  { background: var(--warning-soft); color: var(--warning); border-bottom-color: color-mix(in srgb, var(--warning) 30%, transparent); }
 .noticebar .nb-title { font-weight: 600; }
 .noticebar .nb-text { flex: 1; min-width: 200px; }
-/* 深色下的常驻告警条。
-   ⚠ 选择器原来是 body.theme-dark —— 主题是挂在 <html data-theme> 上的，
-   所以这两条**从未生效**过（而且没有别的深色规则兼着），于是深色模式下
-   横幅用的是浅色底（淡红/淡黄），又亮又暖。改成与主题同源的选择器。 */
-[data-theme="dark"] .noticebar.is-error { background: #2e1c1c; color: #f0b4b4; border-bottom-color: #4a2626; }
-[data-theme="dark"] .noticebar.is-warn  { background: #2b2718; color: #e8d9a8; border-bottom-color: #4a4227; }
+/* 深色不用再单独写一套：is-error/is-warn 已改成走 --*-soft/--* 语义色 token，明暗自动跟着。 */
 
 /* 表头与开关列的居中（表头文字默认左对齐，会和居中的开关错开一格） */
 .trow .cell.center { text-align: center; }
@@ -765,7 +819,7 @@ code, .mono { font-family: var(--font-mono); }
 }
 .info-btn:hover { background: var(--primary); color: #fff; border-color: var(--primary); }
 .help-body { max-width: 62ch; }
-.help-p { margin: 0 0 10px; line-height: 1.65; color: var(--ink-soft, var(--ink)); white-space: pre-wrap; }
+.help-p { margin: 0 0 10px; line-height: 1.65; color: var(--body); white-space: pre-wrap; }
 .help-p:last-child { margin-bottom: 0; }
 /* 域名规则解析不到 = 这条规则什么都没拦，得看得见 */
 .resolve-bad { color: var(--error); }
@@ -779,7 +833,7 @@ code, .mono { font-family: var(--font-mono); }
 .clash-cov > summary::-webkit-details-marker { display: none; }
 .clash-cov > summary::before { content: '▸ '; }
 .clash-cov[open] > summary::before { content: '▾ '; }
-.clash-cov > summary:hover { color: var(--fg); }
+.clash-cov > summary:hover { color: var(--ink); }
 .clash-cov .clash-table { margin-top: var(--s2); }
 
 /* ── 两段式滑块（设置 → 外观 → 主题）────────────────────────────
@@ -822,4 +876,4 @@ code, .mono { font-family: var(--font-mono); }
   transition: color .18s ease;
 }
 .seg2-btn.is-active { color: var(--on-primary); }
-.seg2-btn:not(.is-active):hover { color: var(--fg); }
+.seg2-btn:not(.is-active):hover { color: var(--ink); }
