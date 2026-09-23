@@ -112,11 +112,18 @@ func (r Route) MatchesProc(ip net.IP, port uint16, procName string) bool {
 	return r.MatchesName("", ip, port, procName)
 }
 
-// MatchesName 同 MatchesProc，额外给出这个目标 IP 当前关联到的**域名**（可为空）。
+// MatchesName 单条规则是否命中（旧的“IP 或 名字”语义）。
 //
-// 为什么要传名字：通配域名（*.his.com）在包里是看不见的，只能拿“这个 IP 是哪个
-// 名字解析来的”去比 —— 名字由引擎从观察到的 DNS 里拿到（见 dnsmap）。
+// 新代码不要用它做路由决策：它会把**域名目标**和**IP 目标**混在同一层比，
+// 从而让 "main.*.com" 这类宽通配抢在 "10.100.100.0/24" 前面。
+// 路由请用 Set.MatchName（两遍：显式 IP 优先、域名兜底）。这里只为兼容保留。
 func (r Route) MatchesName(name string, ip net.IP, port uint16, procName string) bool {
+	return r.matchIPOnly(ip, port, procName) || r.matchDomainOnly(name, ip, port, procName)
+}
+
+// matchIPOnly 只看**显式 IP/CIDR 目标**（nets）。不含域名解析出来的 IP，也不看名字。
+// 这是与 v0.2.2 / Proxifier 对齐的那一层：应用按 IP 连时，只按 IP 规则匹配。
+func (r Route) matchIPOnly(ip net.IP, port uint16, procName string) bool {
 	if len(r.apps) > 0 {
 		if !matchAnyApp(r.apps, procName) {
 			return false
@@ -125,9 +132,28 @@ func (r Route) MatchesName(name string, ip net.IP, port uint16, procName string)
 			return true // 只按进程：目标/端口不参与
 		}
 	}
-	if !r.matchesIP(ip) && !r.matchesWildcard(name) {
+	if !r.matchesNet(ip) {
 		return false
 	}
+	return r.matchPort(port)
+}
+
+// matchDomainOnly 只看**域名目标**：通配域名按名字，具体域名按名字或已解析 IP。
+// 只在“没有任何显式 IP 规则命中”时作为兜底（第二遍）。
+func (r Route) matchDomainOnly(name string, ip net.IP, port uint16, procName string) bool {
+	if len(r.apps) > 0 && !matchAnyApp(r.apps, procName) {
+		return false
+	}
+	if len(r.wildcards) == 0 && len(r.hosts) == 0 && len(r.hostIPs) == 0 {
+		return false // 这条规则没有域名目标，第二遍不归它管
+	}
+	if !r.matchesWildcard(name) && !r.matchesHostName(name) && !r.matchesHostIP(ip) {
+		return false
+	}
+	return r.matchPort(port)
+}
+
+func (r Route) matchPort(port uint16) bool {
 	if len(r.ports) == 0 {
 		return true
 	}
@@ -177,35 +203,73 @@ func (s *Set) Explain(ip net.IP, port uint16, ignorePort bool) (matched int, sha
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	matched = -1
-	for i := range s.routes {
-		if !s.active(s.routes[i]) {
-			continue // 当前网络下不生效的规则不参与解释
+	// 与 MatchName 同样的两遍：先显式 IP/CIDR，再域名解析出来的 IP。
+	// （带进程条件的规则这里无法判定，跳过 —— 和以前一样。）
+	pass := func(byNet bool) bool {
+		for i := range s.routes {
+			r := s.routes[i]
+			if !s.active(r) || len(r.apps) > 0 {
+				continue
+			}
+			var hit bool
+			if byNet {
+				hit = r.matchesNet(v4)
+			} else {
+				hit = r.matchesHostIP(v4)
+			}
+			if hit && !ignorePort {
+				hit = r.matchPort(port)
+			}
+			if !hit {
+				continue
+			}
+			if matched < 0 {
+				matched = i
+				continue
+			}
+			shadowed = append(shadowed, i)
 		}
-		hit := s.routes[i].Matches(v4, port)
-		if ignorePort {
-			hit = s.routes[i].MatchesTarget(v4)
-		}
-		if !hit {
-			continue
-		}
-		if matched < 0 {
-			matched = i
-			continue
-		}
-		shadowed = append(shadowed, i)
+		return matched >= 0
 	}
+	if pass(true) {
+		return matched, shadowed, true
+	}
+	pass(false)
 	return matched, shadowed, matched >= 0
 }
 
-// matchesIP 任一目标命中即算该目标的命中（端口不参与）。
+// matchesIP 任一 IP 目标命中即算（显式 CIDR + 域名解析出来的 IP）；供界面“只看目标”用。
 func (r Route) matchesIP(ip net.IP) bool {
+	return r.matchesNet(ip) || r.matchesHostIP(ip)
+}
+
+// matchesNet 显式 IP/CIDR 目标命中。
+func (r Route) matchesNet(ip net.IP) bool {
 	for _, n := range r.nets {
 		if n.Contains(ip) {
 			return true
 		}
 	}
-	for _, n := range r.hostIPs { // 域名目标当前解析到的 IP（含通配域名观察到的 IP）
+	return false
+}
+
+// matchesHostIP 域名目标当前解析到的 IP 命中（含通配域名观察到的 IP）。
+func (r Route) matchesHostIP(ip net.IP) bool {
+	for _, n := range r.hostIPs {
 		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchesHostName 目标 IP 关联到的名字正好是这条规则里的**具体域名**。
+func (r Route) matchesHostName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, h := range r.hosts {
+		if strings.EqualFold(h, name) {
 			return true
 		}
 	}
@@ -409,6 +473,15 @@ func (s *Set) MatchProc(ip net.IP, port uint16, procName string) (chain string, 
 }
 
 // MatchName 同 MatchProc，额外给出目标 IP 当前关联到的域名（通配域名规则靠它命中）。
+// MatchName 决定这条连接走哪条规则。
+//
+// **两遍，显式 IP 优先**（对齐 v0.2.2 / Proxifier 的“应用按 IP 连就按 IP 匹配”）：
+//  1. 先只看显式 IP/CIDR 目标（nets），自上而下、命中即止；
+//  2. 第一遍没命中，才让域名目标（通配按名字、具体域名按名字或已解析 IP）兜底。
+//
+// 为什么要这样：通配域名会把“反推出来的名字”匹配上，如果和 IP 目标同层比，
+// `main.*.com` 这种宽通配就会抢走本该按 `10.100.100.0/24` 走的连接（见 2026-09 的
+// main.wbzxyy.com 事故）。名字是猜出来的，IP 是硬事实 —— 能用 IP 定就用 IP。
 func (s *Set) MatchName(name string, ip net.IP, port uint16, procName string) (chain string, act Action, ok bool) {
 	v4 := ip.To4()
 	if v4 == nil {
@@ -416,12 +489,22 @@ func (s *Set) MatchName(name string, ip net.IP, port uint16, procName string) (c
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	// 第一遍：显式 IP/CIDR
 	for i := range s.routes {
 		// 带 LocalNets 的规则要"现在这台机器处于那个网络"才生效（A16）
 		if !s.active(s.routes[i]) {
 			continue
 		}
-		if s.routes[i].MatchesName(name, v4, port, procName) {
+		if s.routes[i].matchIPOnly(v4, port, procName) {
+			return s.routes[i].Chain, s.routes[i].Action, true
+		}
+	}
+	// 第二遍：域名目标
+	for i := range s.routes {
+		if !s.active(s.routes[i]) {
+			continue
+		}
+		if s.routes[i].matchDomainOnly(name, v4, port, procName) {
 			return s.routes[i].Chain, s.routes[i].Action, true
 		}
 	}

@@ -900,6 +900,29 @@ func (e *Engine) handleConn(c net.Conn) {
 		}
 	}
 	dialDst := st.displayTarget() // 假 IP 已解析则用真实 IP，否则保持原地址
+
+	// 假 IP 阶段只能按“名字”选链，可能把本该按 IP 走的连接选错
+	// （宽通配如 main.*.com 抢走 10.100.100.0/24 的连接）。真实 IP 到手后，
+	// 用“IP 优先”的匹配再判一次，以其为准 —— 这就是 v0.2.2 / Proxifier 的语义。
+	if e.isFakeIP(st.dst) && st.action == rules.ActionChain {
+		if real := st.realTarget(); real != nil {
+			if chain2, act2, hit := e.rules.MatchName(host, real, st.dport, st.procName); hit && chain2 != st.chain {
+				switch act2 {
+				case rules.ActionChain:
+					e.bus.Info("route.fixup: target=%s real_ip=%s %s → %s（真实 IP 命中更靠前的规则）",
+						host, real, st.chain, chain2)
+					st.chain = chain2
+					if c2, ok2 := e.cfg.ChainByName(chain2); ok2 {
+						ch = c2
+					}
+				default:
+					// 真实 IP 命中直连/阻断：目前仍按原链走（罕见；给出可操作提示）
+					e.bus.Warn("route.fixup: target=%s real_ip=%s 命中 %s 规则而非链 —— 仍按原链处理；"+
+						"如需直连/阻断，请把该网段的规则排到前面", host, real, act2)
+				}
+			}
+		}
+	}
 	mode := e.cfg.DomainResolveMode()
 	var up net.Conn
 	var err error
