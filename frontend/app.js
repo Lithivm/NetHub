@@ -157,7 +157,7 @@ function showPage(name) {
     t.classList.toggle('is-active', t.dataset.page === name));
   document.querySelectorAll('.page').forEach(p => p.classList.toggle('is-active', p.id === 'page-' + name));
   positionTabThumb();
-  if (name === 'log') scrollLogToEnd();
+  if (name === 'log') { scrollLogToEnd(); loadLogVerbose(); }
   if (name === 'conn') { loadConns(); loadCountDirect(); loadQuicBlock(); }
   if (name === 'diag') { precheckConfig(true); loadTargetHealth(); loadPatrol(); loadLastSelfTest(); }
 }
@@ -1542,6 +1542,7 @@ async function loadSettings() {
   // 只用界面上确实存在的字段（别再引用已被移除的 setRelay，
   // 那会抛 TypeError 把 boot() 整个搞挂，导致状态轮询都注册不上）
   setChecked('setHostsManage', s.hostsManage);
+  setChecked('setLogVerbose', s.logVerbose);
   setValue('setHostsEntries', (s.hostsEntries || []).join('\n'));
   loadAbout();
   setValue('setDialTimeout', s.dialTimeout || 5);
@@ -1768,6 +1769,27 @@ function wire() {
     document.getElementById('logBox').replaceChildren();
   };
   document.getElementById('btnOpenLog').onclick = () => call('OpenLogDir').catch(fail);
+  // 详细日志（Normal / Verbose）：只影响之后写下的行，不碰过滤器、不重启
+  async function loadLogVerbose() {
+    const cb = document.getElementById('setLogVerbose');
+    if (!cb) return;
+    try {
+      const s = await call('GetSettings');
+      if (s) cb.checked = !!s.logVerbose;
+    } catch (e) { /* 读不到就维持现状，不打断日志页 */ }
+  }
+  const cbVerbose = document.getElementById('setLogVerbose');
+  if (cbVerbose) cbVerbose.onchange = async (ev) => {
+    try {
+      await call('SetLogVerbose', ev.target.checked);
+      toast(ev.target.checked ? '已打开详细日志' : '已回到精简日志',
+        ev.target.checked
+          ? '之后会多记：每个直连目标、学到的域名、探测过程等'
+          : '只写连接、启停、状态变化与错误',
+        'success');
+      await loadLogVerbose();
+    } catch (e) { fail(e); }
+  };
   document.getElementById('btnSelfTest').onclick = () => {
     const out = document.getElementById('selfTestOut');
     if (out) out.textContent = '正在自检…（逐条链探真实内网主机）';

@@ -5,11 +5,39 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"nethub/internal/config"
 	"nethub/internal/hostsmgr"
 	"nethub/internal/logbus"
 )
+
+// 外部（编辑器 / agent 工具）是**原地写**配置文件的，2 秒一次的轮询很容易正好读到半截。
+// 重试要能自己好掉，不能报一条虚警的 ERROR 让人白查一圈。
+func TestReloadRetriesHalfWrittenFile(t *testing.T) {
+	a, _, p := seedConfig(t)
+	if err := os.WriteFile(p, []byte("relay: 127.0.0.1:0\nroutes: [未闭合"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// 150ms 后把文件写完整（早于 400ms 的第一次重试）
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		_ = os.WriteFile(p, []byte("relay: 127.0.0.1:0\nchains:\n  - name: proxy-a\n    forward: socks5://127.0.0.1:1080\nroutes: []\n"), 0o600)
+	}()
+
+	if _, err := a.applyFromDiskWithRetry(); err != nil {
+		t.Fatalf("重试后应当能载入完整文件：%v", err)
+	}
+	found := false
+	for _, l := range a.Bus.Snapshot() {
+		if strings.Contains(l.Text, "读到完整文件") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("应当记一行“重试后读到完整文件”—— 否则现场不知道刚才那次失败只是写了一半")
+	}
+}
 
 func seedConfig(t *testing.T) (*App, *config.Config, string) {
 	t.Helper()

@@ -239,6 +239,8 @@ type SettingsView struct {
 	HostsManage  bool     `json:"hostsManage"`
 	HostsEntries []string `json:"hostsEntries"`
 	Theme        string   `json:"theme"`
+	// LogVerbose 详细日志（排障用，默认关）
+	LogVerbose bool `json:"logVerbose"`
 	// 上游拨号（秒）。0 表示前端没传 → 保持原值，不当成“设成 0”。
 	DialTimeout int `json:"dialTimeout,omitempty"`
 	DialBudget  int `json:"dialBudget,omitempty"`
@@ -1032,6 +1034,7 @@ func (b *Backend) GetSettings() SettingsView {
 		HostsManage:    hosts.Manage,
 		HostsEntries:   entries,
 		Theme:          b.a.Cfg.Theme(),
+		LogVerbose:     b.a.Cfg.LogVerbose(),
 		DialTimeout:    int(b.a.Cfg.DialTimeoutDur() / time.Second),
 		DialBudget:     int(b.a.Cfg.DialBudgetDur() / time.Second),
 		RaceAfter:      intPtr(int(b.a.Cfg.RaceAfterDur() / time.Millisecond)),
@@ -1629,7 +1632,7 @@ func (b *Backend) runSelfTest() {
 				if conn, derr := dial(rip, rport); derr == nil {
 					conn.Close()
 					hit, hitIP = int(rport), rip.String()
-					b.a.Bus.Info("selftest.probe: chain=%s target=%s source=recent", ch.Name, ref.Target)
+					b.a.Bus.Detail("selftest.probe: chain=%s target=%s source=recent", ch.Name, ref.Target)
 					break
 				}
 			}
@@ -1936,6 +1939,27 @@ func (b *Backend) SetCountDirect(on bool) error {
 		b.a.Bus.Info("已开启直连流量统计（直连网段会进内核过滤器，每包有一点开销）")
 	} else {
 		b.a.Bus.Info("已关闭直连流量统计（直连流量不再经过我们，回到零开销）")
+	}
+	return nil
+}
+
+// SetLogVerbose 开关“详细日志”（Proxifier 的 Normal / Verbose）。
+//
+// 即时生效、只影响**之后**的行（日志总线上的一个开关，不碰过滤器也不重启）：
+// 关着 = 只写现场需要看的（连接、启停、状态变化、错误）；
+// 打开 = 额外的细节（每个直连目标、学到的名字、名字过期清单、探测过程……）。
+func (b *Backend) SetLogVerbose(on bool) error {
+	b.a.Cfg.SetLogVerbose(on)
+	res, err := b.a.SaveConfig()
+	if err != nil {
+		return err
+	}
+	b.a.Bus.SetVerbose(on) // 先落盘再切，保证“界面看到的 = 日志的”
+	b.afterSave(res, "详细日志开关")
+	if on {
+		b.a.Bus.Info("日志: 详细模式已打开（会多出每个直连目标、名字学习、探测过程等行）")
+	} else {
+		b.a.Bus.Info("日志: 已回到精简模式")
 	}
 	return nil
 }

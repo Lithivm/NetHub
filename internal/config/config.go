@@ -303,6 +303,13 @@ type HostsCfg struct {
 // UICfg 界面相关设置。
 type UICfg struct {
 	Theme string `yaml:"theme"` // light | dark
+
+	// LogVerbose “详细日志”（Proxifier 的 Normal / Verbose 那个开关，默认关）。
+	//
+	// 关着的时候，每个直连目标、学到的名字、名字过期清单这类“重复且对现场结论无影响”
+	// 的行不写（见 logbus.Bus.Detail）—— 日志默认要能一口气读完；
+	// 要排“为什么这个目标没走隧道”这类问题时再打开。
+	LogVerbose bool `yaml:"log_verbose,omitempty"`
 }
 
 // defaultAutostartDelay 开机自启的默认登录后延迟。
@@ -2303,6 +2310,20 @@ func (c *Config) Theme() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.UI.Theme
+}
+
+// LogVerbose 是否写详细日志（见 UICfg.LogVerbose）。
+func (c *Config) LogVerbose() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.UI.LogVerbose
+}
+
+// SetLogVerbose 开关详细日志。
+func (c *Config) SetLogVerbose(on bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.UI.LogVerbose = on
 }
 
 // AutostartDelayDur 开机自启的登录后延迟（默认 20s；"0s" = 不延迟；上限 10 分钟）。

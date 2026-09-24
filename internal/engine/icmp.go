@@ -131,19 +131,14 @@ func (e *Engine) blockQUIC(h *divert.Handle, pkt []byte, addr *divert.Address, s
 // 而现场需要的是“哪些目标在被拦”这个事实，不是包数（包数在 total 里累计）。
 func (e *Engine) logQUICBlock(dst net.IP, dport uint16) {
 	key := dst.String() + ":" + strconv.Itoa(int(dport))
+	// “最近被拦的目标”给界面用（跟去重无关：它回答的是“到底拦了什么”）
 	e.mu.Lock()
-	last, seen := e.quicNotices[key]
-	if !seen {
-		e.quicNotices[key] = time.Now()
-	} else if time.Since(last) < time.Minute {
-		e.mu.Unlock()
-		return
-	} else {
-		e.quicNotices[key] = time.Now()
-	}
-	total := e.quicBlocked.Load()
+	e.quicNotices[key] = time.Now()
 	e.mu.Unlock()
-	e.bus.Info("quic.block: target=%s:%d action=drop icmp=best-effort total=%d", dst, dport, total)
+	// 日志：同一目标 60 秒最多一行；被吞掉的条数由总线补 `suppressed:` 行
+	// （journald 的做法 —— 不补就等于日志在骗人：看起来只发生过一次）。
+	e.bus.Throttle("quic.block:"+key, time.Minute,
+		"quic.block: target=%s action=drop icmp=best-effort total=%d", key, e.quicBlocked.Load())
 }
 
 // prunquicNotices 清掉过期的 QUIC 日志去重记录（janitor 调）。

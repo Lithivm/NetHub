@@ -104,7 +104,7 @@ func (e *Engine) dnsCacheSeed() int {
 func (e *Engine) seedDNSCache() {
 	t0 := time.Now()
 	n := e.dnsCacheSeed()
-	e.bus.Info("dns.seed: names=%d source=windows-dns-cache ms=%d", n, time.Since(t0).Milliseconds())
+	e.bus.Detail("dns.seed: names=%d source=windows-dns-cache ms=%d", n, time.Since(t0).Milliseconds())
 }
 
 // dnsCacheLookupA 只从缓存里取这个名字的 A 记录（不发网络请求）。

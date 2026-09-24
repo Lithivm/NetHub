@@ -70,6 +70,9 @@
         <h2>运行日志</h2>
         <span class="hint">同时写到程序目录的 nethub.log</span>
         <div class="spacer"></div>
+        <label class="check" title="排障用：会多记每个直连目标、学到的域名、探测过程等；关着时只写连接、启停、状态变化与错误">
+          <input type="checkbox" id="setLogVerbose"><span>详细日志</span>
+        </label>
         <button class="btn btn-sm" id="btnOpenLog">打开日志目录</button>
         <button class="btn btn-sm" id="btnDiag">导出诊断包…</button>
         <button class="btn btn-sm btn-ghost" id="btnClearLog">清空</button>

@@ -32,9 +32,16 @@ type Bus struct {
 	fileSize int64 // 当前文件已写字节数（用于轮转）
 	maxBytes int64 // 单文件上限，超过就轮转
 	keep     int   // 保留几个历史文件（nethub.log.1 … .keep）
+
+	// verbose “详细日志”开关（见 SetVerbose / Detail）
+	verbose bool
+	// throttled 去重+计数表：key → 状态（见 Throttle）
+	throttled map[string]*throttleState
 }
 
-// 日志文件默认策略：单文件 8 MB、保留 2 份历史 → 磁盘占用最多约 24 MB。
+// throttleState 一个被去重的 key 的状态（见 Throttle / FlushThrottled）。
+
+// 日志文件默认策略：单文件 8 MB、保留 5 份历史 → 磁盘占用最多约 48 MB。
 //
 // 为什么要限：客户机会连跑几个月，出问题时（比如“每 36 秒重试一次”那种坏法）
 // 一天就能写出几百 MB；而日志又没人看没人删，不能任它涨。
@@ -52,7 +59,17 @@ func New(max int) *Bus {
 	if max <= 0 {
 		max = 2000
 	}
-	return &Bus{max: max}
+	return &Bus{max: max, throttled: map[string]*throttleState{}}
+}
+
+// throttleState 一个 key 的去重状态。
+//
+// 窗口长度存在这里：补 `suppressed:` 那行时要写出“是在多长的窗口里吞掉的”，
+// 否则那个数字没有意义（而且窗口是调用方给的，总线自己不该猜）。
+type throttleState struct {
+	last       time.Time
+	window     time.Duration
+	suppressed int
 }
 
 // SetFile 额外把日志写到文件（失败不致命，只报告一次）。
@@ -180,6 +197,100 @@ func (b *Bus) log(level, format string, args ...any) {
 func (b *Bus) Info(format string, a ...any)  { b.log("INFO", format, a...) }
 func (b *Bus) Warn(format string, a ...any)  { b.log("WARN", format, a...) }
 func (b *Bus) Error(format string, a ...any) { b.log("ERROR", format, a...) }
+
+// SetVerbose 开关“详细日志”（Proxifier 的 Normal / Verbose 那个开关）。
+//
+// 为什么要单独一个开关而不是再加一个级别名：现场只用得上最粗的三档
+// （gost 6 档、sing-box 7 档、mihomo 5 档，多出来的档次没人看），
+// 而“详细”回答的是另一个问题：“要不要把每个包/每条连接的细节也写下来”。
+func (b *Bus) SetVerbose(on bool) {
+	b.mu.Lock()
+	b.verbose = on
+	b.mu.Unlock()
+}
+
+// Verbose 当前是不是详细模式。
+func (b *Bus) Verbose() bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.verbose
+}
+
+// Detail 记一条“只在详细模式下才出现”的日志（级别仍是 INFO）。
+//
+// 用法：高频、重复、对现场结论没影响的行（每个直连目标一行、学到的名字、
+// 每 5 分钟的名字过期清单……）改成 Detail —— 默认日志才读得下去，
+// 要排障时在设置里打开“详细日志”就能重新看到它们。
+func (b *Bus) Detail(format string, a ...any) {
+	if !b.Verbose() {
+		return
+	}
+	b.log("INFO", format, a...)
+}
+
+// Throttle 同一个 key 在窗口内只放行一次，其余只计数。
+//
+// 放行的**第一条**会带上上一次窗口里被吞掉的条数：
+// `… suppressed=37 window=1m0s`。这是 journald 的做法（超过速率上限就丢弃，
+// 但“丢了多少条”必须写出来）—— 不写的话，日志会骗人：“只发生了一次”。
+//
+// 窗口内一直没人再调用（噪声停了）时，由调用方调 FlushThrottled 把尾巴补上。
+// 返回 true = 这条该写（调用方自己决定用哪个级别写）。
+func (b *Bus) Throttle(key string, window time.Duration, format string, a ...any) bool {
+	now := time.Now()
+	b.mu.Lock()
+	if b.throttled == nil {
+		b.throttled = map[string]*throttleState{}
+	}
+	st := b.throttled[key]
+	if st == nil {
+		st = &throttleState{last: now}
+		b.throttled[key] = st
+	} else if now.Sub(st.last) < window {
+		st.suppressed++
+		b.mu.Unlock()
+		return false
+	}
+	st.last, st.window = now, window
+	sup, win := st.suppressed, st.window
+	st.suppressed = 0
+	b.mu.Unlock()
+
+	if sup > 0 {
+		// 先补上“上一窗口吞了多少”，再写这一条 —— 顺序反了就对不上了
+		b.log("INFO", "%s", fmt.Sprintf("suppressed: key=%s count=%d window=%s", key, sup, win))
+	}
+	b.log("INFO", format, a...)
+	return true
+}
+
+// FlushThrottled 把“已经被吞掉但噪声停了”的计数补写出来（后台巡检调用）。
+//
+// 不调它的话，窗口里最后那一串重复会凭空消失（日志里看不到，也没人知道少了）。
+func (b *Bus) FlushThrottled() {
+	now := time.Now()
+	type pending struct {
+		key    string
+		count  int
+		window time.Duration
+	}
+	var out []pending
+	b.mu.Lock()
+	for key, st := range b.throttled {
+		if st.suppressed == 0 {
+			continue
+		}
+		if now.Sub(st.last) < st.window {
+			continue // 窗口还没过，还有可能在变
+		}
+		out = append(out, pending{key, st.suppressed, st.window})
+		st.suppressed = 0
+	}
+	b.mu.Unlock()
+	for _, p := range out {
+		b.log("INFO", "%s", fmt.Sprintf("suppressed: key=%s count=%d window=%s", p.key, p.count, p.window))
+	}
+}
 
 // writeFile 写一行到日志文件，超上限就轮转。
 // 单独成函数是为了让轮转逻辑只在一处、并且拿到自己那把锁。

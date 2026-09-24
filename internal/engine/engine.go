@@ -75,6 +75,9 @@ type connState struct {
 	// 空串 = 查不到（受保护进程/系统服务/已消失）——界面显示“未知”。
 	procName string
 	pid      uint32
+	// procTried 这个连接已经查过一次进程表（不管查没查到）。
+	// 用来把“查不到”也缓存住：否则包路径上每个包都会再查一次表。
+	procTried atomic.Bool
 
 	// fakeName/realDst：DNS 接管相关。目标是我们发的假 IP 时，fakeName 是它对应的
 	// 域名，realDst 是这个域名在本机解析出的**真实 IP**（假 IP 绝不能拿去连）。
@@ -1353,7 +1356,9 @@ func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}, kind loopKind)
 		// 内置直连：Windows 更新传递优化走 TCP 7680，客户内网里不该进隧道。
 		// 以前要在规则里写一条 direct 规则来实现；现在内置，规则列表干净。
 		if dport == builtinDirectPort && e.cfg.BuiltinDirectEnabled() {
-			e.passThrough(h, pkt, addr, t, src, dst, sport, dport, flags, rules.ActionDirect, 0, "", procName, procPID)
+			// 内置直连（Windows 更新传递优化）：一个文件共享的 peer 一对一行，
+			// 刷起来全是噪声且对现场结论无影响 → 归到“详细日志”。
+			e.passThrough(h, pkt, addr, t, src, dst, sport, dport, flags, rules.ActionDirect, 0, "", procName, procPID, true)
 			continue
 		}
 
@@ -1370,7 +1375,7 @@ func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}, kind loopKind)
 		if chain, act, ruleNo, ruleName, hit := e.ruleSet().MatchNameRule(name, dst, dport, procName); hit {
 			switch act {
 			case rules.ActionDirect, rules.ActionBlock:
-				e.passThrough(h, pkt, addr, t, src, dst, sport, dport, flags, act, ruleNo, ruleName, procName, procPID)
+				e.passThrough(h, pkt, addr, t, src, dst, sport, dport, flags, act, ruleNo, ruleName, procName, procPID, false)
 			default:
 				e.rewriteOutbound(h, pkt, addr, t, src, dst, sport, dport, flags, chain, relayIP, relayPort, ruleNo, ruleName, procName, procPID)
 			}
@@ -1697,7 +1702,7 @@ func (e *Engine) rebuildDynFilter() {
 		}
 		oldH.Close()
 	}
-	e.bus.Info("wildcard: filter.update ranges=%d filter=%s", len(rs), filter)
+	e.bus.Detail("wildcard: filter.update ranges=%d filter=%s", len(rs), filter)
 }
 
 // WildcardStat 一条通配规则当前的状态（界面/日志看“学到了几个 IP”）。
@@ -1963,7 +1968,7 @@ func (e *Engine) learnFromHandshake(res tlsname.Result, dst net.IP) {
 	if len(before) == 0 && !wasKnown {
 		// 这个名字从未在明文 DNS 里出现过 → 基本可以确定这台机器上有人用了
 		// 加密 DNS 或自带解析器的客户端。这条日志的价值：让“为什么通配能/不能生效”有据可查。
-		e.bus.Info("sni.learn: name=%s ip=%s dns_seen=false", res.Name, dst)
+		e.bus.Detail("sni.learn: name=%s ip=%s dns_seen=false", res.Name, dst)
 	}
 	e.applyHostIPs()
 	e.onWildcardsChanged()
@@ -2075,7 +2080,7 @@ func (e *Engine) sweepFakeIP() {
 		delete(e.tookSeen, n)
 	}
 	e.mu.Unlock()
-	e.bus.Info("fakeip.recycle: count=%d names=%v", len(gone), gone)
+	e.bus.Detail("fakeip.recycle: count=%d names=%v", len(gone), gone)
 }
 
 // udpPayload 从 IP 包里取出 UDP 负载，并返回地址/端口（DNS 接管要互换它们）。
@@ -2335,29 +2340,57 @@ type noticeSeen struct {
 // noteAction 同一动作在同一条连接上（同一源端口 + 同一目标）只报一行。
 // 源端口被系统复用给另一个目标时，目标变了就再报一行。
 func (e *Engine) noteAction(kind string, sport uint16, dst net.IP, dport uint16, note string) {
+	e.noticeTick(sport, kind, dst, dport)
+	e.bus.Throttle(fmt.Sprintf("action:%s:%s:%d", kind, dst, dport), time.Minute,
+		"[%s] %s:%d  %s", kind, dst, dport, note)
+}
+
+// noteActionDetail 同 noteAction，但归到“详细日志”（内置直连那类刷屏项用它）。
+func (e *Engine) noteActionDetail(kind string, sport uint16, dst net.IP, dport uint16, note string) {
+	e.noticeTick(sport, kind, dst, dport)
+	if e.bus.Verbose() {
+		e.bus.Throttle(fmt.Sprintf("action:%s:%s:%d", kind, dst, dport), time.Minute,
+			"[%s] %s:%d  %s", kind, dst, dport, note)
+	}
+}
+
+// noticeTick 记下“这个源端口最后是什么动作/目标”（连接表与排查用）。
+func (e *Engine) noticeTick(sport uint16, kind string, dst net.IP, dport uint16) {
 	key := kind + " " + fmt.Sprintf("%s:%d", dst, dport)
 	e.mu.Lock()
 	if e.notices == nil {
 		e.notices = map[uint16]noticeSeen{}
 	}
-	prev, seen := e.notices[sport]
 	e.notices[sport] = noticeSeen{key: key, last: time.Now()}
 	e.mu.Unlock()
-	if !seen || prev.key != key {
-		e.bus.Info("[%s] %s:%d  %s", kind, dst, dport, note)
-	}
 }
 
 // flowProc 这条连接的进程名 / PID。
 //
 // 三层次序：① 规则里没人写进程条件 → 直接返回空（零开销）；
 // ② 连接上已经查过 → 用缓存的；③ 查一次 TCP 表（常见情况只是内存里的 map 命中）。
+// flowProc 这条连接的进程名 / PID。
+//
+// 三层次序：① 连接上已经查到过 → 用缓存的；② 这个连接查过一次没查到
+// （受保护进程/已消失）→ 不再每包重查；③ 查一次表（常见情况只是内存里 map 命中）。
+//
+// 为什么现在**总是查**（不再要求“规则里写了进程条件”）：
+//   - 后台每 500ms 刷表这件事本来就在跑（resolver 在 New() 里建、Start() 里启），
+//     省掉的只是一个 map 查找（实测命中 ~0.1µs，见 local/procbench）；
+//   - 换来的是日志与连接列表里都有进程名（实测以前几乎全是 proc=unknown），
+//     而“到底是谁在连这个地址”正是现场第一个要问的问题。
 func (e *Engine) flowProc(sport uint16) (string, uint32) {
-	if e.proc == nil || !e.ruleSet().NeedsProc() {
+	if e.proc == nil {
 		return "", 0
 	}
-	if st := e.flow(sport); st != nil && st.procName != "" {
-		return st.procName, st.pid
+	if st := e.flow(sport); st != nil {
+		if st.procName != "" {
+			return st.procName, st.pid
+		}
+		if st.procTried.Load() {
+			return "", 0 // 查过一次没查到（受保护进程/已消失），别每个包都再查
+		}
+		st.procTried.Store(true)
 	}
 	name, pid, _ := e.proc.ByPort(sport)
 	return name, pid
@@ -2437,6 +2470,9 @@ func (e *Engine) rewriteOutbound(h *divert.Handle, pkt []byte, addr *divert.Addr
 			ruleNo: ruleNo, ruleName: ruleName,
 			procName: procName, pid: pid,
 		}
+		// 调用方刚刚查过一次进程表（flowProc）：把“查不到”也缓存住，
+		// 否则这个连接的每个包都会再查一次。
+		st.procTried.Store(true)
 		st.touch()
 		e.conns[sport] = st
 		if !existed {
@@ -2510,7 +2546,7 @@ func (e *Engine) flow(sport uint16) *connState {
 // passThrough 处理直连与阻断：计数 + 必要时记一行日志（去重）。
 // 直连的包原样放回内核转发；阻断的包丢掉，并在 SYN 上回一个 RST。
 func (e *Engine) passThrough(h *divert.Handle, pkt []byte, addr *divert.Address, t int,
-	src, dst net.IP, sport, dport uint16, flags byte, act rules.Action, ruleNo int, ruleName, procName string, pid uint32) {
+	src, dst net.IP, sport, dport uint16, flags byte, act rules.Action, ruleNo int, ruleName, procName string, pid uint32, detail bool) {
 
 	if isSyn(flags) {
 		e.mu.Lock()
@@ -2518,12 +2554,17 @@ func (e *Engine) passThrough(h *divert.Handle, pkt []byte, addr *divert.Address,
 			st := &connState{dst: dst, dport: dport, app: append(net.IP(nil), src...),
 				appPort: sport, action: act, start: time.Now(),
 				ruleNo: ruleNo, ruleName: ruleName, procName: procName, pid: pid}
+			st.procTried.Store(true) // 同上：调用方刚查过
 			st.touch()
 			e.conns[sport] = st
 		}
 		e.mu.Unlock()
 		if act == rules.ActionDirect {
-			e.noteAction("直连", sport, dst, dport, "不走代理"+ruleSuffix(ruleNo, ruleName))
+			if detail {
+				e.noteActionDetail("直连", sport, dst, dport, "不走代理"+ruleSuffix(ruleNo, ruleName))
+			} else {
+				e.noteAction("直连", sport, dst, dport, "不走代理"+ruleSuffix(ruleNo, ruleName))
+			}
 		} else {
 			e.noteAction("阻断", sport, dst, dport, "已丢弃"+ruleSuffix(ruleNo, ruleName))
 		}
@@ -2565,6 +2606,7 @@ func (e *Engine) janitor() {
 			e.pruneLoops() // A14：清掉过期的环路检测窗口
 			e.pruneQUICNotices()
 			e.pruneOnce()
+			e.bus.FlushThrottled() // 把“噪声停了但还是欠着”的去重计数补出来
 			if tick++; tick%5 == 0 {
 				e.logStatsSummary()
 			}
@@ -3133,7 +3175,7 @@ func (e *Engine) pruneNames() {
 	for _, h := range exp {
 		e.names.Remove(h)
 	}
-	e.bus.Info("name.expire: count=%d names=%v", len(exp), exp)
+	e.bus.Detail("name.expire: count=%d names=%v", len(exp), exp)
 	e.applyHostIPs()
 	e.onWildcardsChanged()
 }

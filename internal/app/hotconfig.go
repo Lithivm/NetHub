@@ -32,6 +32,13 @@ import (
 const (
 	// configPollEvery 外部改动了 config.yaml 多久能被发现（也是 -apply 的最坏生效延迟）。
 	configPollEvery = 2 * time.Second
+	// configRetryEvery / configRetryTries 读到“写了一半”的文件时重试的节奏与次数。
+	//
+	// 为什么要重试：外部编辑器（包括 agent 的工具）是**原地写**文件的，2 秒一次的轮询
+	// 很容易正好读到半截 YAML —— 实测：先记一行 ERROR“改动没有生效”，两秒后又自己好了。
+	// 这种噪声会让人以为配置坏了，白查一圈。连续几次都载入不进去，才真是配置有问题。
+	configRetryEvery = 400 * time.Millisecond
+	configRetryTries = 4
 	// stateEvery 运行态自报的间隔（内容没变也写，供外部判断“进程还活着”）。
 	stateEvery = 10 * time.Second
 	// RuntimeFile 运行态文件名（放在 exe 同目录，和 config.yaml 一起）。
@@ -279,7 +286,7 @@ func (a *App) pollConfigFile() {
 		return // 没变，或这个坏版本已经报过了（别每 2 秒刷屏）
 	}
 
-	res, err := a.ApplyFromDisk()
+	res, err := a.applyFromDiskWithRetry()
 	if err != nil {
 		a.mu.Lock()
 		a.badHash = sum
@@ -303,6 +310,27 @@ func (a *App) pollConfigFile() {
 		a.Bus.Warn("config.reload: %s 改了，需要重启才生效", f)
 	}
 	a.writeRuntime()
+}
+
+// applyFromDiskWithRetry 载入磁盘配置；載入失败时重试几次。
+//
+// 失败区分两种：① 文件正被外部程序写（读到半截）—— 重试就能成功；
+// ② 配置真有问题 —— 重试几遍仍失败，调用方报 ERROR。
+// 只有① 被重试掉，才不让现场看到一条虚警。
+func (a *App) applyFromDiskWithRetry() (ApplyResult, error) {
+	res, err := a.ApplyFromDisk()
+	if err == nil {
+		return res, nil
+	}
+	for i := 1; i < configRetryTries; i++ {
+		time.Sleep(configRetryEvery)
+		res, err = a.ApplyFromDisk()
+		if err == nil {
+			a.Bus.Info("config.reload: source=file 第 %d 次读到完整文件（前 %d 次读到的是写了一半的）", i+1, i)
+			return res, nil
+		}
+	}
+	return res, err
 }
 
 // ── 运行态自报（runtime.json）──

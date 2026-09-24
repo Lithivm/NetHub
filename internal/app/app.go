@@ -242,6 +242,8 @@ func (a *App) startLockedInner() error {
 		a.notify("启动失败", err.Error(), NotifyError)
 		return err
 	}
+	// “详细日志”是配置里的一项，启动时按它给总线定档（界面上的开关可直接改，见 SetLogVerbose）
+	a.Bus.SetVerbose(a.Cfg.LogVerbose())
 	// 旧版加过密的配置 + 保险箱丢了 → 这条链必然认证失败，先把话说清楚
 	if legacy := a.Cfg.LegacySecretWarning(); len(legacy) > 0 {
 		a.Bus.Error("⚠ 这些链还引用着旧版加密口令，但解不开（secrets.dat 丢了或换了机器）：%v", legacy)
