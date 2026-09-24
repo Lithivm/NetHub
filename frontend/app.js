@@ -104,8 +104,25 @@ function applyTheme(mode) {
 async function setTheme(mode) {
   const next = mode === 'dark' ? 'dark' : 'light';
   if (next === state.theme) return;   // 点已选中的那个：什么都不做（不写盘）
-  applyTheme(next);                   // 先本地切，界面立刻响应
+  applyThemeSoft(next);               // 先本地切，界面立刻响应
   try { await call('SetTheme', next); } catch (e) { fail(e); }
+}
+
+// 切主题时让**整页颜色**淡过去，而不是所有颜色硬切一下。
+//
+// 做法：切换前给 <html> 挂 .theme-anim（CSS 里那份 280ms 色彩过渡），切完 400ms 摘掉。
+// 用临时类而不是常驻：常驻的话日常 hover/选中也会被拖到 280ms，反而发胝。
+// 只动颜色、不动 transform —— 标签指示块与主题滑块自己的动画得以保留。
+let themeAnimTimer = 0;
+function applyThemeSoft(mode) {
+  const root = document.documentElement;
+  const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) { applyTheme(mode); return; }   // 系统要求减少动效：直接切
+  root.classList.add('theme-anim');
+  void root.offsetWidth;   // 让 .theme-anim 先落地：同一个任务里加类又改色，有实现不会补过渡
+  applyTheme(mode);
+  clearTimeout(themeAnimTimer);
+  themeAnimTimer = setTimeout(() => root.classList.remove('theme-anim'), 400);
 }
 
 /* ═══════════════ 标签页 ═══════════════ */

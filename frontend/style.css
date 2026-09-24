@@ -881,10 +881,32 @@ code, .mono { font-family: var(--font-mono); }
   height: calc(100% - 6px);
   background: var(--primary);
   border-radius: var(--r-chip);
-  transition: transform .18s ease;
+  transition: transform 220ms var(--ease-soft);
   pointer-events: none;
 }
 .seg2[data-theme="dark"] .seg2-thumb { transform: translateX(100%); }
+
+/* ═══ 深浅色切换的柔和过渡 ═══
+   做法：切主题的前后由 JS 在 <html> 上挂/摘 .theme-anim，这期间给全页一份色彩过渡；
+   切完就摘掉，所以日常 hover / 选中仍是各自 140ms，不会被拖慢。
+   只过渡**颜色类**属性 —— transform 不在列表里：标签指示块、主题滑块、拖拽浮动卡片
+   都靠 transform 动，要是被这条全覆盖，它们会在切主题那一瞬丢掉动画。
+   （!important 是必需的：滑块自身的 transition 优先级比这里高。） */
+html.theme-anim,
+html.theme-anim *,
+html.theme-anim *::before,
+html.theme-anim *::after {
+  transition: background-color 280ms var(--ease-soft),
+              color 280ms var(--ease-soft),
+              border-color 280ms var(--ease-soft),
+              box-shadow 280ms var(--ease-soft),
+              fill 280ms var(--ease-soft),
+              stroke 280ms var(--ease-soft) !important;
+}
+html.theme-anim .seg2-thumb { transition: transform 220ms var(--ease-soft) !important; }
+@media (prefers-reduced-motion: reduce) {
+  html.theme-anim, html.theme-anim *, html.theme-anim *::before, html.theme-anim *::after { transition: none !important; }
+}
 .seg2-btn {
   position: relative; z-index: 1;
   width: 100%; min-width: 0;   /* 等宽：不允许按内容撑开 */
