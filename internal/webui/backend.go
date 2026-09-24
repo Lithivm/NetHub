@@ -211,6 +211,8 @@ type RouteView struct {
 	Inactive  bool     `json:"inactive"`
 	// A20：进程条件（空 = 不看进程）
 	Apps []string `json:"apps"`
+	// 这条规则放行 QUIC（allow_quic）：它的 UDP 443 不进过滤器、直连出去
+	AllowQUIC bool `json:"allowQuic"`
 	// 域名目标：解析到哪、什么时候解析的、解析不到的原因（规则页直接显示）
 	HostResolves []engine.HostResolveView `json:"hostResolves"`
 	// Wildcards 通配域名（*.his.com）当前覆盖到哪些 IP（学习自观察到的 DNS 应答）
@@ -606,6 +608,7 @@ func (b *Backend) GetRoutes() []RouteView {
 			LocalNets:    r.LocalNets,
 			Inactive:     !localNetsMatch(r.LocalNets, localIPv4s()),
 			Apps:         r.Apps,
+			AllowQUIC:    r.AllowQUIC,
 			Enabled:      r.IsEnabled(),
 			HostResolves: mine,
 			Wildcards:    wild,
@@ -1125,11 +1128,13 @@ type RouteInput struct {
 	Ports     string `json:"ports"`
 	LocalNets string `json:"localNets"`
 	Apps      string `json:"apps"`
+	// AllowQUIC 放行 QUIC（allow_quic）：勾上 = 这条规则的目标不拦 UDP 443
+	AllowQUIC bool `json:"allowQuic"`
 }
 
 // ruleFromInput 把界面输入整理成 config.Route。
 func ruleFromInput(in RouteInput) (config.Route, error) {
-	return ruleFrom(in.Name, in.Targets, in.Chain, in.Ports, in.LocalNets, in.Apps)
+	return ruleFrom(in.Name, in.Targets, in.Chain, in.Ports, in.LocalNets, in.Apps, in.AllowQUIC)
 }
 
 // SaveRoute 保存一条规则：index < 0 = 新增，否则替换第 index 条。
@@ -1167,7 +1172,7 @@ func (b *Backend) SaveRoute(index int, in RouteInput) error {
 
 // ruleFrom 把界面传来的"一条规则"整理成 config.Route：目标与端口文本都可以一次填多个
 // （换行/逗号/顿号/空格分隔），这里负责拆分 + 归一化。端口留空 = 任意端口。
-func ruleFrom(name, targets, chain, ports, localNets, apps string) (config.Route, error) {
+func ruleFrom(name, targets, chain, ports, localNets, apps string, allowQUIC bool) (config.Route, error) {
 	ts, _, err := config.NormalizeTargets(targets)
 	if err != nil {
 		return config.Route{}, err
@@ -1201,7 +1206,8 @@ func ruleFrom(name, targets, chain, ports, localNets, apps string) (config.Route
 		}
 		lns = append(lns, ln)
 	}
-	return config.Route{Name: name, Targets: ts, Ports: ps, Chain: chain, LocalNets: lns, Apps: as}, nil
+	return config.Route{Name: name, Targets: ts, Ports: ps, Chain: chain, LocalNets: lns, Apps: as,
+		AllowQUIC: allowQUIC}, nil
 }
 
 // normalizeApps 拆分并校验进程条件：进程名（可带 * 通配，也可写完整路径）。
@@ -1252,7 +1258,7 @@ func ruleSaved(verb string, rt config.Route) string {
 // AddRoute 添加一条规则。名字可留空；目标与端口都可以一次填多个 ——
 // 多个目标属于**同一条规则**（对齐 Proxifier：一个动作挂一组目标 + 一组端口）。
 func (b *Backend) AddRoute(name, targets, chain, ports, localNets string) error {
-	rt, err := ruleFrom(name, targets, chain, ports, localNets, "")
+	rt, err := ruleFrom(name, targets, chain, ports, localNets, "", false)
 	if err != nil {
 		return err
 	}
@@ -1264,9 +1270,14 @@ func (b *Backend) AddRoute(name, targets, chain, ports, localNets string) error 
 
 // UpdateRoute 替换第 index 条规则（同样支持多目标 + 端口条件）。
 func (b *Backend) UpdateRoute(index int, name, targets, chain, ports, localNets string) error {
-	rt, err := ruleFrom(name, targets, chain, ports, localNets, "")
+	rt, err := ruleFrom(name, targets, chain, ports, localNets, "", false)
 	if err != nil {
 		return err
+	}
+	// 这个入口（老 API）不带 allow_quic 参数：像 SaveRoute 对 Enabled 那样**继承原值**，
+	// 否则“用老接口改个名字”会静默把“不拦 QUIC”抹掉。
+	if cur, ok := b.a.Cfg.RouteAt(index); ok {
+		rt.AllowQUIC = cur.AllowQUIC
 	}
 	if err := b.a.Cfg.UpdateRoute(index, rt); err != nil {
 		return err

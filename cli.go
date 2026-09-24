@@ -26,6 +26,7 @@ import (
 	"nethub/internal/app"
 	"nethub/internal/config"
 	"nethub/internal/gostbat"
+	"nethub/internal/hostsmgr"
 	"nethub/internal/rules"
 	"nethub/internal/upstream"
 	"nethub/internal/webui"
@@ -183,6 +184,11 @@ type ruleDoc struct {
 type hostsDoc struct {
 	Manage  bool     `json:"manage"`
 	Entries []string `json:"entries"`
+	// InFile 系统 hosts 里现在有没有我们的维护段（正常只在引擎跑着的时候为 true）
+	InFile bool `json:"inFile"`
+	// Stale 有段但没有实例在跑 —— 那几个名字现在指着内网 IP 而没人兑付。
+	// 只会在“没走干净”（被强杀）时出现；启动一次 NetHub 就会重新写回去。
+	Stale bool `json:"stale,omitempty"`
 }
 
 // cmdStatus 打印机器可读的现状。退出码：0 = 配置能载入（服务在不在跑都算 OK）；
@@ -246,13 +252,25 @@ func cmdStatus(cfgPath string) int {
 		doc.Rules = append(doc.Rules, d)
 	}
 	doc.Hosts = hostsDoc{Manage: cfg.Hosts.Manage, Entries: cfg.Hosts.Entries}
+	if _, inFile, _, err := hostsmgr.Read(); err == nil {
+		doc.Hosts.InFile = inFile
+	}
 
 	// 运行实例自报（谁在跑、吃的是哪份配置）：文件不在（或进程已退出）就说明没实例在跑。
+	liveRuntime := false
 	if rd, ok := app.ReadRuntime(); ok {
 		rdoc := runtimeDoc{RuntimeDoc: rd}
 		fileSum := app.FileHash(cfgPath)
 		rdoc.ConfigMatchesFile = rd.Running && fileSum != "" && rd.ConfigHash == fileSum
 		doc.Runtime = &rdoc
+		liveRuntime = rd.Running
+	}
+	// 残留告警：hosts 里还有我们的段，但没有任何实例在跑 —— 那几个名字现在必然打不开。
+	// （引擎正常退出时会自己把段收走；看见这条就说明上次是被强杀/崩溃的。）
+	if doc.Hosts.InFile && !liveRuntime {
+		doc.Hosts.Stale = true
+		doc.Notes = append(doc.Notes,
+			"hosts 里有 NetHub 留下的段，但没有实例在跑：那几个内网域名现在会解析到内网 IP（大概率打不开）。启动一次 NetHub，或用界面上的「清理 hosts」清掉")
 	}
 
 	doc.Tuning = map[string]any{

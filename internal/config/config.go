@@ -212,6 +212,17 @@ type Route struct {
 	// Target 是 v1 的旧写法（一条规则一个目标），只为读老 config.yaml 保留：
 	// 载入时由 Normalize 并进 Targets，保存时不再写出。
 	Target string `yaml:"target,omitempty"`
+
+	// AllowQUIC 这条规则的目标**不拦 QUIC**（它的 UDP 443 正常直连出去）。
+	//
+	// 默认（不写）跟着全局 QUIC 阻断走：本该走链 / 阻断的目标，它们的 UDP 443 会被拦下
+	// 并记一行 quic.block —— 因为 UDP 不走隧道，不拦就等于绕过隧道直连漏出。
+	// 但现场也可能真有“只认 HTTP/3”的系统，拦它就是打断业务；那时把这一条勾上，
+	// 只放它的 QUIC 直连（同目标的 TCP 那条路仍按规则走链）。
+	//
+	// 实现上**不进 UDP 侧的过滤器区间** —— 这些目标的 UDP 443 在驱动层就被放行，
+	// 一个包也不用收回用户态（零开销，而不是“收上来再放回去”）。
+	AllowQUIC bool `yaml:"allow_quic,omitempty"`
 }
 
 // IsDirect 这条规则的动作是不是直连（不走代理）。
@@ -225,6 +236,9 @@ func (r *Route) SetEnabled(on bool) { v := on; r.Enabled = &v }
 
 // IsBlock 这条规则的动作是不是阻断（丢弃）。
 func (r Route) IsBlock() bool { return r.Chain == BlockChain }
+
+// AllowsQUIC 这条规则明确放行 QUIC（UDP 443 直连，不拦不记）。
+func (r Route) AllowsQUIC() bool { return r.AllowQUIC }
 
 // NeedsChain 这条规则需不需要引用真实的链（direct / block 不需要）。
 func (r Route) NeedsChain() bool { return !r.IsDirect() && !r.IsBlock() }
@@ -1615,6 +1629,24 @@ func (c *Config) Precheck() []string {
 	}
 	if db > 15*time.Second {
 		out = append(out, fmt.Sprintf("⚠ 拨号总预算 %s 偏大：所有上游都半死时，用户要等这么久才拿到“连不上”", db))
+	}
+
+	// QUIC：勾了“不拦 QUIC”的规则会放它的 UDP 443 直连 —— 这是有意为之，只如实报数。
+	var quicAllow, quicRedundant []string
+	for i, r := range snap.Routes {
+		if !r.AllowsQUIC() {
+			continue
+		}
+		quicAllow = append(quicAllow, fmt.Sprintf("第 %d 条", i+1))
+		if r.IsDirect() {
+			quicRedundant = append(quicRedundant, fmt.Sprintf("第 %d 条", i+1))
+		}
+	}
+	if len(quicAllow) > 0 {
+		out = append(out, fmt.Sprintf("✓ %s规则勾了“不拦 QUIC”：它们的 UDP 443 直连出去（不进过滤器）—— 确认这是你要的", strings.Join(quicAllow, "、")))
+	}
+	if len(quicRedundant) > 0 {
+		out = append(out, fmt.Sprintf("⚠ %s规则已经是「直连」，直连本来就不拦 QUIC —— 那一勾是多余的", strings.Join(quicRedundant, "、")))
 	}
 	return out
 }

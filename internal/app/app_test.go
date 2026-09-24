@@ -3,9 +3,11 @@ package app
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"nethub/internal/config"
+	"nethub/internal/hostsmgr"
 	"nethub/internal/logbus"
 )
 
@@ -58,5 +60,104 @@ func TestSaveConfigWritesWhenValid(t *testing.T) {
 	}
 	if len(re.Routes) != 1 || re.Routes[0].Chain != "proxy-a" {
 		t.Fatalf("没落盘或内容不对: %+v", re.Routes)
+	}
+}
+
+// 收尾（"干净退出"）：引擎一停就该把我们在系统里留的痕迹撤干净。
+//   - hosts 段：留着它，那几个名字就指着内网 IP 而没人兑付（应用一直等到超时）
+//   - runtime.json：没有实例在跑就不该留自报
+//
+// 块外的内容（别人的 hosts 记录）一个字节都不能动。
+func TestCleanupAfterStopRemovesHostsAndRuntime(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("SystemRoot", root) // Path() 就落在临时 hosts 上，不碰真文件
+	hostsPath := filepath.Join(root, "System32", "drivers", "etc", "hosts")
+	if err := os.MkdirAll(filepath.Dir(hostsPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const outside = "# 原有内容\n1.2.3.4 keep.me keep-alias.me\n"
+	if err := os.WriteFile(hostsPath, []byte(outside), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldFlush := hostsmgr.FlushFunc
+	hostsmgr.FlushFunc = func() error { return nil } // 别真去刷系统 DNS 缓存
+	t.Cleanup(func() { hostsmgr.FlushFunc = oldFlush })
+
+	p := filepath.Join(t.TempDir(), "config.yaml")
+	seed := "relay: 127.0.0.1:0\n" +
+		"chains:\n  - name: proxy-a\n    forward: socks5://127.0.0.1:1080\n" +
+		"routes: []\n" +
+		"hosts:\n  manage: true\n  entries:\n    - 10.0.0.1 a.his.com\n    - 10.0.0.2 b.his.com\n"
+	if err := os.WriteFile(p, []byte(seed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hostsmgr.Apply(cfg.HostsCopy().Entries); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists, _, _ := hostsmgr.Read(); !exists {
+		t.Fatal("前置条件：hosts 段应当已写入")
+	}
+
+	// 造一份运行态文件（写在"exe 同目录"，测试里就是测试二进制所在目录）
+	rtPath := filepath.Join(exeDir(), RuntimeFile)
+	if err := os.WriteFile(rtPath, []byte("{\"running\":true}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a := New(cfg, logbus.New(50))
+	a.cleanupAfterStop()
+
+	if _, exists, _, _ := hostsmgr.Read(); exists {
+		t.Error("收尾后不该还留着 NetHub 的 hosts 段")
+	}
+	body, err := os.ReadFile(hostsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "1.2.3.4 keep.me") {
+		t.Errorf("收尾动了块外的内容：\n%s", body)
+	}
+	if _, err := os.Stat(rtPath); !os.IsNotExist(err) {
+		t.Errorf("收尾后应当删掉 %s（err=%v）", RuntimeFile, err)
+	}
+}
+
+// hosts.manage=false 时收尾不许碰 hosts（用户明确说"hosts 我自己管"）。
+func TestCleanupAfterStopLeavesHostsWhenUnmanaged(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("SystemRoot", root)
+	hostsPath := filepath.Join(root, "System32", "drivers", "etc", "hosts")
+	if err := os.MkdirAll(filepath.Dir(hostsPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hostsPath, []byte("# 原有\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldFlush := hostsmgr.FlushFunc
+	hostsmgr.FlushFunc = func() error { return nil }
+	t.Cleanup(func() { hostsmgr.FlushFunc = oldFlush })
+	if _, err := hostsmgr.Apply([]string{"10.0.0.1 a.his.com"}); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(t.TempDir(), "config.yaml")
+	seed := "relay: 127.0.0.1:0\n" +
+		"chains:\n  - name: proxy-a\n    forward: socks5://127.0.0.1:1080\n" +
+		"routes: []\n" +
+		"hosts:\n  manage: false\n  entries:\n    - 10.0.0.1 a.his.com\n"
+	if err := os.WriteFile(p, []byte(seed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := New(cfg, logbus.New(50))
+	a.cleanupAfterStop()
+	if _, exists, _, _ := hostsmgr.Read(); !exists {
+		t.Error("hosts.manage=false 时不该动 hosts 文件")
 	}
 }

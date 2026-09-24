@@ -134,3 +134,50 @@ func TestRangesForPort(t *testing.T) {
 		t.Errorf("443 上应带出该区间：%+v", out)
 	}
 }
+
+// QUICFilterRanges：勾了「不拦 QUIC」（allow_quic）的规则，它的目标**不进 UDP 侧区间**
+// —— 于是这些目标的 UDP 443 在驱动层就被放行，一个包也不收回用户态。
+// 注意 TCP 侧（FilterRanges）必须**不受影响**：勾的是 UDP，不是整条规则。
+func TestQUICFilterRangesSkipsAllowQUIC(t *testing.T) {
+	s := New()
+	if err := s.Load([]Route{
+		{Name: "走链", Targets: []string{"10.1.0.0/24"}, Chain: "a"},
+		{Name: "放 QUIC", Targets: []string{"10.2.0.0/24"}, Chain: "a", AllowQUIC: true},
+		{Name: "阻断但放 QUIC", Targets: []string{"10.3.0.0/24"}, Chain: "block", Action: ActionBlock, AllowQUIC: true},
+		{Name: "直连", Targets: []string{"192.168.0.0/24"}, Chain: "direct", Action: ActionDirect},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	tcp := s.FilterRanges(false)
+	if len(tcp) != 3 {
+		t.Fatalf("TCP 侧应仍是 3 段（allow_quic 只影响 UDP 侧）：%v", tcp)
+	}
+
+	udp := s.QUICFilterRanges()
+	if len(udp) != 1 {
+		t.Fatalf("UDP 侧应只剩 1 段（去掉两条 allow_quic、且不含直连）：%v", udp)
+	}
+	if got := U2IP(udp[0].First).String(); got != "10.1.0.0" {
+		t.Errorf("UDP 侧留下的应是 10.1.0.0/24，实得 %s", got)
+	}
+	// 真实拼过滤器要用的形态：只能覆盖 10.1.0.0/24 的 443
+	rs := RangesForPort(udp, 443)
+	if len(rs) != 1 || U2IP(rs[0].First).String() != "10.1.0.0" {
+		t.Errorf("RangesForPort 结果不对：%+v", rs)
+	}
+}
+
+// 勾了 allow_quic 的规则**不能**因此从匹配里消失 —— TCP 那条路仍按规则走链。
+func TestAllowQUICStillMatchesTCP(t *testing.T) {
+	s := New()
+	if err := s.Load([]Route{
+		{Name: "放 QUIC", Targets: []string{"10.2.0.0/24"}, Chain: "a", AllowQUIC: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	chain, act, ok := s.Match(net.ParseIP("10.2.0.5"), 443)
+	if !ok || chain != "a" || act != ActionChain {
+		t.Fatalf("allow_quic 的规则仍应命中 TCP：ok=%v chain=%q act=%v", ok, chain, act)
+	}
+}

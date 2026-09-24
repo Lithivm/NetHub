@@ -4,6 +4,8 @@ package app
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -322,12 +324,57 @@ func (a *App) stopLocked() {
 	}
 	a.Bus.Info("正在停止…")
 	a.Engine.Stop()
-	// 引擎真的停完了才放锁：否则另一个进程可能在我们过滤器还在时就看到"空闲"
-	// 收尾前补一份“已停止”的运行态（还在持锁，写完再放）。
-	a.writeRuntime()
+	// 引擎真的停完了才收尾：hosts 段与运行态文件都是“兑付不了的空头支票”。
+	a.cleanupAfterStop()
+	// 收尾完了才放锁：否则另一个进程可能在我们过滤器还在时就看到"空闲"
 	lock.release()
-	a.Bus.Info("✓ 已停止")
+	a.Bus.Info("✓ 已停止（痕迹已收尾）")
 	a.notify("NetHub 已停止", "拦截与隧道均已关闭", NotifyWarn)
+}
+
+// cleanupAfterStop 引擎停之后的收尾：把我们在系统里留下的东西撒干净。
+//
+// 为什么要做：引擎一停，hosts 段里那些名字就没人兑付了 —— 它们还指着内网 IP，
+// 而隧道已经不在，应用会一直等到超时（现场表现就是“服务一停，这几个系统打不开”）。
+// 运行态文件同理：留着一份写着“运行中”的自报，下一个人（或下一个 agent）就会误判。
+//
+// 撒掉的东西下次启动会原样写回来（hosts.Apply 幂等），所以是“**停就撒、启再写**”。
+func (a *App) cleanupAfterStop() {
+	a.cleanupHosts()
+	a.clearRuntime()
+}
+
+// cleanupHosts 撒掉我们维护的 hosts 段（只在 hosts.manage 开着时）。
+func (a *App) cleanupHosts() {
+	if !a.Cfg.HostsCopy().Manage {
+		return
+	}
+	block, exists, _, err := hostsmgr.Read()
+	if err != nil {
+		a.Bus.Warn("hosts.cleanup: removed=0 err=%v", err)
+		return
+	}
+	if !exists || len(block) == 0 {
+		return // 没有我们的段（或空段）→ 本来就没痕迹
+	}
+	if err := hostsmgr.Remove(); err != nil {
+		a.Bus.Warn("hosts.cleanup: removed=0 entries=%d err=%v", len(block), err)
+		return
+	}
+	// Remove 自己会刷 DNS 缓存；不刷的话旧解析还会在缓存里生效。
+	a.Bus.Info("hosts.cleanup: removed=%d flush=ok", len(block))
+}
+
+// clearRuntime 删掉运行态文件（runtime.json）：没有实例在跑，就不该留自报。
+func (a *App) clearRuntime() {
+	dir := exeDir()
+	if dir == "" {
+		return
+	}
+	err := os.Remove(filepath.Join(dir, RuntimeFile))
+	if err == nil {
+		a.Bus.Info("runtime.clear: file=%s", RuntimeFile)
+	}
 }
 
 // Restart 重启（改完配置后调用）。
@@ -367,7 +414,7 @@ func toRules(rs []config.Route) []rules.Route {
 			act = rules.ActionBlock
 		}
 		out = append(out, rules.Route{Name: r.Name, Targets: r.Targets, Ports: r.Ports,
-			LocalNets: r.LocalNets, Apps: r.Apps, Chain: r.Chain, Action: act})
+			LocalNets: r.LocalNets, Apps: r.Apps, AllowQUIC: r.AllowQUIC, Chain: r.Chain, Action: act})
 	}
 	return out
 }

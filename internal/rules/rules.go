@@ -59,6 +59,11 @@ type Route struct {
 	// 不用手动改配置；也用于“只在客户内网环境下接管”这种安全阀。
 	LocalNets []string `yaml:"local_nets,omitempty" json:"localNets,omitempty"`
 
+	// AllowQUIC 放行 QUIC：这条规则的目标**不拦 UDP 443**（让它直连出去）。
+	// 默认（false）跟着全局 QUIC 阻断走（见 engine.buildMainFilter 的 UDP 侧子句）。
+	// 勾上之后这条规则的目标**不进 UDP 侧过滤器区间** —— 零开销。
+	AllowQUIC bool `yaml:"allow_quic,omitempty" json:"allowQuic,omitempty"`
+
 	// Apps 进程条件（可选），写成进程名，支持 * 通配：chrome.exe / *.exe / *weixin*。
 	// **与 Targets 是 AND 关系**：两样都填 → 两个都要命中；只填 Apps → 该进程的所有 TCP
 	// 连接都算命中（此时过滤器要拦全部流量，见 FilterRanges）。
@@ -589,12 +594,28 @@ type PortRange struct {
 // 例外：includeDirect=true 时也把直连网段装进去 —— 这时我们不修改它、只统计双向字节
 // （界面上的「统计直连流量」开关，默认关）。
 func (s *Set) FilterRanges(includeDirect bool) []Range {
+	return s.filterRanges(includeDirect, false)
+}
+
+// QUICFilterRanges 需要进 **UDP 侧**过滤器的区间（QUIC / UDP 443）。
+//
+// 与 FilterRanges(false) 只差一点：**跳过勾了「不拦 QUIC」的规则**（allow_quic）。
+// 这些目标的 UDP 443 在驱动层就被放行 —— 零开销，而不是“收上来再放回去”。
+// 直连规则本来就不在里面，勾不勾都与它无关（体检会提醒那一勾多余）。
+func (s *Set) QUICFilterRanges() []Range {
+	return s.filterRanges(false, true)
+}
+
+func (s *Set) filterRanges(includeDirect, skipQUICAllow bool) []Range {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	var rs []Range
 	for _, r := range s.routes {
 		if r.Action == ActionDirect && !includeDirect {
+			continue
+		}
+		if skipQUICAllow && r.AllowQUIC {
 			continue
 		}
 		// 注意：这里**不能**跳过“当前本机网络下不生效的规则”（LocalNets 不匹配）。

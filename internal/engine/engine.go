@@ -2604,11 +2604,12 @@ func (e *Engine) buildMainFilter(s *rules.Set, relayPort uint16) (string, int) {
 	filter := buildFilter(rs, relayPort)
 
 	// UDP 侧（QUIC 阻断）：只拿“走链 / 阻断”的区间 ——
-	// **直连目标不进来**，它们的 QUIC 我们一个包也不该碰。
+	// **直连目标不进来**，它们的 QUIC 我们一个包也不该碰；
+	// 勾了“不拦 QUIC”（allow_quic）的规则同样不进来（见 rules.QUICFilterRanges）。
 	// 假 IP 段要带上：应用拿着假 IP 去连 QUIC，那边根本没人在听，
-	// 回个 ICMP 让它立刻回落 TCP（真 IP 由 TCP 那条路换回来）。
+	// 回个 ICMP 让它回落 TCP（真 IP 由 TCP 那条路换回来）。
 	if e.cfg.QuicBlockEnabled() {
-		urs := rules.RangesForPort(s.FilterRanges(false), quicPort)
+		urs := rules.RangesForPort(s.QUICFilterRanges(), quicPort)
 		if fake != nil {
 			urs = append(urs, *fake)
 		}
