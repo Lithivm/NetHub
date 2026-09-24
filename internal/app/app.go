@@ -91,7 +91,9 @@ func (a *App) startHostsWatch() {
 			case <-tk.C:
 			}
 			hosts := a.Cfg.HostsCopy()
-			if !a.Running() || !hosts.Manage || len(hosts.Entries) == 0 {
+			// 拦截已经报错（句柄失效/驱动被拦）时**不能**再把内网域名指回内网 IP：
+			// 那时没人兑付，应用会一直等到超时 —— 比没有这条记录还糟。
+			if !a.RunningAndHealthy() || !hosts.Manage || len(hosts.Entries) == 0 {
 				continue
 			}
 			ok, why := hostsmgr.Verify(hosts.Entries)
@@ -180,10 +182,28 @@ func (k NotifyKind) String() string {
 }
 
 // Running 返回是否已启动。
+//
+// 注意它**不包含**“拦截是否还活着”：引擎被报 Fatal（句柄失效、驱动被拦）时
+// 这里仍返回 true（进程确实在跑，界面也不该显示成停止）。
+// 需要“现在还能不能接住流量”的地方用 RunningAndHealthy。
 func (a *App) Running() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.running
+}
+
+// RunningAndHealthy 引擎在跑、且拦截没被报错（“现在还能接住流量”）。
+//
+// 专用场景：hosts 那条守护 —— 拦截已死时它不能继续把内网域名指回内网 IP，
+// 那几个名字会变成“没人兑付的地址”（应用一直等到超时）。
+func (a *App) RunningAndHealthy() bool {
+	if !a.Running() {
+		return false
+	}
+	if a.Engine == nil {
+		return true
+	}
+	return a.Engine.Fatal() == nil
 }
 
 // Start 按顺序拉起：写 hosts → 起 gost → 等端口就绪 → 开拦截。
@@ -217,6 +237,10 @@ func (a *App) startLocked() error {
 	if err := a.startLockedInner(); err != nil {
 		// 启动没成功就把锁放开 —— 否则会变成"占着锁却没有引擎"，
 		// 服务版也跟着起不来，等于两边都用不了。
+		//
+		// 同时把 hosts 收回来：启动失败（比如拦截打不开）时，已经写下去的
+		// 内网域名映射没人兑付，留着只会让那几个名字一直超时。
+		a.cleanupHosts()
 		a.mu.Lock()
 		a.lock = nil
 		a.mu.Unlock()
@@ -320,7 +344,10 @@ func (a *App) stopLocked() {
 		close(stop)
 	}
 	if !was {
-		// 没在跑也要把锁放掉（防御性：抢到锁之后到 running=true 之间失败时）
+		// 没在跑也要把锁放掉（防御性：抢到锁之后到 running=true 之间失败时），
+		// 并且把可能已经写下去的 hosts 段收回来 —— 启动失败就留在系统里的话，
+		// 那几个内网域名会一直指着没人兑付的地址（一直等到超时）。
+		a.cleanupHosts()
 		lock.release()
 		return
 	}

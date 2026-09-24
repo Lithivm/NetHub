@@ -124,7 +124,11 @@ func (p *warmPool) refill(ch config.Chain, idx int, target int, cfg *config.Conf
 			}
 			conn, err := up.Prepare(to)
 			if err != nil {
-				continue // 补不到就算了，业务走现拨
+				// 拨不到就把占位**收掉**：只 continue 的话 nil 占位会留在列表里，
+				// 之后每次补池都以为“够了”（have >= target）—— 这条上游的预热
+				// 在本进程里就永久失效了，而且谁也看不出来。
+				p.dropPlaceholders(key)
+				return
 			}
 			p.mu.Lock()
 			// 把占位替换成真会话（保持长度不变）

@@ -26,6 +26,10 @@ type upHealth struct {
 	failStreak int
 	// downAt 上一次置为“不可用”的时刻（恢复时报“断了多久”用）。
 	downAt time.Time
+
+	// suspect 业务拨号连续失败的次数（**不是**探测结论，见 noteUpstreamSuspect）。
+	// 成功一次（拨通或探测通过）就清零。
+	suspect int
 }
 
 // UpHealthView 给界面看的上游健康快照。
@@ -76,6 +80,32 @@ func (e *Engine) healthOf(ch config.Chain) []*upHealth {
 }
 
 // markUp 记一次观测。返回是否发生"可用性翻转"（供只报变化的日志用）与上游原文。
+// noteUpstreamSuspect 记一次“业务拨号失败”。
+//
+// 为什么它**不直接改状态**：探测与真实拨号不是一回事 —— 一个坏掉的内网目标也能
+// 连着失败好几次，那不代表上游挂了。以前两者共用一套状态机，于是一条坏业务目标
+// 连续失败两次就把健康的上游写成 down，下一次探测又写一行“恢复”：日志里看着像
+// 链路在反复抖，现场会以为网络不稳。
+//
+// 现在：业务失败只算“疑似”（累计 3 次才按 5 分钟节流报一行），
+// 真正改状态由探测（连续两次同向）决定；拨通一次就把疑似清零。
+func (e *Engine) noteUpstreamSuspect(chain string, idx int, errText string) {
+	e.mu.Lock()
+	ups := e.health[chain]
+	suspect := 0
+	if idx >= 0 && idx < len(ups) && ups[idx] != nil {
+		ups[idx].suspect++
+		suspect = ups[idx].suspect
+	}
+	e.mu.Unlock()
+	if suspect < 3 {
+		return // 前几次多半是那个目标自己的问题，不值得说
+	}
+	e.bus.Throttle(fmt.Sprintf("upstream.suspect:%s:%d", chain, idx), 5*time.Minute,
+		"upstream.suspect: chain=%s upstream_no=%d 业务拨号连续失败 %d 次（未改状态，等探测确认）：%s",
+		chain, idx+1, suspect, firstLine(errText))
+}
+
 // healthFlipStreak 连续几次同向的探测结果才允许改状态（防抖）。
 const healthFlipStreak = 2
 
@@ -93,6 +123,9 @@ func (e *Engine) markUp(chain string, idx int, ok bool, latency time.Duration, e
 	h := ups[idx]
 	first := h.checked.IsZero()
 	h.checked = time.Now()
+	if ok {
+		h.suspect = 0 // 通了就把“疑似”清掉
+	}
 	if ok {
 		h.okStreak++
 		h.failStreak = 0

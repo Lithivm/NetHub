@@ -79,6 +79,10 @@ type connState struct {
 	// 用来把“查不到”也缓存住：否则包路径上每个包都会再查一次表。
 	procTried atomic.Bool
 
+	// counted 建这条条目时加过 statActive（只有走 relay 的连接加）。
+	// finish 据此决定要不要扣 —— 否则直连/阻断的条目会把活跃数越扣越少。
+	counted bool
+
 	// fakeName/realDst：DNS 接管相关。目标是我们发的假 IP 时，fakeName 是它对应的
 	// 域名，realDst 是这个域名在本机解析出的**真实 IP**（假 IP 绝不能拿去连）。
 	//
@@ -144,6 +148,11 @@ func (e *Engine) finish(st *connState) {
 	st.touch()
 	if !st.ended.CompareAndSwap(false, true) {
 		return // 已经结束过了，别重复扣活跃数
+	}
+	// 只有建条目时**真的加过**活跃数的那条才扣：
+	// 直连/阻断的条目以前不加只扣（用了 block 规则后，界面“活跃”会被持续偷走）。
+	if !st.counted {
+		return
 	}
 	e.mu.Lock()
 	if e.statActive > 0 {
@@ -337,6 +346,8 @@ type Engine struct {
 	tookSeen     map[string]bool
 	dnsBox       *dnsBlackbox // 排查用：DNS 黑匣子（tuning.dns_blackbox 打开时才有）
 	// tunBlocked 本机已有别的 TUN 模式代理在接管流量（检测到就自动让路）。
+	// 每次 Start 都要重新问一次：上一轮开着 Clash TUN、这轮关掉了，
+	// 如果这个标记不复位，我们会一直“让路”（不学名字、不接管 DNS）却谁也看不出来。
 	tunBlocked bool
 	// dohSeen 已报过的加密 DNS 端点（避免刷屏）。
 	dohSeen map[string]bool
@@ -376,6 +387,11 @@ type Engine struct {
 
 	// cap 抓包（A19）：按需把包写成 pcap
 	cap *capturer
+
+	// relayConns 在途的 relay 连接（Stop 时逐个关掉）。
+	// 以前这些连接不进 wg 也不被关：界面说“已停止”了，隧道还在转发；
+	// 而它们跨轮结束后还会去扣**新一轮**的活跃数。
+	relayConns map[net.Conn]struct{}
 
 	// pool 预热连接池（A11）：养着“已握手、只差 CONNECT”的会话
 	pool *warmPool
@@ -513,7 +529,8 @@ func (e *Engine) Start() error {
 	e.startMu.Lock()
 	defer e.startMu.Unlock()
 
-	e.setFatal(nil) // 重新启动就清掉“已中断”状态
+	e.setFatal(nil)      // 重新启动就清掉“已中断”状态
+	e.tunBlocked = false // 上一轮的让路结论不带进这一轮（见字段注释）
 	e.mu.Lock()
 	if e.run {
 		e.mu.Unlock()
@@ -722,6 +739,10 @@ func (e *Engine) Stop() {
 	dyn, dynStop := e.dynHandle, e.dynStop
 	inj := e.injector
 	done := e.done
+	running := make([]net.Conn, 0, len(e.relayConns))
+	for c := range e.relayConns {
+		running = append(running, c)
+	}
 	e.handle, e.ln, e.run = nil, nil, false
 	e.mainStop = nil
 	e.dynHandle, e.dynStop = nil, nil
@@ -754,6 +775,12 @@ func (e *Engine) Stop() {
 	}
 	if ln != nil {
 		ln.Close()
+	}
+	// 在途 relay 连接也要关：否则界面/托盘说“拦截与隧道均已关闭”、hosts 也撤了，
+	// 实际上这些隧道还在继续转发（现场表现是“停了服务业务还在跑”）。
+	// 关完再 wg.Wait，能确保它们真的收尾了。
+	for _, c := range running {
+		_ = c.Close()
 	}
 	// 只读噢探句柄也要关：它们阻塞在 Recv 上，不关就永远不返回（wg.Wait 卡住）。
 	e.closeSniffHandles()
@@ -863,7 +890,24 @@ func (e *Engine) acceptLoop() {
 				return
 			}
 		}
-		go e.handleConn(c)
+		// 在途 relay 连接登记在册（见 relayConns）：Stop 时要主动关掉它们。
+		// 否则进度列表里说“已停止”、hosts 已经撤了，实际上隧道还在转发数据。
+		e.mu.Lock()
+		if e.relayConns == nil {
+			e.relayConns = map[net.Conn]struct{}{}
+		}
+		e.relayConns[c] = struct{}{}
+		e.mu.Unlock()
+		e.wg.Add(1)
+		go func() {
+			defer e.wg.Done()
+			defer func() {
+				e.mu.Lock()
+				delete(e.relayConns, c)
+				e.mu.Unlock()
+			}()
+			e.handleConn(c)
+		}()
 	}
 }
 
@@ -949,6 +993,9 @@ func (e *Engine) dialSequential(ch config.Chain, raws []string, cands []int,
 }
 
 // tryUpstream 试一条上游，并把结果记进健康表。
+//
+// 注意业务拨号的失败**只作为参考**，不直接把上游判成 down（见 noteUpstream）：
+// 一个坏掉的内网目标也能连着失败两次，那不代表上游挂了。
 func (e *Engine) tryUpstream(ch config.Chain, raw string, idx int, dst net.IP, dport uint16,
 	timeout time.Duration) (net.Conn, error, string) {
 	up, err := upstream.Parse(raw)
@@ -960,10 +1007,13 @@ func (e *Engine) tryUpstream(ch config.Chain, raw string, idx int, dst net.IP, d
 	c, err := up.Dial(dst, dport, timeout)
 	lat := time.Since(t0)
 	if err == nil {
+		// 真拨通了：这是比探测更硬的证据，可以直接把状态正过来（也顺带消掉假警报）
 		e.markUp(ch.Name, idx, true, lat, "")
 		return c, nil, ""
 	}
-	e.markUp(ch.Name, idx, false, lat, err.Error())
+	// 失败：只升级“疑似”，等下一次探测确认。否则一条坏业务目标
+	// 连续失败两次就能把健康的上游写成 down，随后探测又报一行假的恢复。
+	e.noteUpstreamSuspect(ch.Name, idx, err.Error())
 	// 每条上游一行、带耗时与本次超时 —— 现场把日志整段复制给 agent 时，
 	// “谁、排第几、等了多久、原始报错是什么”都在这一行里。
 	// 上游地址用 maskUpstream（保留协议/主机/端口，去掉凭据）。
@@ -1271,6 +1321,82 @@ func copyAndClose(dst, src net.Conn, counter *atomic.Uint64) {
 
 // ───────────────────────── 包处理 ─────────────────────────
 
+// recoverHandle Recv 出错后的自愈：按退避重建同一只句柄，成则继续收包。
+//
+// 为什么要它（审计 P0-2）：主句柄一旦不可用，拦截就完全停了，但进程还活着、界面
+// 还显示“运行中” —— 内网流量被系统按原路发出去（直连内网 IP，全不通），
+// 只有人工重启才能恢复。触发途径实测存在：驱动被卸、安全软件临时拦、句柄失效。
+//
+// 退避 1s/2s/5s/10s/30s（共 ~48 秒）；期间一旦收到停止信号就立即退出。
+// 新句柄先建好、再把旧句柄关掉（防止关完到重建成功这段空窗期里包没人接）。
+func (e *Engine) recoverHandle(kind loopKind, stop chan struct{}) (*divert.Handle, error) {
+	backoff := []time.Duration{time.Second, 2 * time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second}
+	var lastErr error
+	for i, wait := range backoff {
+		select {
+		case <-e.done:
+			return nil, fmt.Errorf("引擎已停止")
+		default:
+		}
+		if i > 0 {
+			select {
+			case <-e.done:
+				return nil, fmt.Errorf("引擎已停止")
+			case <-time.After(wait):
+			}
+		}
+		filter, ferr := e.handleFilter(kind)
+		if ferr != nil {
+			return nil, ferr // 过滤器都不在了（停止过程中）→ 不必再试
+		}
+		nh, err := divert.Open(filter, divert.LayerNetwork, divert.PriorityDefault, divert.FlagDefault)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		// 新句柄已经能收包了，才动旧的
+		e.mu.Lock()
+		var old *divert.Handle
+		if kind == loopDyn {
+			// 这期间可能有别的路径重建过：那就不用我们这只
+			if e.dynHandle != nil {
+				nh.Close()
+				e.mu.Unlock()
+				return nil, fmt.Errorf("动态句柄已被重建")
+			}
+			e.dynHandle, e.dynFilter = nh, filter
+		} else {
+			old, e.handle = e.handle, nh
+		}
+		e.mu.Unlock()
+		if old != nil {
+			old.Close()
+		}
+		e.setFatal(nil)
+		e.bus.Info("WinDivert: 句柄已重建（第 %d 次尝试）—— 拦截恢复", i+1)
+		return nh, nil
+	}
+	return nil, lastErr
+}
+
+// handleFilter 重建句柄时用哪份过滤器：主句柄按当前规则集重算，动态句柄用记着的那份。
+func (e *Engine) handleFilter(kind loopKind) (string, error) {
+	if kind == loopDyn {
+		e.mu.RLock()
+		f := e.dynFilter
+		e.mu.RUnlock()
+		if f == "" {
+			return "", fmt.Errorf("动态过滤器没有记录")
+		}
+		return f, nil
+	}
+	filter, _ := e.buildMainFilter(e.ruleSet(), portOf(e.RelayAddr()))
+	if filter == "" {
+		return "", fmt.Errorf("主过滤器为空（规则集为空？）")
+	}
+	return filter, nil
+}
+
 // loopKind 说明这只句柄是谁的 —— 决定 Recv 出错时怎么处理（这两类差别很大，
 // 用 stop 是否为 nil 来区分已经不够了：热重载会让**主**句柄也带着 stop）。
 type loopKind int
@@ -1297,23 +1423,38 @@ func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}, kind loopKind)
 			case <-closedCh(stop):
 				return // 我们在换句柄（热重载 / 换动态过滤器），不是出错
 			default:
-				if kind == loopDyn {
-					// 动态句柄出错不能把整个引擎置成“已中断”：它只管通配域名
-					// 那部分流量，掉了就是“这些包不再被接管”。清掉句柄状态，
-					// 下一次观测到新名字时会重新开（见 rebuildDynFilter）。
-					e.bus.Warn("域名通配：动态过滤器已中断: %v（下次观测到域名时会重建）", err)
-					e.mu.Lock()
-					e.dynHandle, e.dynStop, e.dynFilter = nil, nil, ""
-					e.mu.Unlock()
-					return
-				}
-				e.bus.Error("WinDivert Recv 失败，拦截已中断: %v", err)
-				e.setFatal(err) // 让界面变红「Error」—— 否则状态还说“运行中”，其实一个包都没拦
-				if e.Notify != nil {
-					e.Notify("拦截已中断", err.Error()+"（请重启服务）", true)
+			}
+			if kind == loopDyn {
+				// 动态句柄出错不能把整个引擎置成“已中断”：它只管通配域名那部分流量。
+				// 但它也不能就此死掉 —— 先清掉句柄状态（让重建不再被“过滤器没变”挡回去），
+				// 再退避重建；不行才放弃。
+				e.bus.Warn("域名通配：动态过滤器已中断: %v（正在重建）", err)
+				e.mu.Lock()
+				e.dynHandle, e.dynStop, e.dynFilter = nil, nil, ""
+				e.mu.Unlock()
+				if nh, rerr := e.recoverHandle(kind, stop); rerr == nil {
+					h = nh
+					continue
 				}
 				return
 			}
+			// 主句柄：**绝不能就此放弃**。
+			//
+			// 拦截一停，那些本该走隧道的内网目标就会被系统按原路发出去（直连内网 IP
+			// = 全部不通），而进程还活着、界面还是绿的，只有人工重启才能恢复。
+			// 实测触发过：驱动被卸、被安全软件拦、句柄失效。
+			// 所以按退避重建；连续多次不行才判“已中断”。
+			nh, rerr := e.recoverHandle(kind, stop)
+			if rerr == nil {
+				h = nh
+				continue
+			}
+			e.bus.Error("WinDivert Recv 失败，且重建句柄失败（最后一次: %v）：原错误 %v", rerr, err)
+			e.setFatal(err) // 让界面变红「Error」—— 否则状态还说“运行中”，其实一个包都没拦
+			if e.Notify != nil {
+				e.Notify("拦截已中断", err.Error()+"（请重启服务）", true)
+			}
+			return
 		}
 		pkt := buf[:n]
 
@@ -1393,7 +1534,7 @@ func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}, kind loopKind)
 		}
 		e.cap.note(pkt)
 		if _, err := h.Send(pkt, addr); err != nil {
-			e.bus.Warn("注入失败: %v", err)
+			e.bus.Throttle("inject.fail", time.Minute, "注入失败: %v（1 分钟内的重复不再逐条记）", err)
 		}
 	}
 }
@@ -1479,7 +1620,8 @@ func (e *Engine) takeoverQuery(pkt []byte, addr *divert.Address) bool {
 	case 1:
 		ansIP = e.fake.Assign(q.Name, dnsFakeTTL)
 		if ansIP == nil {
-			e.bus.Warn("DNS 接管：假 IP 池已满，本次不接管：%s", q.Name)
+			e.bus.Throttle("dns.takeover.poolfull", time.Minute,
+				"DNS 接管：假 IP 池已满，本次不接管（1 分钟内的重复不再逐条记）")
 			return true
 		}
 	case 28:
@@ -1498,7 +1640,8 @@ func (e *Engine) takeoverQuery(pkt []byte, addr *divert.Address) bool {
 	addr.Flags &^= 0x02 // 清掉 Outbound：回包是**入方向**的
 	divert.CalcChecksums(resp, addr, divert.ChecksumDefault)
 	if _, serr := inj.Send(resp, addr); serr != nil {
-		e.bus.Warn("DNS 接管：注入假应答失败（%v）—— 本次不接管，原查询照常生效", serr)
+		e.bus.Throttle("dns.takeover.injectfail", time.Minute,
+			"DNS 接管：注入假应答失败: %v（1 分钟内的重复不再逐条记）", serr)
 		if e.dnsBox != nil {
 			e.dnsBox.Writef("注入失败 %s: %v", q.Name, serr)
 		}
@@ -1540,6 +1683,17 @@ func (e *Engine) learnDNS(pkt []byte) {
 		byName[p.Name] = append(byName[p.Name], p.IP)
 		if cur, ok := ttl[p.Name]; !ok || (p.TTL > 0 && p.TTL < cur) {
 			ttl[p.Name] = p.TTL
+		}
+	}
+	// 观测到的名字**封顶**存 10 分钟。
+	//
+	// 直接用报文里的 TTL（公网域名常见几千到 86400 秒）的后果：一天的观测全留着，
+	// 而名字表每次写入都要整表重建索引（持写锁、全表 Snapshot），长跑后包处理会被
+	// 这些写操作周期性地挡住（审计 P1-6）。
+	// 10 分钟足够覆盖“应用刚解析完就要连”这个真正的用途。
+	for name, d := range ttl {
+		if d <= 0 || d > maxObservedTTL {
+			ttl[name] = maxObservedTTL
 		}
 	}
 	changed := false
@@ -1680,6 +1834,9 @@ func (e *Engine) rebuildDynFilter() {
 
 	nh, err := divert.Open(filter, divert.LayerNetwork, divert.PriorityDefault, divert.FlagDefault)
 	if err != nil {
+		// 把“记住的旧过滤器”清掉：否则下次观测到同一批 IP 时，
+		// rebuildDynFilter 会以为“没变”直接返回，这只句柄就永久建立不起来了。
+		e.dynFilter = ""
 		e.mu.Unlock()
 		e.bus.Warn("域名通配：动态过滤器打开失败: %v", err)
 		return
@@ -2124,10 +2281,17 @@ type udpInfo struct {
 
 // dnsFakeTTL 我们发出的假 A 记录的 TTL。
 //
+// maxObservedTTL 观测到的名字最多记住多久（见 dnsLoop 里的封顶）：
+// 名字表的真实用途是“应用刚解析完就要连”，10 分钟绰绰有余；
+// 用它换掉报文里的原始 TTL，避免长跑后表无限变大、每次写入都重建全表索引。
+//
 // 短一点有三个好处：① 假 IP 回收得快，池子不易满；
 // ② 我们重启后应用缓存里的旧假 IP 很快失效（假 IP 映射不落盘）；
 // ③ 名字对应的真实 IP 变化时跟着快。
 const dnsFakeTTL = 60 * time.Second
+
+// maxObservedTTL 观测到的名字最多记多久（见 dnsLoop 里的封顶）。
+const maxObservedTTL = 10 * time.Minute
 
 // buildDNSResponse 造一条 DNS 应答；ip 为 nil 表示“明确告诉它没有这条记录”
 // （用于 AAAA：空 NOERROR，防止应用走 IPv6 绕过我们）。
@@ -2469,6 +2633,7 @@ func (e *Engine) rewriteOutbound(h *divert.Handle, pkt []byte, addr *divert.Addr
 			chain: chain, action: rules.ActionChain, start: time.Now(),
 			ruleNo: ruleNo, ruleName: ruleName,
 			procName: procName, pid: pid,
+			counted: true, // 紧接着（!existed 时）会 statActive++
 		}
 		// 调用方刚刚查过一次进程表（flowProc）：把“查不到”也缓存住，
 		// 否则这个连接的每个包都会再查一次。
@@ -2512,7 +2677,7 @@ func (e *Engine) rewriteOutbound(h *divert.Handle, pkt []byte, addr *divert.Addr
 
 	divert.CalcChecksums(pkt, addr, divert.ChecksumDefault)
 	if _, err := h.Send(pkt, addr); err != nil {
-		e.bus.Warn("注入失败: %v", err)
+		e.bus.Throttle("inject.fail", time.Minute, "注入失败: %v（1 分钟内的重复不再逐条记）", err)
 	}
 }
 
@@ -2532,7 +2697,7 @@ func (e *Engine) rewriteInbound(h *divert.Handle, pkt []byte, addr *divert.Addre
 	// A19：入方向写“改写后”的形态（看起来就是从内网目标回来的）
 	e.cap.note(pkt)
 	if _, err := h.Send(pkt, addr); err != nil {
-		e.bus.Warn("注入失败: %v", err)
+		e.bus.Throttle("inject.fail", time.Minute, "注入失败: %v（1 分钟内的重复不再逐条记）", err)
 	}
 }
 

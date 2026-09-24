@@ -107,9 +107,11 @@ func TestConnsSnapshot(t *testing.T) {
 }
 
 // finish 幂等：重复收尾不能把活跃数扣成负数。
+// 另外：**建条目时没加过活跃数的那种（直连/阻断）一定不能扣** ——
+// 否则只要用了 block 规则，界面的“活跃”就会被持续偷走、长期钉在 0。
 func TestFinishIdempotent(t *testing.T) {
 	e := newTestEngine()
-	st := &connState{dst: net.ParseIP("10.0.0.5"), dport: 80, action: rules.ActionChain, start: time.Now()}
+	st := &connState{dst: net.ParseIP("10.0.0.5"), dport: 80, action: rules.ActionChain, start: time.Now(), counted: true}
 	st.touch()
 	e.conns[1001] = st
 	e.statActive = 1
@@ -122,6 +124,15 @@ func TestFinishIdempotent(t *testing.T) {
 	}
 	if !st.ended.Load() {
 		t.Error("应收尾为已结束")
+	}
+
+	// 直连/阻断那条：建的时候没加过活跃数，收尾也不能扣
+	direct := &connState{dst: net.ParseIP("10.1.1.1"), dport: 7680, action: rules.ActionDirect, start: time.Now()}
+	e.statActive = 1
+	e.finish(direct)
+	e.finish(direct)
+	if e.statActive != 1 {
+		t.Errorf("没加过活跃数的条目不该扣活跃数，实际 %d", e.statActive)
 	}
 }
 

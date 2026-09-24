@@ -13,6 +13,7 @@
 package dnsmap
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"sort"
@@ -43,14 +44,25 @@ type Map struct {
 	nowFunc func() time.Time
 }
 
-// New 建一个映射表。lookup 为 nil 时用系统解析器（net.LookupHost）。
+// New 建一个映射表。lookup 为 nil 时用系统解析器。
 func New() *Map {
 	return &Map{
 		byHost:  map[string]*entry{},
 		byIP:    map[string][]string{},
-		lookup:  net.LookupHost,
+		lookup:  lookupHostTimeout,
 		nowFunc: time.Now,
 	}
+}
+
+// lookupHostTimeout 带超时的域名解析。
+//
+// 为什么不能用 net.LookupHost：它没有 deadline，DNS 服务器不可达（客户网里很常见）
+// 时会挂十几秒到几十秒。而调用方包括**启动路径**（解析域名规则目标）与每 5 分钟的
+// nameLoop —— 实测过启动被这种事梗阻（读 Windows DNS 缓存那次就噎了 16 秒）。
+func lookupHostTimeout(host string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), dnsLookupTimeout)
+	defer cancel()
+	return net.DefaultResolver.LookupHost(ctx, host)
 }
 
 // Priority：配置里的域名规则 > 观察到的 DNS。
@@ -58,6 +70,9 @@ const (
 	PrioObserved = 10
 	PrioRule     = 20
 )
+
+// dnsLookupTimeout 一次域名解析最多等多久（见 lookupHostTimeout）。
+const dnsLookupTimeout = 5 * time.Second
 
 // Set 写入一个域名→IP 的解析结果（来自配置解析或观察到的 DNS）。
 //
