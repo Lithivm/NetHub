@@ -51,6 +51,12 @@ type mibTcpRow struct {
 	PID        uint32
 }
 
+// missRefillEvery miss（查不到）时最多多久重刷一次全表（见 ByPort）。
+//
+// 300ms 是折中：短命连接（curl 一个请求 0.1~0.3 秒）也能查到进程名，
+// 而大表上最多 3 次/秒的全表枚举也算可接受的开销。
+const missRefillEvery = 300 * time.Millisecond
+
 // table 全量枚举一次 TCP 表。
 func table() ([]mibTcpRow, error) {
 	var size uint32
@@ -121,7 +127,9 @@ type Resolver struct {
 	byFull   map[uint32]string
 	failed   map[uint32]time.Time // 取不到名字的 PID 短暂负缓存（避免反复开进程）
 	lastFill time.Time
-	interval time.Duration
+	// lastMissFill 上一次“因为查不到而重刷表”的时刻（见 ByPort 的限频）。
+	lastMissFill time.Time
+	interval     time.Duration
 
 	// started/done：可在 Stop 之后再次 Start（引擎启停是可重复的）。
 	started bool

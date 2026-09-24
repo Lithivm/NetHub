@@ -75,9 +75,15 @@ type connState struct {
 	// 空串 = 查不到（受保护进程/系统服务/已消失）——界面显示“未知”。
 	procName string
 	pid      uint32
-	// procTried 这个连接已经查过一次进程表（不管查没查到）。
-	// 用来把“查不到”也缓存住：否则包路径上每个包都会再查一次表。
-	procTried atomic.Bool
+	// procTries / procNext：已查几次、以及下一次最早什么时候再查。
+	//
+	// 为什么不缓存“查不到”，也不连着重试：实测（proc.lookup 详细日志）连接刚建时
+	// 这个端口**还不在 TCP 表里**（后台 500ms 一刷，短连接总是差一拍），
+	// 而连着重试三次也都在几十毫秒内用完了（表还是没刷新）。
+	// 所以按**时间间隔**重试（最多 5 次、每次至少隔 200ms）：
+	// 短连接只试一次（便宜），长会话（真正要排障的那些）会被后续包补上。
+	procTries atomic.Int32
+	procNext  atomic.Int64
 
 	// counted 建这条条目时加过 statActive（只有走 relay 的连接加）。
 	// finish 据此决定要不要扣 —— 否则直连/阻断的条目会把活跃数越扣越少。
@@ -288,6 +294,43 @@ func (e *Engine) logStatsSummary() {
 		fmt.Fprintf(&b, "%s:%d", x.chain, x.n)
 	}
 	e.bus.Info("stats: total=%d new=%d active=%d chain=%s", total, total-prev, active, b.String())
+}
+
+// fillMissingProcs 给“还在活动、但进程名还没查到”的连接补一次查询（janitor 调）。
+//
+// 为什么需要它：flowProc 只能靠**包**触发重试，而空闲的长连接（典型的 HIS 会话）
+// 建立之后可能几秒到几分钟没包 —— 那它的进程名就永远补不上，界面上一直是“未知”。
+// 每分钟补一次、每次最多 200 条，代价可忽略。
+func (e *Engine) fillMissingProcs() {
+	if e.proc == nil {
+		return
+	}
+	now := time.Now().UnixNano()
+	cut := now - int64(10*time.Minute) // 只补还在活动的（和 janitor 的清理窗口一致）
+
+	e.mu.Lock()
+	type want struct {
+		st   *connState
+		port uint16
+	}
+	list := make([]want, 0, 16)
+	for port, st := range e.conns {
+		if st.procName != "" || st.ended.Load() || st.last.Load() < cut {
+			continue
+		}
+		list = append(list, want{st, port})
+		if len(list) >= 200 {
+			break
+		}
+	}
+	e.mu.Unlock()
+	for _, w := range list {
+		if n, pid, ok := e.proc.ByPort(w.port); ok {
+			e.mu.Lock()
+			w.st.procName, w.st.pid = n, pid
+			e.mu.Unlock()
+		}
+	}
 }
 
 // ChainCounts 每条链累计接管了多少条连接。
@@ -1289,6 +1332,16 @@ func (e *Engine) handleConn(c net.Conn) {
 	<-done
 
 	e.finish(st)
+	// 收尾时再补一次进程名：连接刚建那一刻表还没刷新到它（实测的 proc=unknown 根因），
+	// 而到收尾时表里通常已经有了（TIME_WAIT 之类的行也在表里）。
+	// 每连接一次，不在包路径上。
+	if st.procName == "" && e.proc != nil {
+		if n, pid, ok := e.proc.ByPort(st.appPort); ok {
+			e.mu.Lock()
+			st.procName, st.pid = n, pid
+			e.mu.Unlock()
+		}
+	}
 	e.bus.Info("relay.done: chain=%s%s target=%s:%d up=%s down=%s tc_ms=%d ms=%d", st.chain,
 		connLogCtx(st.ruleNo, st.ruleName, st.procName, st.pid), dialDst, st.dport,
 		humanBytes(st.up.Load()), humanBytes(st.down.Load()),
@@ -2529,10 +2582,18 @@ func (e *Engine) noticeTick(sport uint16, kind string, dst net.IP, dport uint16)
 	e.mu.Unlock()
 }
 
+// procLookupTries / procRetryEvery 一条连接最多查几次进程表、每次至少隔多久
+// （见 connState.procTries）：新连接的头几拍常查不到（表还没刷新到它），
+// 所以按时间间隔给它几次机会；短连接只试一次，长会话会被后续包补上。
+const (
+	procLookupTries = 5
+	procRetryEvery  = 200 * time.Millisecond
+)
+
 // flowProc 这条连接的进程名 / PID。
 //
-// 三层次序：① 规则里没人写进程条件 → 直接返回空（零开销）；
-// ② 连接上已经查过 → 用缓存的；③ 查一次 TCP 表（常见情况只是内存里的 map 命中）。
+// 三层次序：① 连接上已经查到过 → 用缓存的；② 试够了还没查到
+// → 不再每包重查；③ 查一次表（常见情况只是内存里 map 命中）。
 // flowProc 这条连接的进程名 / PID。
 //
 // 三层次序：① 连接上已经查到过 → 用缓存的；② 这个连接查过一次没查到
@@ -2551,12 +2612,22 @@ func (e *Engine) flowProc(sport uint16) (string, uint32) {
 		if st.procName != "" {
 			return st.procName, st.pid
 		}
-		if st.procTried.Load() {
-			return "", 0 // 查过一次没查到（受保护进程/已消失），别每个包都再查
+		if st.procTries.Load() >= procLookupTries {
+			return "", 0 // 试够了还查不到（受保护进程/已消失），别每个包都再查
 		}
-		st.procTried.Store(true)
+		now := time.Now().UnixNano()
+		if now < st.procNext.Load() {
+			return "", 0 // 距上次尝试太近：等下一个包再来
+		}
+		st.procNext.Store(now + int64(procRetryEvery))
+		st.procTries.Add(1)
 	}
 	name, pid, _ := e.proc.ByPort(sport)
+	if name == "" {
+		// 只在详细日志里说：查不出进程名到底是“表里没这个端口”还是“打不开这个进程”。
+		// 这两个在包路径上完全看不出区别（都表现为 proc=unknown）。
+		e.bus.Detail("proc.lookup: port=%d result=unknown pid=%d", sport, pid)
+	}
 	return name, pid
 }
 
@@ -2635,9 +2706,8 @@ func (e *Engine) rewriteOutbound(h *divert.Handle, pkt []byte, addr *divert.Addr
 			procName: procName, pid: pid,
 			counted: true, // 紧接着（!existed 时）会 statActive++
 		}
-		// 调用方刚刚查过一次进程表（flowProc）：把“查不到”也缓存住，
-		// 否则这个连接的每个包都会再查一次。
-		st.procTried.Store(true)
+		// 调用方刚刚查过一次进程表（flowProc）：不额外标记，
+		// 让后续几个包还有机会补上（新连接的第一拍常查不到，见 procTries）。
 		st.touch()
 		e.conns[sport] = st
 		if !existed {
@@ -2719,7 +2789,6 @@ func (e *Engine) passThrough(h *divert.Handle, pkt []byte, addr *divert.Address,
 			st := &connState{dst: dst, dport: dport, app: append(net.IP(nil), src...),
 				appPort: sport, action: act, start: time.Now(),
 				ruleNo: ruleNo, ruleName: ruleName, procName: procName, pid: pid}
-			st.procTried.Store(true) // 同上：调用方刚查过
 			st.touch()
 			e.conns[sport] = st
 		}
@@ -2775,6 +2844,7 @@ func (e *Engine) janitor() {
 			if tick++; tick%5 == 0 {
 				e.logStatsSummary()
 			}
+			e.fillMissingProcs()
 			activeCut := time.Now().Add(-10 * time.Minute).UnixNano()
 			endedCut := time.Now().Add(-2 * time.Minute).UnixNano()
 			e.mu.Lock()

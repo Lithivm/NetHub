@@ -105,6 +105,9 @@ func (a *App) ApplyFromDisk() (ApplyResult, error) {
 		return ApplyResult{}, err
 	}
 	a.Cfg.ReplaceFrom(cfg) // 内存也换成新的一份（链/上游是实时读内存的，热重载只管规则）
+	// “详细日志”也得跟着走：它是配置里的一项，外部改文件（或 -apply）改到它时必须生效，
+	// 否则改了开关却什么都没发生（只能重启才能看到区别）。
+	a.Bus.SetVerbose(a.Cfg.LogVerbose())
 	if err := a.Rules.Load(toRules(cfg.RoutesSnapshot())); err != nil {
 		return ApplyResult{}, err
 	}
