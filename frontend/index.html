@@ -253,10 +253,8 @@
           </label>
           <div class="input-row">
             <span>启动延迟</span>
-            <input type="number" min="0" max="600" step="5" class="input input-sm num" id="setAutoDelay">
-            <span class="hint">秒 —— 登录后等这么久再启动，给网络与其它自启程序让路；0 = 立即启动</span>
+            <span class="unit-wrap"><input type="number" min="0" max="600" step="5" class="input input-sm num" id="setAutoDelay"><span class="unit">s</span></span>
           </div>
-          <div class="hint" id="autoInfo"></div>
         </div>
       </div>
 
@@ -327,16 +325,15 @@
         </div>
         <div class="card-body form">
           <div class="input-row">
-            <button class="btn btn-sm btn-primary" id="btnExportCfg">导出配置</button>
-            <button class="btn btn-sm" id="btnExportDoc">导出配置（抹掉口令）</button>
+            <button class="btn btn-sm btn-primary" id="btnExportCfg" title="config.yaml 的完整拷贝，口令是明文写在里面的（和 gost 脚本一样）——别提交进 git、别发到群里">导出配置</button>
+            <button class="btn btn-sm" id="btnExportDoc" title="同样的配置，但把上游口令抹掉；发给别人看用这个">导出配置（抹掉口令）</button>
             <button class="btn btn-sm" id="btnImportCfg">导入配置</button>
           </div>
           <div class="input-row">
             <input type="text" id="importURL" class="input mono" placeholder="也可以填一个 http(s) 地址，从那里拉配置（团队统一下发）">
             <button class="btn btn-sm" id="btnImportURL">从地址导入</button>
           </div>
-          <div class="hint">口令是**明文**写在里面（和 gost 脚本一样）：<span class="clash-no">别提交进 git、别发到群里</span>；发配置给别人看就用「导出配置（抹掉口令）」。</div>
-          <div class="input-row"><span class="hint">—— 自动备份（每次保存前备一份，最多留 3 份）——</span></div>
+          <div class="input-row"><span class="hint">最近三份备份:</span></div>
           <div id="backupList" class="hint">—</div>
         </div>
       </div>

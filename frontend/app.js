@@ -294,7 +294,6 @@ async function loadService() {
   }
   if (v.installed) {
     row.appendChild(el('span', 'svc-ok', '✓ 服务已安装'));
-    row.appendChild(el('span', 'hint', '　当前' + (map[v.state] || v.state)));
     if (v.state !== 'running') {
       row.appendChild(el('span', 'hint', '　—— 点「启动」让它跑起来（跑起来才有拦截）'));
     }
@@ -387,7 +386,7 @@ async function loadBackups() {
     box.appendChild(el('div', null, '还没有备份。每次保存配置都会自动备一份。'));
     return;
   }
-  box.appendChild(el('div', null, '最近 ' + list.length + ' 份备份（恢复前会先把当前配置也备一份）：'));
+  // 这里不再自写一行“最近 N 份备份（…）”—— 卡片上已经有固定标签「最近三份备份:」了
   const row = el('div', 'input-row');
   list.slice(0, 8).forEach(name => {
     row.appendChild(btn(name.replace(/^config-|\.yaml$/g, ''), 'btn btn-xs', async () => {
@@ -550,13 +549,11 @@ async function refreshState() {
   // 主题以后端为准（只在变化时同步，避免打断用户刚点的切换）
   if (s.theme && s.theme !== state.theme) applyTheme(s.theme);
 
-  // 开机自启：状态由系统决定，回写勾选框
+  // 开机自启：状态由系统决定，回写勾选框（勾选状态就是唯一指示，不再另外写一行小字）
   const cbAuto = document.getElementById('setAutostart');
   if (!cbAuto.dataset.busy) {
     cbAuto.checked = !!s.autostart;
   }
-  document.getElementById('autoInfo').textContent =
-    (s.autostart ? '已启用' : '未启用') + (s.autoDetail || '');
 }
 
 /* ═══════════════ 日志 ═══════════════ */
