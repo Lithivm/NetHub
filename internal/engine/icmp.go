@@ -158,6 +158,37 @@ func (e *Engine) pruneQUICNotices() {
 	e.mu.Unlock()
 }
 
+// noteOnce 同一件事在窗口内只允许记一次；返回 true = 这次该记。
+//
+// 用于“重复出现但每次都没有新信息”的日志：同一个域名又用了 ECH、同一条上游又抖了一下……
+// 这类东西第一次说有用（告诉现场“有这回事”），后面重复只把日志刷成噪声。
+// 注意它只做去重，不做降级——该 WARN 的还是 WARN（要降级在调用处决定）。
+func (e *Engine) noteOnce(key string, window time.Duration) bool {
+	now := time.Now()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.onceAt == nil {
+		e.onceAt = map[string]time.Time{}
+	}
+	if last, seen := e.onceAt[key]; seen && now.Sub(last) < window {
+		return false
+	}
+	e.onceAt[key] = now
+	return true
+}
+
+// pruneOnce 清掉过期的去重记录（janitor 调）。
+func (e *Engine) pruneOnce() {
+	cut := time.Now().Add(-30 * time.Minute)
+	e.mu.Lock()
+	for k, t := range e.onceAt {
+		if t.Before(cut) {
+			delete(e.onceAt, k)
+		}
+	}
+	e.mu.Unlock()
+}
+
 // QUICBlocked 累计拦了多少个 QUIC 包（界面/排查用）。
 func (e *Engine) QUICBlocked() uint64 { return e.quicBlocked.Load() }
 

@@ -4,6 +4,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"nethub/internal/config"
 	"nethub/internal/fakeip"
@@ -173,5 +174,29 @@ func TestICMPUnreachableChecksums(t *testing.T) {
 	}
 	if got := checksum(out[20:]); got != 0 {
 		t.Errorf("ICMP 校验和不对（整和为 0 才合法），得到 %#x", got)
+	}
+}
+
+// noteOnce：同一个键在窗口内只放行一次。
+//
+// 为什么单独测：ECH 这类“重复出现也没有新信息”的日志（实测 22 分钟刷十几行）
+// 全靠它压住 —— 它坏了不会有任何功能异常，只会把日志淹掉，属于典型的静默退化。
+func TestNoteOnceDedup(t *testing.T) {
+	e := newTestEngine()
+	if !e.noteOnce("k", time.Minute) {
+		t.Error("第一次出现应当放行")
+	}
+	if e.noteOnce("k", time.Minute) {
+		t.Error("窗口内的第二次应当被吞掉")
+	}
+	if !e.noteOnce("other", time.Minute) {
+		t.Error("不同的键互不影响")
+	}
+	if !e.noteOnce("k", 0) {
+		t.Error("窗口为 0 应当每次都放行（显式要每次都记）")
+	}
+	e.pruneOnce() // 不该 panic，也不该把刚记的删掉
+	if e.noteOnce("k", time.Minute) {
+		t.Error("prune 之后窗口内的记录仍应生效")
 	}
 }

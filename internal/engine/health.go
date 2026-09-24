@@ -16,6 +16,16 @@ type upHealth struct {
 	latency time.Duration
 	err     string
 	checked time.Time
+
+	// okStreak / failStreak：连续同向结果的次数（防抖）。
+	//
+	// 为什么要防抖：探测每 30s 一次，现网上游偶发抖一下（实测 22 分钟里 5 条链共抖了
+	// 15 次）—— 每次都算“挂了 / 好了”，日志被刷成一串 upstream.down/up、界面红绿跳，
+	// 现场看到的是“这软件老是报错”，而不是“上游偶尔抖一下”。
+	okStreak   int
+	failStreak int
+	// downAt 上一次置为“不可用”的时刻（恢复时报“断了多久”用）。
+	downAt time.Time
 }
 
 // UpHealthView 给界面看的上游健康快照。
@@ -66,6 +76,13 @@ func (e *Engine) healthOf(ch config.Chain) []*upHealth {
 }
 
 // markUp 记一次观测。返回是否发生"可用性翻转"（供只报变化的日志用）与上游原文。
+// healthFlipStreak 连续几次同向的探测结果才允许改状态（防抖）。
+const healthFlipStreak = 2
+
+// markUp 记一次探测结果，返回 flipped=**状态真的变了**（只有这时才该写日志/发通知）。
+//
+// 单次结果不直接改状态（第一次探测除外，它必须有结论）：
+// 偶发抖动只会把 streak 清零，不会把界面刷成红色，也不会往日志里塞一行 upstream.down。
 func (e *Engine) markUp(chain string, idx int, ok bool, latency time.Duration, errText string) (flipped bool, raw string) {
 	e.mu.Lock()
 	ups := e.health[chain]
@@ -74,11 +91,46 @@ func (e *Engine) markUp(chain string, idx int, ok bool, latency time.Duration, e
 		return false, ""
 	}
 	h := ups[idx]
-	flipped = h.checked.IsZero() || h.ok != ok
-	h.ok, h.latency, h.err, h.checked = ok, latency, errText, time.Now()
+	first := h.checked.IsZero()
+	h.checked = time.Now()
+	if ok {
+		h.okStreak++
+		h.failStreak = 0
+	} else {
+		h.failStreak++
+		h.okStreak = 0
+	}
+	switch {
+	case first || h.ok == ok:
+		flipped, h.ok = first, ok
+		h.latency, h.err = latency, errText
+	case (ok && h.okStreak >= healthFlipStreak) || (!ok && h.failStreak >= healthFlipStreak):
+		flipped, h.ok = true, ok
+		h.latency, h.err = latency, errText
+	default:
+		// 想翻但还没连续够次数：维持旧状态，也不动明细（否则界面会出现“绿点亮着 + 红字错误”）
+	}
+	if flipped {
+		if ok {
+			h.downAt = time.Time{}
+		} else {
+			h.downAt = time.Now()
+		}
+	}
 	raw = h.raw
 	e.mu.Unlock()
 	return flipped, raw
+}
+
+// downFor 这个上游上一次置为“不可用”距现在多久（没记录就是 0）。
+func (e *Engine) downFor(chain string, idx int) time.Duration {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	ups := e.health[chain]
+	if idx < 0 || idx >= len(ups) || ups[idx] == nil || ups[idx].downAt.IsZero() {
+		return 0
+	}
+	return time.Since(ups[idx].downAt)
 }
 
 // candidates 按策略给出候选上游的下标顺序：可用的在前、已知坏的垫后
@@ -192,11 +244,16 @@ func (e *Engine) probeChain(ch config.Chain) {
 		if !r.AuthOK {
 			msg = r.Err.Error()
 		}
+		wasDown := e.downFor(ch.Name, i)
 		if flipped, upRaw := e.markUp(ch.Name, i, r.AuthOK, r.Latency, msg); flipped {
 			if r.AuthOK {
 				// 恢复只写日志（链路会不时抖一下，弹窗太吵）
+				down := ""
+				if wasDown > 0 {
+					down = fmt.Sprintf(" down_ms=%d", wasDown.Milliseconds())
+				}
 				if r.Public {
-					e.bus.Info("upstream.up: chain=%s upstream=%s rtt_ms=%d auth=ok", ch.Name, maskUpstream(upRaw), r.Latency.Milliseconds())
+					e.bus.Info("upstream.up: chain=%s upstream=%s rtt_ms=%d auth=ok%s", ch.Name, maskUpstream(upRaw), r.Latency.Milliseconds(), down)
 				} else {
 					// 很多客户出口就是不让自己出公网 —— 对“访问内网”而言这不算故障
 					e.bus.Info("链路 %s 上游 %s 可用（%d ms，认证通过；出口未连到公网，对内网访问无影响）",

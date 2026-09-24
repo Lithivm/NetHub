@@ -66,6 +66,11 @@ type connState struct {
 	action  rules.Action
 	start   time.Time
 
+	// ruleNo / ruleName：这条连接命中了哪条规则（1 起；0 = 没命中）。
+	// 日志与界面都拿它回答“为什么走了这条链”，与 chain 一样**发布后不再改**。
+	ruleNo   int
+	ruleName string
+
 	// 进程名 / PID（A20）：SYN 时查一次，建 connState 前就写定 → 发布后不再改，无需加锁。
 	// 空串 = 查不到（受保护进程/系统服务/已消失）——界面显示“未知”。
 	procName string
@@ -229,6 +234,50 @@ func (e *Engine) Conns(limit int, withProc bool) []ConnView {
 	return out
 }
 
+// logStatsSummary 每 5 分钟一行流量概览。
+//
+// 为什么要有：现场拿到一段日志，第一句要问的是“这 5 分钟大概多少连接、有没有断”，
+// 而不是从几十行连接日志里数（Envoy/squid 那类访问日志也是先看总量再看单条）。
+// 只报事实（总数/新增/在途/分链），不做任何解读。
+func (e *Engine) logStatsSummary() {
+	e.mu.Lock()
+	total, active, prev := e.statTotal, e.statActive, e.statSummaryAt
+	e.statSummaryAt = total
+	counts := make(map[string]uint64, len(e.statPerRule))
+	for k, v := range e.statPerRule {
+		counts[k] = v
+	}
+	e.mu.Unlock()
+
+	type kv struct {
+		chain string
+		n     uint64
+	}
+	list := make([]kv, 0, len(counts))
+	for k, v := range counts {
+		list = append(list, kv{k, v})
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].n != list[j].n {
+			return list[i].n > list[j].n
+		}
+		return list[i].chain < list[j].chain
+	})
+	const maxChain = 4
+	var b strings.Builder
+	for i, x := range list {
+		if i == maxChain {
+			fmt.Fprintf(&b, ",+%d", len(list)-maxChain)
+			break
+		}
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, "%s:%d", x.chain, x.n)
+	}
+	e.bus.Info("stats: total=%d new=%d active=%d chain=%s", total, total-prev, active, b.String())
+}
+
 // ChainCounts 每条链累计接管了多少条连接。
 func (e *Engine) ChainCounts() map[string]uint64 {
 	e.mu.RLock()
@@ -269,6 +318,9 @@ type Engine struct {
 	// 一次浏览能刷出上百个 QUIC 包，逐个记会把日志淹掉）。
 	quicBlocked atomic.Uint64
 	quicNotices map[string]time.Time
+	// onceAt 通用的“这件事刚说过”记录（见 noteOnce）：键 → 上次说的时刻。
+	// 只给“重复出现也没有新信息”的日志用（如同一个域名又用了 ECH）。
+	onceAt map[string]time.Time
 	// fake/injector/tookOver/tookSeen：DNS 接管（发假 IP）。
 	fake     *fakeip.Pool
 	injector *divert.Handle // filter=false 的“只塞”句柄
@@ -301,6 +353,8 @@ type Engine struct {
 	statTotal   uint64
 	statActive  int
 	statPerRule map[string]uint64
+	// statSummaryAt 上一次“5 分钟概览”时的累计连接数（算增量用）。
+	statSummaryAt uint64
 
 	// startMu 串行化 Start/Stop：两者都要能在同一个 Engine 上反复调用
 	// （托盘“停止 → 启动”、界面重启都会走到），且不能互相插队。
@@ -1037,6 +1091,9 @@ func (e *Engine) handleConn(c net.Conn) {
 	// 看门狗：relay 确实收到了这条连接（这一步以前没有任何记录，
 	// 导致“包没到 relay”这种故障在日志里完全看不出来）。
 	st.relayed.Store(true)
+	// 建链耗时（握手 + 认证 + CONNECT）单独量：一条连接慢到底是“上游慢”
+	// 还是“传输慢”，只看总耗时是分不清的 —— 专业日志（HAProxy 的 Tc、squid 的 %tr）也都分开记。
+	dialStart := time.Now()
 
 	ch, ok := e.cfg.ChainByName(st.chain)
 	if !ok {
@@ -1167,7 +1224,11 @@ func (e *Engine) handleConn(c net.Conn) {
 	}
 	defer up.Close()
 
-	e.bus.Info("relay.up: chain=%s target=%s:%d src_port=%d", st.chain, dialDst, st.dport, sport)
+	dialMs := time.Since(dialStart).Milliseconds()
+
+	// 不再单记一行 relay.up：它只是中间态，成功与否看 relay.done（字节数）、
+	// 失败看 tunnel.down；每条连接两行（intercept 开始 / relay.done 结束）就够现场用，
+	// 也跟 Proxifier “一条连接一行”的粒度对得上，不再把日志刷成三段。
 
 	done := make(chan struct{}, 2)
 	go func() { copyAndClose(up, c, &st.up); done <- struct{}{} }()
@@ -1175,8 +1236,10 @@ func (e *Engine) handleConn(c net.Conn) {
 	<-done
 
 	e.finish(st)
-	e.bus.Info("relay.done: chain=%s target=%s:%d up=%s down=%s", st.chain, dialDst, st.dport,
-		humanBytes(st.up.Load()), humanBytes(st.down.Load()))
+	e.bus.Info("relay.done: chain=%s%s target=%s:%d up=%s down=%s tc_ms=%d ms=%d", st.chain,
+		connLogCtx(st.ruleNo, st.ruleName, st.procName, st.pid), dialDst, st.dport,
+		humanBytes(st.up.Load()), humanBytes(st.down.Load()),
+		dialMs, time.Since(st.start).Milliseconds())
 }
 
 // copyAndClose 单向拷贝并在结束后关闭写端（半关闭，双向都能正常收尾）。
@@ -1290,7 +1353,7 @@ func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}, kind loopKind)
 		// 内置直连：Windows 更新传递优化走 TCP 7680，客户内网里不该进隧道。
 		// 以前要在规则里写一条 direct 规则来实现；现在内置，规则列表干净。
 		if dport == builtinDirectPort && e.cfg.BuiltinDirectEnabled() {
-			e.passThrough(h, pkt, addr, t, src, dst, sport, dport, flags, rules.ActionDirect, procName, procPID)
+			e.passThrough(h, pkt, addr, t, src, dst, sport, dport, flags, rules.ActionDirect, 0, "", procName, procPID)
 			continue
 		}
 
@@ -1304,12 +1367,12 @@ func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}, kind loopKind)
 				name = n
 			}
 		}
-		if chain, act, hit := e.ruleSet().MatchName(name, dst, dport, procName); hit {
+		if chain, act, ruleNo, ruleName, hit := e.ruleSet().MatchNameRule(name, dst, dport, procName); hit {
 			switch act {
 			case rules.ActionDirect, rules.ActionBlock:
-				e.passThrough(h, pkt, addr, t, src, dst, sport, dport, flags, act, procName, procPID)
+				e.passThrough(h, pkt, addr, t, src, dst, sport, dport, flags, act, ruleNo, ruleName, procName, procPID)
 			default:
-				e.rewriteOutbound(h, pkt, addr, t, src, dst, sport, dport, flags, chain, relayIP, relayPort, procName, procPID)
+				e.rewriteOutbound(h, pkt, addr, t, src, dst, sport, dport, flags, chain, relayIP, relayPort, ruleNo, ruleName, procName, procPID)
 			}
 			continue
 		}
@@ -1883,9 +1946,13 @@ func (e *Engine) learnFromHandshake(res tlsname.Result, dst net.IP) {
 		return
 	}
 	if res.ECH {
-		// ECH：SNI 里只是“公开名”，真名被加密了 —— 坦诚地说出来，别让人以为通了
-		e.bus.Warn("TLS 嗅探：%s 用了 ECH（加密的 ClientHello）—— 真实目标名看不见，"+
-			"通配域名对它无效（具体域名规则不受影响）", res.Name)
+		// ECH：SNI 里只是“公开名”，真名被加密了 —— 坦诚地说出来，别让人以为通了。
+		// 但同一个域名每次握手都重复说一遍没意义（实测 22 分钟里刷了十几行）：
+		// 它是个**稳定属性**，不是“刚发生的事故” —— 每个名字 10 分钟说一次、且降到 INFO。
+		if e.noteOnce("ech:"+res.Name, 10*time.Minute) {
+			e.bus.Info("TLS 嗅探：%s 用了 ECH（加密的 ClientHello）—— 真实目标名看不见，"+
+				"通配域名对它无效（具体域名规则不受影响）", res.Name)
+		}
 		e.names.Set(res.Name, []string{dst.String()}, dnsmap.PrioObserved)
 		return
 	}
@@ -2312,6 +2379,38 @@ func (e *Engine) ProcPath(pid uint32) string {
 	return e.proc.FullPath(pid)
 }
 
+// connLogCtx 给连接级日志拼上“哪条规则、哪个进程”两项（对齐 Proxifier 日志里的 rule/进程）。
+//
+// 拼成**独立的 key=value**（`rule=3 name="…" proc=chrome.exe pid=1234`），
+// 而不是塞进一个字段：日志是给机器和 agent 读的，拆开才能单独 grep。
+// 进程查不到就写 `proc=unknown` —— 宁可说不知道，也不要留空让人以为是空字符串。
+func connLogCtx(ruleNo int, ruleName, procName string, pid uint32) string {
+	var b strings.Builder
+	if ruleNo > 0 {
+		fmt.Fprintf(&b, " rule=%d", ruleNo)
+		if ruleName != "" {
+			fmt.Fprintf(&b, " name=%q", ruleName)
+		}
+	}
+	if procName != "" {
+		fmt.Fprintf(&b, " proc=%s pid=%d", procName, pid)
+	} else {
+		b.WriteString(" proc=unknown")
+	}
+	return b.String()
+}
+
+// ruleSuffix 给“直连/阻断”那类行内日志补上规则序号（有就补）。
+func ruleSuffix(ruleNo int, ruleName string) string {
+	if ruleNo <= 0 {
+		return ""
+	}
+	if ruleName == "" {
+		return fmt.Sprintf("（规则 %d）", ruleNo)
+	}
+	return fmt.Sprintf("（规则 %d %s）", ruleNo, ruleName)
+}
+
 // isSyn 只看 SYN（不带 ACK）—— 新连接的第一个包。
 func isSyn(flags byte) bool { return flags&0x02 != 0 && flags&0x10 == 0 }
 
@@ -2322,7 +2421,7 @@ const builtinDirectPort = 7680
 // rewriteOutbound 把应用发往内网目标的包改成"发给本机 relay"。
 func (e *Engine) rewriteOutbound(h *divert.Handle, pkt []byte, addr *divert.Address, t int,
 	src, dst net.IP, sport, dport uint16, flags byte, chain string, relayIP net.IP, relayPort uint16,
-	procName string, pid uint32) {
+	ruleNo int, ruleName, procName string, pid uint32) {
 
 	if isSyn(flags) {
 		// A14：新建连接时判一次环（目标=上游自己 / 源=目标 / 同目标疯狂重连）
@@ -2335,6 +2434,7 @@ func (e *Engine) rewriteOutbound(h *divert.Handle, pkt []byte, addr *divert.Addr
 			dst: dst, dport: dport,
 			app: append(net.IP(nil), src...), appPort: sport,
 			chain: chain, action: rules.ActionChain, start: time.Now(),
+			ruleNo: ruleNo, ruleName: ruleName,
 			procName: procName, pid: pid,
 		}
 		st.touch()
@@ -2346,16 +2446,17 @@ func (e *Engine) rewriteOutbound(h *divert.Handle, pkt []byte, addr *divert.Addr
 		}
 		e.mu.Unlock()
 		if !existed {
+			ctx := connLogCtx(ruleNo, ruleName, procName, pid)
 			// 目标是假 IP 时，日志里要看到**域名**（否则只能看到一个 198.19.x.x 莫明其妙）
 			if e.isFakeIP(dst) {
 				if n, ok := e.nameOf(dst); ok {
 					st.fakeName = n
-					e.bus.Info("intercept: chain=%s target=%s fake_ip=%s port=%d action=relay", chain, n, dst, dport)
+					e.bus.Info("intercept: chain=%s%s target=%s fake_ip=%s port=%d action=relay", chain, ctx, n, dst, dport)
 				} else {
-					e.bus.Info("intercept: chain=%s target=%s:%d action=relay fake_ip=unmapped", chain, dst, dport)
+					e.bus.Info("intercept: chain=%s%s target=%s:%d action=relay fake_ip=unmapped", chain, ctx, dst, dport)
 				}
 			} else {
-				e.bus.Info("intercept: chain=%s target=%s:%d action=relay", chain, dst, dport)
+				e.bus.Info("intercept: chain=%s%s target=%s:%d action=relay", chain, ctx, dst, dport)
 			}
 		}
 	} else if st := e.flow(sport); st != nil {
@@ -2409,21 +2510,22 @@ func (e *Engine) flow(sport uint16) *connState {
 // passThrough 处理直连与阻断：计数 + 必要时记一行日志（去重）。
 // 直连的包原样放回内核转发；阻断的包丢掉，并在 SYN 上回一个 RST。
 func (e *Engine) passThrough(h *divert.Handle, pkt []byte, addr *divert.Address, t int,
-	src, dst net.IP, sport, dport uint16, flags byte, act rules.Action, procName string, pid uint32) {
+	src, dst net.IP, sport, dport uint16, flags byte, act rules.Action, ruleNo int, ruleName, procName string, pid uint32) {
 
 	if isSyn(flags) {
 		e.mu.Lock()
 		if _, ok := e.conns[sport]; !ok {
 			st := &connState{dst: dst, dport: dport, app: append(net.IP(nil), src...),
-				appPort: sport, action: act, start: time.Now(), procName: procName, pid: pid}
+				appPort: sport, action: act, start: time.Now(),
+				ruleNo: ruleNo, ruleName: ruleName, procName: procName, pid: pid}
 			st.touch()
 			e.conns[sport] = st
 		}
 		e.mu.Unlock()
 		if act == rules.ActionDirect {
-			e.noteAction("直连", sport, dst, dport, "不走代理")
+			e.noteAction("直连", sport, dst, dport, "不走代理"+ruleSuffix(ruleNo, ruleName))
 		} else {
-			e.noteAction("阻断", sport, dst, dport, "已丢弃")
+			e.noteAction("阻断", sport, dst, dport, "已丢弃"+ruleSuffix(ruleNo, ruleName))
 		}
 	}
 
@@ -2454,6 +2556,7 @@ func (e *Engine) janitor() {
 	defer e.wg.Done()
 	tk := time.NewTicker(60 * time.Second)
 	defer tk.Stop()
+	tick := 0
 	for {
 		select {
 		case <-e.done:
@@ -2461,6 +2564,10 @@ func (e *Engine) janitor() {
 		case <-tk.C:
 			e.pruneLoops() // A14：清掉过期的环路检测窗口
 			e.pruneQUICNotices()
+			e.pruneOnce()
+			if tick++; tick%5 == 0 {
+				e.logStatsSummary()
+			}
 			activeCut := time.Now().Add(-10 * time.Minute).UnixNano()
 			endedCut := time.Now().Add(-2 * time.Minute).UnixNano()
 			e.mu.Lock()

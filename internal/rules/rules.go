@@ -488,9 +488,20 @@ func (s *Set) MatchProc(ip net.IP, port uint16, procName string) (chain string, 
 // `main.*.com` 这种宽通配就会抢走本该按 `10.100.100.0/24` 走的连接（见 2026-09 的
 // main.wbzxyy.com 事故）。名字是猜出来的，IP 是硬事实 —— 能用 IP 定就用 IP。
 func (s *Set) MatchName(name string, ip net.IP, port uint16, procName string) (chain string, act Action, ok bool) {
+	chain, act, _, _, ok = s.MatchNameRule(name, ip, port, procName)
+	return chain, act, ok
+}
+
+// MatchNameRule 同 MatchName，额外给出命中的**规则序号（1 起）与规则名**。
+//
+// 为什么要它：日志与界面都得回答“这条连接到底命中了哪条规则” ——
+// 现成只给链名，“命中即止”的语义下，同名链有好几条规则时说不清是哪条；
+// 排查“为什么这个目标走了这条链”时这就是第一现场（对齐 Proxifier 日志里的 rule）。
+// 每连接调一次，不在包路径上，多返回两个值不心疼。
+func (s *Set) MatchNameRule(name string, ip net.IP, port uint16, procName string) (chain string, act Action, ruleNo int, ruleName string, ok bool) {
 	v4 := ip.To4()
 	if v4 == nil {
-		return "", ActionChain, false // 目前只做 IPv4
+		return "", ActionChain, 0, "", false // 目前只做 IPv4
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -501,7 +512,7 @@ func (s *Set) MatchName(name string, ip net.IP, port uint16, procName string) (c
 			continue
 		}
 		if s.routes[i].matchIPOnly(v4, port, procName) {
-			return s.routes[i].Chain, s.routes[i].Action, true
+			return s.routes[i].Chain, s.routes[i].Action, i + 1, s.routes[i].Name, true
 		}
 	}
 	// 第二遍：域名目标
@@ -510,10 +521,10 @@ func (s *Set) MatchName(name string, ip net.IP, port uint16, procName string) (c
 			continue
 		}
 		if s.routes[i].matchDomainOnly(name, v4, port, procName) {
-			return s.routes[i].Chain, s.routes[i].Action, true
+			return s.routes[i].Chain, s.routes[i].Action, i + 1, s.routes[i].Name, true
 		}
 	}
-	return "", ActionChain, false
+	return "", ActionChain, 0, "", false
 }
 
 // HasWildcards 当前规则里有没有通配域名。
