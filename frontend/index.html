@@ -96,12 +96,12 @@
     <div class="card card-fill">
       <div class="card-head">
         <h2>路由规则</h2>
+        <button class="info-btn" id="btnHelpRule" title="域名与通配域名是怎么匹配上的">i</button>
         <span class="hint">自上而下匹配，命中即停；一条规则可含多个目标。改动即时保存，点「重启」生效</span>
         <div class="spacer"></div>
         <button class="btn btn-sm" id="btnRuleSort" title="前缀长的（/32 比 /24 具体）排前面，带端口条件的更靠前；本机自身 / 环回（127.0.0.0/8）类规则放最后——它是兜底，不跟内网网段抢位置；停用的规则原地不动">按优先级排序</button>
         <button class="btn btn-sm" id="btnRuleOverlap">检查重叠</button>
         <button class="btn btn-sm btn-primary" id="btnRuleAdd">添加规则</button>
-        <button class="info-btn" id="btnHelpRule" title="域名与通配域名是怎么匹配上的">i</button>
       </div>
       <div class="card-body form">
         <div class="input-row" style="align-items:flex-start">

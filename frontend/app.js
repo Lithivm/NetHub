@@ -570,13 +570,13 @@ async function loadChains() {
   await loadChainHealth();
   document.getElementById('badgeChain').textContent = chains.length;
 
-  // 预热连接池近况（A11）：养着几条、命中过多少次
+  // 预热连接池近况（A11）：当前就绪几条、命中过多少次
   const wi = document.getElementById('warmInfo');
   if (wi) {
     try {
       const st = await call('GetState');
       wi.textContent = st.poolWarm > 0
-        ? ('预热会话：养着 ' + st.poolWarm + ' 条 · 已命中 ' + (st.poolHits || 0) + ' 次')
+        ? ('预热会话：就绪 ' + st.poolWarm + ' 条 · 已命中 ' + (st.poolHits || 0) + ' 次')
         : '';
     } catch (e) { /* 拿不到就不显示 */ }
   }
@@ -1477,7 +1477,7 @@ const HELP = {
       '「竞速起跑」= 第一条超过这个时间还没连上，就并发试其他上游、取先到的；0 = 关闭竞速。',
       '实测某条链的 CONNECT 要 620ms、另一条只要 75ms，竞速能直接把业务拉到快链路；',
       '但太激进会让健康上游也每条都多拨一次，所以默认 300ms 而不是更小。',
-      '「预热会话」= 每条上游提前养几条“已握手、只差 CONNECT”的会话，业务来了不用等握手；0 = 关闭（不预热）。',
+      '「预热会话」= 每条上游提前建立几条“已握手、只差 CONNECT”的会话，业务来了不用等握手；0 = 关闭（不预热）。',
       '单位：前两个是秒，第三个是毫秒，最后一个是个数。改完点「保存并重启」生效。',
     ],
   },
