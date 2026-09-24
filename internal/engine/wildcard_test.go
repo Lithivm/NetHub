@@ -14,6 +14,14 @@ import (
 	"nethub/internal/tlsname"
 )
 
+// newRulesEngine 测试用引擎：只要 bus/cfg/规则集/名字表与动态过滤器脏通道。
+// 规则集是 atomic.Pointer（支持热替换），结构体字面量里装不进去，所以走这个构造。
+func newRulesEngine(cfg *config.Config, rs *rules.Set) *Engine {
+	e := &Engine{bus: logbus.New(50), cfg: cfg, names: dnsmap.New(), dynDirty: make(chan struct{}, 1)}
+	e.rules.Store(rs)
+	return e
+}
+
 // mkUDPDNS 造一个"IPv4 + UDP(源端口 53) + DNS 应答"的完整包。
 // 用真实报文而不是直接调 dnssniff：验证从 IP 头里取负载那一步也对。
 func mkUDPDNS(t *testing.T, payload []byte) []byte {
@@ -113,15 +121,10 @@ func TestWildcardLearnedFromDNS(t *testing.T) {
 		t.Fatal("HasWildcards 应该是 true")
 	}
 
-	e := &Engine{
-		bus:      logbus.New(50),
-		cfg:      &config.Config{},
-		rules:    rs,
-		names:    dnsmap.New(),
-		dynDirty: make(chan struct{}, 1),
-	}
 	// 把节流窗口“提前用完”，让 learnDNS 只置脏标记、不真的去开 WinDivert 句柄
 	// （测试进程里不该动驱动；动态过滤器的热替换靠真机验证）。
+	e := newRulesEngine(&config.Config{}, rs)
+	e.dynLast.Store(time.Now().UnixMilli())
 	e.dynLast.Store(time.Now().UnixMilli())
 
 	e.learnDNS(mkUDPDNS(t, dnsAnswer("opm.his.com", "10.20.30.40", 60)))
@@ -185,13 +188,7 @@ func TestWildcardPruneOnExpiry(t *testing.T) {
 	if err := rs.Load([]rules.Route{{Name: "w", Targets: []string{"*.his.com"}, Chain: "etyy"}}); err != nil {
 		t.Fatal(err)
 	}
-	e := &Engine{
-		bus:      logbus.New(50),
-		cfg:      &config.Config{},
-		rules:    rs,
-		names:    dnsmap.New(),
-		dynDirty: make(chan struct{}, 1),
-	}
+	e := newRulesEngine(&config.Config{}, rs)
 	e.dynLast.Store(time.Now().UnixMilli())
 	e.learnDNS(mkUDPDNS(t, dnsAnswer("a.his.com", "10.1.1.1", 1))) // TTL 1 秒
 	if n := len(rs.WildcardRanges(false)); n != 1 {
@@ -217,8 +214,7 @@ func TestWildcardStats(t *testing.T) {
 	if err := rs.Load([]rules.Route{{Name: "w", Targets: []string{"*.his.com"}, Chain: "etyy"}}); err != nil {
 		t.Fatal(err)
 	}
-	e := &Engine{bus: logbus.New(50), cfg: &config.Config{}, rules: rs,
-		names: dnsmap.New(), dynDirty: make(chan struct{}, 1)}
+	e := newRulesEngine(&config.Config{}, rs)
 	e.dynLast.Store(time.Now().UnixMilli())
 	e.learnDNS(mkUDPDNS(t, dnsAnswer("a.his.com", "10.1.1.1", 60)))
 	e.learnDNS(mkUDPDNS(t, dnsAnswer("b.his.com", "10.1.1.2", 60)))
@@ -257,8 +253,7 @@ func TestLearnFromHandshake(t *testing.T) {
 	if err := rs.Load([]rules.Route{{Name: "w", Targets: []string{"*.his.com"}, Chain: "etyy"}}); err != nil {
 		t.Fatal(err)
 	}
-	e := &Engine{bus: logbus.New(50), cfg: &config.Config{}, rules: rs,
-		names: dnsmap.New(), dynDirty: make(chan struct{}, 1)}
+	e := newRulesEngine(&config.Config{}, rs)
 	e.dynLast.Store(time.Now().UnixMilli())
 
 	// 负载要从 IP 头里取得出来（这条路径与真机完全一致）
@@ -327,8 +322,8 @@ func TestWildcardStatsShowsTakenOverNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &Engine{bus: logbus.New(50), cfg: cfg, rules: rs,
-		names: dnsmap.New(), fake: pool, dynDirty: make(chan struct{}, 1)}
+	e := newRulesEngine(cfg, rs)
+	e.fake = pool
 	e.dynLast.Store(time.Now().UnixMilli())
 
 	// 接管之前：没有任何名字，界面该老实说“还没命中过”

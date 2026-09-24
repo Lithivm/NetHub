@@ -15,6 +15,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"nethub/internal/dnsmap"
@@ -239,12 +240,19 @@ func (e *Engine) ChainCounts() map[string]uint64 {
 }
 
 type Engine struct {
-	bus   *logbus.Bus
-	rules *rules.Set
+	bus *logbus.Bus
+	// rules 当前生效的规则集。用**原子指针**而不是普通字段：规则可以热替换
+	// （见 ReloadRules），而包路径上每个包都要匹配一次 —— 不能被锁挡住，
+	// 也不能读到半更新的状态（读到旧集或新集都可以，读到半个就是崩溃）。
+	rules atomic.Pointer[rules.Set]
 	cfg   *config.Config
 
 	mu     sync.RWMutex
 	handle *divert.Handle
+	// mainStop 主句柄的停止信号：热重载要换主句柄，靠它区分“我们在换”与“过滤器出错”。
+	// mainFilter 当前主过滤器原文：重载时比对，没变就不折腾句柄（省一次开/关）。
+	mainStop   chan struct{}
+	mainFilter string
 	// dynHandle 第二只句柄：只装「通配域名当前覆盖到的 IP」。
 	// 通配域名没法主动解析，只能等观察到应用的 DNS 应答才知道 IP，
 	// 所以它必须可热替换（先开新的、再关旧的，中间不丢包）。
@@ -325,8 +333,8 @@ type Engine struct {
 }
 
 func New(bus *logbus.Bus, rs *rules.Set, cfg *config.Config) *Engine {
-	return &Engine{
-		bus: bus, rules: rs, cfg: cfg,
+	e := &Engine{
+		bus: bus, cfg: cfg,
 		conns:       map[uint16]*connState{},
 		statPerRule: map[string]uint64{},
 		done:        make(chan struct{}),
@@ -337,7 +345,12 @@ func New(bus *logbus.Bus, rs *rules.Set, cfg *config.Config) *Engine {
 		names:       dnsmap.New(),
 		dynDirty:    make(chan struct{}, 1),
 	}
+	e.rules.Store(rs)
+	return e
 }
+
+// ruleSet 当前生效的规则集（永不为 nil，New 已装入；ReloadRules 只换非 nil 的）。
+func (e *Engine) ruleSet() *rules.Set { return e.rules.Load() }
 
 // startLoop 起一个受 WaitGroup 跟踪的协程。
 //
@@ -419,6 +432,8 @@ func (e *Engine) Start() error {
 	// 重启后 rebuildDynFilter 会因为“过滤器字符串没变”直接 return，
 	// 于是通配域名的第二只句柄永远建不起来（静默失效）。
 	e.dynHandle, e.dynStop, e.dynFilter, e.dynAt = nil, nil, "", time.Time{}
+	// 主过滤器同理：句柄与过滤器原文一起重置，否则重启后主句柄的字段指向旧句柄。
+	e.mainStop, e.mainFilter = nil, ""
 	e.mu.Unlock()
 	e.sniffMu.Lock()
 	e.sniffClosing, e.sniffHandles = false, nil
@@ -447,7 +462,7 @@ func (e *Engine) Start() error {
 	// 而它只补“按名字匹配的覆盖面”，不影响服务立即可用 —— 以前“服务已就绪”
 	// 就被它噎住 16 秒（点完启动半天没反应）。它只动名字表，结果经
 	// applyHostIPs → 动态过滤器补上（先开新句柄再关旧的，零丢包）。
-	if e.rules.HasWildcards() {
+	if e.ruleSet().HasWildcards() {
 		// seedDNSCache 要 16s 且中途不可中断：**不计入 wg**，否则退出/重启要等它。
 		// 它只写名字表（线程安全），跑完顺带重建过滤器，不跑完也不影响服务可用。
 		go e.seedDNSCache()
@@ -456,7 +471,7 @@ func (e *Engine) Start() error {
 	// DNS 接管（发假 IP）：池子在这里建，它覆盖的**整段**假 IP 要进主过滤器 ——
 	// 应用拿到假 IP 后会去连它，那段地址不在过滤器里的话包到不了我们手上。
 	var fakeRange *net.IPNet
-	if e.rules.HasWildcards() && e.cfg.DNSTakeoverEnabled() {
+	if e.ruleSet().HasWildcards() && e.cfg.DNSTakeoverEnabled() {
 		pool, perr := fakeip.NewPool(e.cfg.FakeIPRangeOr())
 		if perr != nil {
 			e.bus.Error("DNS 接管：假 IP 段不可用（%v）—— 退回只读嗅探（域名通配仍能用，但首次连接可能漏）", perr)
@@ -467,19 +482,15 @@ func (e *Engine) Start() error {
 	}
 
 	// 2) 用规则区间拼内核过滤器（直连规则的目标不进过滤器，见 rules.FilterRanges）
-	rs := e.rules.FilterRanges(e.cfg.CountDirectEnabled())
-	if fakeRange != nil {
-		first := rules.IP2U(fakeRange.IP.To4())
-		mask := rules.IP2U(net.IP(fakeRange.Mask).To4())
-		rs = append(rs, rules.Range{First: first, Last: first | ^mask})
-		e.bus.Info("DNS 接管：假 IP 段 %s 已并入过滤器", fakeRange)
-	}
-	if len(rs) == 0 {
+	filter, nrange := e.buildMainFilter(e.ruleSet(), port)
+	if filter == "" {
 		ln.Close()
 		return fmt.Errorf("没有需要拦截的规则（只填了直连规则时无事可做）")
 	}
-	filter := buildFilter(rs, port)
-	e.bus.Info("filter.main: rules=%d ranges=%d filter=%s", len(e.rules.List()), len(rs), filter)
+	if fakeRange != nil {
+		e.bus.Info("DNS 接管：假 IP 段 %s 已并入过滤器", fakeRange)
+	}
+	e.bus.Info("filter.main: rules=%d ranges=%d filter=%s", len(e.ruleSet().List()), nrange, filter)
 
 	// 3) 打开 WinDivert（含首次安装驱动的重试）
 	h, err := openDivert(e.bus, filter)
@@ -488,11 +499,12 @@ func (e *Engine) Start() error {
 		return fmt.Errorf("WinDivert 打开失败: %w", err)
 	}
 	e.mu.Lock()
-	e.ln, e.relay, e.handle, e.run = ln, relay, h, true
+	stop := make(chan struct{})
+	e.ln, e.relay, e.handle, e.mainStop, e.mainFilter, e.run = ln, relay, h, stop, filter, true
 	e.mu.Unlock()
 
-	e.bus.Info("engine.start: relay=%s rules=%d", relay, len(e.rules.List()))
-	for _, r := range e.rules.List() {
+	e.bus.Info("engine.start: relay=%s rules=%d", relay, len(e.ruleSet().List()))
+	for _, r := range e.ruleSet().List() {
 		switch r.Action {
 		case rules.ActionDirect:
 			e.bus.Info("route: %s action=direct", r.Label())
@@ -512,7 +524,7 @@ func (e *Engine) Start() error {
 	}
 
 	e.startLoop(e.acceptLoop)
-	e.startLoop(func() { e.packetLoop(h, nil) })
+	e.startLoop(func() { e.packetLoop(h, stop, loopMain) })
 	e.startLoop(e.janitor)
 	e.startLoop(e.relayWatch)
 	e.startLoop(e.nameLoop)
@@ -521,7 +533,7 @@ func (e *Engine) Start() error {
 	e.startLoop(e.localNetLoop)
 	// 只读嗅探 DNS + SNI/Host：只有真的用了通配域名才开（否则一分钱不花）。
 	// 它们负责把“应用实际要去哪个名字”学回来，并维护动态过滤器。
-	if e.rules.HasWildcards() {
+	if e.ruleSet().HasWildcards() {
 		// 先看本机是不是已经有别的程序在用 TUN 模式接管流量（多为 Clash/mihomo）：
 		// TUN 与我们的透明接管互斥 —— 那时包根本到不了我们手上，继续“假装在工作”
 		// 是最坏的结果，所以直接说清楚并**不开**嗅探/接管（把 DNS 让给对方）。
@@ -533,7 +545,7 @@ func (e *Engine) Start() error {
 			e.tunBlocked = true
 		}
 	}
-	if e.rules.HasWildcards() && !e.tunBlocked {
+	if e.ruleSet().HasWildcards() && !e.tunBlocked {
 		e.startLoop(e.dnsLoop)
 		e.startLoop(e.dynFilterLoop)
 		// SNI/Host：应对加密 DNS（DoH/DoT）与自带解析器的客户端 ——
@@ -607,10 +619,12 @@ func (e *Engine) Stop() {
 	}
 	e.stopped = true
 	h, ln, run := e.handle, e.ln, e.run
+	mainStop := e.mainStop
 	dyn, dynStop := e.dynHandle, e.dynStop
 	inj := e.injector
 	done := e.done
 	e.handle, e.ln, e.run = nil, nil, false
+	e.mainStop = nil
 	e.dynHandle, e.dynStop = nil, nil
 	e.injector = nil
 	e.mu.Unlock()
@@ -622,6 +636,9 @@ func (e *Engine) Stop() {
 
 	if done != nil {
 		close(done)
+	}
+	if mainStop != nil {
+		close(mainStop) // 同上：让主句柄的循环知道“不是出错，是我们在停”
 	}
 	if h != nil {
 		h.Close() // 让 packetLoop 的 Recv 立刻返回错误
@@ -645,6 +662,88 @@ func (e *Engine) Stop() {
 	if run {
 		e.bus.Info("engine.stop")
 	}
+}
+
+// errNotRunning 引擎没在跑时拒绝热重载（调用方当作“已落盘、运行实例在用旧规则”处理）。
+var errNotRunning = errors.New("引擎没有在运行")
+
+// ReloadRules 用新编译好的规则集替换正在跑的规则集（**不重启**引擎）。
+//
+// 语义（三条都要说清，界面文案也照这个写）：
+//   - **新连接**按新规则判定；**已经在跑的连接不受影响** —— 它们的链/动作在建立时
+//     就定好了（relay 不会中途改道），所以改规则不会踢掉正在用的业务。
+//   - 内核过滤器按新区间重建：先开新句柄、再关旧句柄，中间不丢包（与动态过滤器同法）。
+//     过滤器没变时（只改了链/顺序/进程条件）连句柄都不换。
+//   - 学到的状态要继承：本机地址、名字表（通配域名靠它命中）。不继承＝通配规则
+//     “忘掉”之前学过的名字，表现为“刚还好好的，重载后不通”。
+//
+// 不在这里处理的东西（改了仍要重启）：relay 端口、DNS 接管开关与假 IP 段、
+// 上游拨号参数（预热池按启动时的 tuning 建）。哪些没生效由 App 说清楚。
+func (e *Engine) ReloadRules(ns *rules.Set) error {
+	if ns == nil {
+		return errors.New("规则集为空")
+	}
+	// 与 Start/Stop 互斥：否则可能在 Stop 的 wg.Wait() 途中 Add(1)，那是错用法。
+	e.startMu.Lock()
+	defer e.startMu.Unlock()
+
+	// 学习态继承。本机地址先照搬（localNetLoop 下一轮还会再写，这里先给上不留空窗）。
+	ns.SetLocalIPs(e.ruleSet().LocalIPs())
+	e.applyHostIPsTo(ns) // 名字表 → hostIPs（含通配规则命中的名字）
+
+	rulesN := len(ns.List())
+	e.mu.Lock()
+	if !e.run {
+		e.mu.Unlock()
+		return errNotRunning
+	}
+	// 用当前**真实** relay 端口算新过滤器（配置里可能是 0=自动分配）
+	newFilter, nrange := e.buildMainFilter(ns, portOf(e.relay))
+	changed := newFilter != "" && newFilter != e.mainFilter
+	e.mu.Unlock()
+
+	if newFilter == "" {
+		// 新规则一条都不需要拦（全改成直连/全停用）：规则换掉，旧句柄留着。
+		// 旧句柄上还会来包，但已匹配不到任何规则 → packetLoop 原样放回，不影响流量。
+		e.rules.Store(ns)
+		e.bus.Info("rules.reload: rules=%d ranges=0 filter=none（不再拦截任何网段）", rulesN)
+		return nil
+	}
+	if !changed {
+		e.rules.Store(ns)
+		e.bus.Info("rules.reload: rules=%d ranges=%d filter=unchanged", rulesN, nrange)
+		return nil
+	}
+
+	// 先开新句柄：开不了就当这次重载没发生（绝不半生效 —— 规则换了但包拦不到
+	// 是最坏的结果：新网段的流量会静默直连出去）。
+	nh, err := openDivert(e.bus, newFilter)
+	if err != nil {
+		return fmt.Errorf("新过滤器打开失败（规则未生效，仍在用旧规则）: %w", err)
+	}
+
+	e.mu.Lock()
+	if !e.run { // 刚好在这中间被停了
+		e.mu.Unlock()
+		nh.Close()
+		return errNotRunning
+	}
+	oldH, oldStop := e.handle, e.mainStop
+	stop := make(chan struct{})
+	e.rules.Store(ns)
+	e.handle, e.mainStop, e.mainFilter = nh, stop, newFilter
+	e.wg.Add(1) // 在锁内 Add：Stop 要先拿 startMu，所以不会与 wg.Wait() 并发
+	e.mu.Unlock()
+
+	go e.packetLoop(nh, stop, loopMain)
+	if oldStop != nil {
+		close(oldStop)
+	}
+	if oldH != nil {
+		oldH.Close()
+	}
+	e.bus.Info("rules.reload: rules=%d ranges=%d filter.changed=true", rulesN, nrange)
+	return nil
 }
 
 // ───────────────────────── relay ─────────────────────────
@@ -946,7 +1045,7 @@ func (e *Engine) handleConn(c net.Conn) {
 	// 用“IP 优先”的匹配再判一次，以其为准 —— 这就是 v0.2.2 / Proxifier 的语义。
 	if e.isFakeIP(st.dst) && st.action == rules.ActionChain {
 		if real := st.realTarget(); real != nil {
-			if chain2, act2, hit := e.rules.MatchName(host, real, st.dport, st.procName); hit && chain2 != st.chain {
+			if chain2, act2, hit := e.ruleSet().MatchName(host, real, st.dport, st.procName); hit && chain2 != st.chain {
 				switch act2 {
 				case rules.ActionChain:
 					e.bus.Info("route.fixup: target=%s real_ip=%s %s → %s（真实 IP 命中更靠前的规则）",
@@ -1064,7 +1163,16 @@ func copyAndClose(dst, src net.Conn, counter *atomic.Uint64) {
 
 // ───────────────────────── 包处理 ─────────────────────────
 
-func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}) {
+// loopKind 说明这只句柄是谁的 —— 决定 Recv 出错时怎么处理（这两类差别很大，
+// 用 stop 是否为 nil 来区分已经不够了：热重载会让**主**句柄也带着 stop）。
+type loopKind int
+
+const (
+	loopMain loopKind = iota // 主过滤器：出错＝整个引擎“拦截已中断”
+	loopDyn                  // 动态过滤器（通配域名）：出错只是这部分不再接管
+)
+
+func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}, kind loopKind) {
 	defer e.wg.Done()
 
 	buf := make([]byte, divert.MTUMax)
@@ -1079,9 +1187,9 @@ func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}) {
 			case <-e.done:
 				return
 			case <-closedCh(stop):
-				return // 我们在换动态句柄，不是出错
+				return // 我们在换句柄（热重载 / 换动态过滤器），不是出错
 			default:
-				if stop != nil {
+				if kind == loopDyn {
 					// 动态句柄出错不能把整个引擎置成“已中断”：它只管通配域名
 					// 那部分流量，掉了就是“这些包不再被接管”。清掉句柄状态，
 					// 下一次观测到新名字时会重新开（见 rebuildDynFilter）。
@@ -1141,12 +1249,12 @@ func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}) {
 		//  ① DNS 接管发的假 IP（池子反查）② 嗅探/解析学到的真 IP（名字表）
 		// 没写通配规则时不做这次查找（每包一次查找，不该白付）。
 		name := ""
-		if e.rules.HasWildcards() {
+		if e.ruleSet().HasWildcards() {
 			if n, ok := e.nameOf(dst); ok {
 				name = n
 			}
 		}
-		if chain, act, hit := e.rules.MatchName(name, dst, dport, procName); hit {
+		if chain, act, hit := e.ruleSet().MatchName(name, dst, dport, procName); hit {
 			switch act {
 			case rules.ActionDirect, rules.ActionBlock:
 				e.passThrough(h, pkt, addr, t, src, dst, sport, dport, flags, act, procName, procPID)
@@ -1245,7 +1353,7 @@ func (e *Engine) takeoverQuery(pkt []byte, addr *divert.Address) bool {
 		e.dnsBox.Writef("查询  %s:%d → %s:%d  id=%#04x %s 类型 %d",
 			info.src, info.sport, info.dst, info.dport, q.ID, q.Name, q.Type)
 	}
-	if !e.rules.WildcardMatch(q.Name) {
+	if !e.ruleSet().WildcardMatch(q.Name) {
 		return true // 不命中：什么都不做（原查询照常）
 	}
 	var ansIP net.IP
@@ -1386,7 +1494,7 @@ func dnsPayload(pkt []byte) []byte {
 // 但也不能每个 DNS 应答都重建（重建要开新句柄），所以节流 200 ms，
 // 节流期间只置脏标记，由 dynFilterLoop 补上。
 func (e *Engine) onWildcardsChanged() {
-	if !e.rules.HasWildcards() {
+	if !e.ruleSet().HasWildcards() {
 		return
 	}
 	now := time.Now().UnixMilli()
@@ -1427,7 +1535,7 @@ func (e *Engine) dynFilterLoop() {
 // 热替换的做法：**先开新句柄、再关旧句柄**，中间不丢包（两只都开着的那一瞬，
 // 同一个包只会被其中一只收到，两边的处理逻辑完全一样）。
 func (e *Engine) rebuildDynFilter() {
-	rs := e.rules.WildcardRanges(e.cfg.CountDirectEnabled())
+	rs := e.ruleSet().WildcardRanges(e.cfg.CountDirectEnabled())
 	filter := ""
 	if len(rs) > 0 {
 		filter = buildFilter(rs, portOf(e.RelayAddr()))
@@ -1469,7 +1577,7 @@ func (e *Engine) rebuildDynFilter() {
 	e.wg.Add(1)
 	e.mu.Unlock()
 
-	go e.packetLoop(nh, stop)
+	go e.packetLoop(nh, stop, loopDyn)
 	if oldH != nil {
 		if oldStop != nil {
 			close(oldStop)
@@ -1493,7 +1601,7 @@ type WildcardStat struct {
 func (e *Engine) WildcardStats() []WildcardStat {
 	var out []WildcardStat
 	seen := map[string][]string{}
-	for _, r := range e.rules.List() {
+	for _, r := range e.ruleSet().List() {
 		for _, w := range r.WildcardTargets() {
 			if _, done := seen[w]; done {
 				continue
@@ -2114,7 +2222,7 @@ func (e *Engine) noteAction(kind string, sport uint16, dst net.IP, dport uint16,
 // 三层次序：① 规则里没人写进程条件 → 直接返回空（零开销）；
 // ② 连接上已经查过 → 用缓存的；③ 查一次 TCP 表（常见情况只是内存里的 map 命中）。
 func (e *Engine) flowProc(sport uint16) (string, uint32) {
-	if e.proc == nil || !e.rules.NeedsProc() {
+	if e.proc == nil || !e.ruleSet().NeedsProc() {
 		return "", 0
 	}
 	if st := e.flow(sport); st != nil && st.procName != "" {
@@ -2421,6 +2529,26 @@ func (e *Engine) checkUnrelayed() {
 //
 // 只有“需要隧道”的区间才进来（直连规则的目标不进），带端口的规则会把端口条件
 // 一并写进过滤条件 —— 这样未列入的端口在驱动层就被放行，一次用户态都不用来。
+// buildMainFilter 用规则集拼主过滤器（含 DNS 接管覆盖的假 IP 段）。
+//
+// 抽出来是为了让**启动**与**热重载**走同一条装配路径 —— 两处各写一遍必然漂移
+// （最典型的漂移就是漏掉假 IP 段，表现为“接管之后应用连不上假 IP”）。
+// 返回 (过滤器原文, 区间数)；返回空串表示“没有需要拦截的规则”（调用方决定怎么报）。
+func (e *Engine) buildMainFilter(s *rules.Set, relayPort uint16) (string, int) {
+	rs := s.FilterRanges(e.cfg.CountDirectEnabled())
+	if e.fake != nil {
+		if r := e.fake.Range(); r != nil {
+			first := rules.IP2U(r.IP.To4())
+			mask := rules.IP2U(net.IP(r.Mask).To4())
+			rs = append(rs, rules.Range{First: first, Last: first | ^mask})
+		}
+	}
+	if len(rs) == 0 {
+		return "", 0
+	}
+	return buildFilter(rs, relayPort), len(rs)
+}
+
 func buildFilter(rs []rules.Range, relayPort uint16) string {
 	return fmt.Sprintf("(outbound and tcp and (%s)) or (outbound and tcp and tcp.SrcPort == %d)",
 		rangeClause(rs), relayPort)
@@ -2635,7 +2763,7 @@ func (e *Engine) localNetLoop() {
 		ips := localIPv4s()
 		sig := ipsKey(ips)
 		if sig != last {
-			e.rules.SetLocalIPs(ips)
+			e.ruleSet().SetLocalIPs(ips)
 			if last != "" {
 				// 只在真的变了的时候说一句，别刷日志
 				e.bus.Info("本机网络变化：现在 %s（带本机网段条件的规则会据此生效/失效）", sig)
@@ -2698,7 +2826,7 @@ func procNewResolver() *proc.Resolver { return proc.NewResolver() }
 // 因为过滤器在启动时就装配好了，新 IP 要重启服务才生效。
 func (e *Engine) resolveHostTargets(warnChange bool) {
 	e.seedFromHosts()
-	hosts := e.rules.HostTargets()
+	hosts := e.ruleSet().HostTargets()
 	if len(hosts) == 0 {
 		// 没有具体域名要解析：但可能有通配规则，仍要把观察到的名字交下去
 		e.applyHostIPs()
@@ -2759,16 +2887,21 @@ func (e *Engine) seedFromHosts() {
 	}
 }
 
-// applyHostIPs 把“名字表里的全部名字（含观察到的）”交给规则层。
+// applyHostIPs 把“名字表里的全部名字（含观察到的）”交给**当前**规则集。
+func (e *Engine) applyHostIPs() { e.applyHostIPsTo(e.ruleSet()) }
+
+// applyHostIPsTo 把“名字表里的全部名字（含观察到的）”交给指定规则集。
 //
 // 通配域名（*.his.com）就是靠这一步才能命中：规则层从 map 里挑出后缀匹配的名字，
 // 把它们当前解析到的 IP 填进 hostIPs —— 这决定了过滤器会不会拦住这些 IP。
-func (e *Engine) applyHostIPs() {
+//
+// 热重载要用它把学到的名字**继承**给新规则集（否则通配规则会“忘掉”已观察到的名字）。
+func (e *Engine) applyHostIPsTo(s *rules.Set) {
 	byHost := map[string][]*net.IPNet{}
 	for h, ips := range e.names.Snapshot() {
 		var nets []*net.IPNet
-		for _, s := range ips {
-			if ip := net.ParseIP(s); ip != nil && ip.To4() != nil {
+		for _, str := range ips {
+			if ip := net.ParseIP(str); ip != nil && ip.To4() != nil {
 				nets = append(nets, &net.IPNet{IP: ip.To4(), Mask: net.CIDRMask(32, 32)})
 			}
 		}
@@ -2776,7 +2909,7 @@ func (e *Engine) applyHostIPs() {
 			byHost[h] = nets
 		}
 	}
-	e.rules.SetHostIPs(byHost)
+	s.SetHostIPs(byHost)
 }
 
 // nameLoop 定期刷新域名解析（内网 DNS 记录会变；不刷新就一直是启动那一份）。

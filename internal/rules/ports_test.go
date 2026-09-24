@@ -91,3 +91,46 @@ func TestFilterRangesIncludeDirect(t *testing.T) {
 		t.Errorf("开了直连统计后应装进去：%v", rs)
 	}
 }
+
+// RangesForPort：给 UDP（QUIC 443）拼过滤器时，只留「端口条件覆盖 443」或「没写端口」
+// 的区间，并且**丢掉端口约束**后合并 —— 只走 8080 的目标不该在 UDP 侧被拦。
+func TestRangesForPort(t *testing.T) {
+	rng := func(a, b string, ports ...PortRange) Range {
+		return Range{First: IP2U(net.ParseIP(a).To4()), Last: IP2U(net.ParseIP(b).To4()), Ports: ports}
+	}
+	rs := []Range{
+		rng("10.0.0.0", "10.0.0.255"),                        // 没写端口 → 覆盖
+		rng("10.0.1.0", "10.0.1.255", PortRange{443, 443}),   // 正好 443 → 覆盖，且与上段相邻应合并
+		rng("10.0.2.0", "10.0.2.255", PortRange{8080, 8080}), // 只走 8080 → 不覆盖
+		rng("10.0.3.0", "10.0.3.255", PortRange{1, 65535}),   // 全端口 → 覆盖
+		rng("10.0.4.0", "10.0.4.255", PortRange{400, 500}),   // 区间含 443 → 覆盖
+	}
+	got := RangesForPort(rs, 443)
+	if len(got) != 2 {
+		t.Fatalf("应得 2 段（相邻段合并后），得到 %d 段: %+v", len(got), got)
+	}
+	// 10.0.0.0/24 与 10.0.1.0/24（仅 443）相邻 → 合并；10.0.3.0/24（全端口）与
+	// 10.0.4.0/24（端口 400-500）相邻 → 合并；只走 8080 的 10.0.2.0/24 被丢掉。
+	want := [][2]string{{"10.0.0.0", "10.0.1.255"}, {"10.0.3.0", "10.0.4.255"}}
+	for i, w := range want {
+		if got[i].First != IP2U(net.ParseIP(w[0]).To4()) || got[i].Last != IP2U(net.ParseIP(w[1]).To4()) {
+			t.Errorf("第 %d 段 = %s~%s，期望 %s~%s", i+1,
+				U2IP(got[i].First), U2IP(got[i].Last), w[0], w[1])
+		}
+		if len(got[i].Ports) != 0 {
+			t.Errorf("第 %d 段不该带端口条件：%+v", i+1, got[i].Ports)
+		}
+	}
+	// 空输入不能报错、不能返回 nil 长度异常
+	if out := RangesForPort(nil, 443); len(out) != 0 {
+		t.Errorf("空输入应返回空：%v", out)
+	}
+	// 只在 443 上写明的规则，在别的端口上不该出现（否则 QUIC 之外也会被拦）
+	only443 := []Range{rng("10.0.2.0", "10.0.2.255", PortRange{443, 443})}
+	if out := RangesForPort(only443, 8080); len(out) != 0 {
+		t.Errorf("非 443 端口不该带出只写了 443 的区间：%+v", out)
+	}
+	if out := RangesForPort(only443, 443); len(out) != 1 {
+		t.Errorf("443 上应带出该区间：%+v", out)
+	}
+}

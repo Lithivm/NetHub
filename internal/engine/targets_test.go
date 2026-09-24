@@ -20,7 +20,7 @@ func TestResolveHostTargets(t *testing.T) {
 		t.Fatalf("载入规则失败: %v", err)
 	}
 	e := newTestEngine()
-	e.rules = rs
+	e.rules.Store(rs)
 	e.cfg = &config.Config{}
 	e.names = dnsmap.NewWithLookup(func(host string) ([]string, error) {
 		if host == "main.his.com" {
@@ -62,7 +62,7 @@ func TestResolveHostTargetsUnresolved(t *testing.T) {
 		t.Fatalf("载入规则失败: %v", err)
 	}
 	e := newTestEngine()
-	e.rules = rs
+	e.rules.Store(rs)
 	e.cfg = &config.Config{}
 	e.names = dnsmap.NewWithLookup(func(string) ([]string, error) {
 		return nil, &net.DNSError{Err: "no such host", IsNotFound: true}

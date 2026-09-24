@@ -633,6 +633,35 @@ func (s *Set) FilterRanges(includeDirect bool) []Range {
 	return mergeRanges(rs)
 }
 
+// RangesForPort 从区间里挑出「端口条件包含 port（或压根没写端口）」的那些，
+// **丢掉端口约束**再合并 —— 供引擎拼 UDP 侧过滤器用（见 engine.buildMainFilter）。
+//
+// 为什么要这一步：UDP（QUIC）与 TCP 在内核过滤器里是两套条件。要拦住「本会走链的
+// 目标」在 UDP 上的流量，就只能拿同一批地址区间去拼 UDP 子句；而 UDP 侧端口是固定
+// 的（443），所以只留下端口条件覆盖 443 的区间，端口条件本身不必再写进过滤器。
+//
+// 没写端口的规则算覆盖（它在 UDP 侧同样生效）；写了端口的规则只认包含 443 的。
+func RangesForPort(rs []Range, port uint16) []Range {
+	out := make([]Range, 0, len(rs))
+	for _, r := range rs {
+		if len(r.Ports) > 0 && !portCovered(r.Ports, port) {
+			continue
+		}
+		out = append(out, Range{First: r.First, Last: r.Last})
+	}
+	return mergeRanges(out)
+}
+
+// portCovered 端口集合里是否有区间覆盖 port。
+func portCovered(ps []PortRange, port uint16) bool {
+	for _, p := range ps {
+		if port >= p.First && port <= p.Last {
+			return true
+		}
+	}
+	return false
+}
+
 // WildcardRanges 只取「通配域名规则」当前覆盖到的区间 —— 引擎用它拼**动态过滤器**。
 //
 // 为什么要单独一只过滤器：通配域名（*.his.com）事先不知道会解析成哪些 IP，
