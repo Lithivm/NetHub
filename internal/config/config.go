@@ -893,6 +893,16 @@ type Tuning struct {
 	// 另：起来之后还会**自检**一次（见 dnsTakeoverSelfCheck）：不相干名字
 	// 解不出或返回假 IP → 自动关掉自己并报错。
 	DNSTakeoverDisabled bool `yaml:"dns_takeover_disabled,omitempty"`
+	// QuicBlockDisabled 关掉 **QUIC（UDP 443）阻断**（默认不写 = 阻断生效）。
+	//
+	// 于什么要阻断：QUIC（HTTP/3）走 UDP，而我们不中继 UDP —— 不阻断的话，
+	// “该走隧道”的目标一上来先试 QUIC，那部分流量是**静默直连漏出**的
+	// （不经过我们、日志里一个字都没有）；阻断后回 ICMP 端口不可达，
+	// 应用立刻回落 TCP（TCP 那条路是我们接管的）。
+	//
+	// 只拦“要走链 / 阻断”的目标；直连目标的 QUIC 一个包不碰。
+	// 确实有应用非 QUIC 不可（少见）时：quic_block_disabled: true。
+	QuicBlockDisabled bool `yaml:"quic_block_disabled,omitempty"`
 	// DNSBlackbox 排查用：把 DNS 接管看到的每个查询/每次回答写进
 	// logs/dns-blackbox.log（默认关；排查“DNS 到底是谁弄坏的”时打开）。
 	DNSBlackbox bool `yaml:"dns_blackbox,omitempty"`
@@ -1851,6 +1861,17 @@ func (c *Config) ChainByName(name string) (Chain, bool) {
 	return Chain{}, false
 }
 
+// SaveFile 把一份配置按**标准格式**写到指定路径（先备份旧的、原子替换），
+// 不改动 c 自己的 path —— 供 CLI `-apply` 用（把校验过的新配置盖到正在用的那份上）。
+//
+// 与 SaveAs 的区别：SaveAs 是导出（换文件头、不备份），这里是“接管现场那份配置”，
+// 走的是和程序自己保存完全一样的路径（备份 + 明文凭据 + 标准文件头）。
+func (c *Config) SaveFile(path string) error {
+	cp := c.Snapshot().config()
+	cp.path = path
+	return cp.Save()
+}
+
 // DefaultPath 返回 <exe 同目录>/config.yaml。
 func DefaultPath() string {
 	exe, err := os.Executable()
@@ -2047,6 +2068,13 @@ func (c *Config) BuiltinDirectEnabled() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return !c.Tuning.BuiltinDirectDisabled
+}
+
+// QuicBlockEnabled 是否阻断 QUIC（UDP 443，默认开）。见 Tuning.QuicBlockDisabled。
+func (c *Config) QuicBlockEnabled() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return !c.Tuning.QuicBlockDisabled
 }
 
 // TLSSniffEnabled 是否只读嗅探 TLS SNI / HTTP Host（默认开）。

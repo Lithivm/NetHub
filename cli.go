@@ -1,13 +1,16 @@
-// 命令行控制面：给脚本与 agent 用的两个开关。
+// 命令行控制面：给脚本与 agent 用的开关。
 //
 // 为什么要它们（而不是让 agent 直接改 YAML 就完事）：
 //
 //	-check  改完配置得能**验**：以前 YAML 写坏（比如重复键）程序会静默起不来，
 //	        连日志都没有 —— 这是实测踩过的坑。
-//	-status 得能**看**：agent 需要机器可读的现状（版本/服务状态/链路/规则/开关），
-//	        而不是去翻日志猜。
+//	-status 得能**看**：agent 需要机器可读的现状（版本/服务状态/链路/规则/开关/
+//	        **运行实例到底在不在跑、吃的是哪份配置**），而不是去翻日志猜。
+//	-apply  改完得能**切**：校验 → 落盘 → 运行中的实例自己热生效（不用重启进程，
+//	        也不用去点界面）—— 改配置这件事从“重启一次”变成“等一下”，
+//	        并且 -apply 会等到实例真的吃进去才返回（否则报清楚为什么没生效）。
 //
-// 两者都**不需要管理员**、不写文件、不启服务、不改任何状态 —— 只读。
+// -check / -status 只读、不写文件、不启服务、不需管理员；-apply 只写配置文件本身。
 package main
 
 import (
@@ -17,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unsafe"
 
 	"nethub/internal/app"
@@ -138,7 +142,16 @@ type statusDoc struct {
 	Hosts       hostsDoc       `json:"hosts"`
 	Tuning      map[string]any `json:"tuning"`
 	Wildcards   []string       `json:"wildcardTargets"`
-	Notes       []string       `json:"notes,omitempty"`
+	// Runtime 运行实例的自报（runtime.json）：不在跑就没有这个字段。
+	Runtime *runtimeDoc `json:"runtime,omitempty"`
+	Notes   []string    `json:"notes,omitempty"`
+}
+
+// runtimeDoc 运行实例自报 + 读文件时现算的判断。
+type runtimeDoc struct {
+	app.RuntimeDoc
+	// ConfigMatchesFile 运行实例吃进去的配置就是磁盘上这一份（false = 改了但没生效）。
+	ConfigMatchesFile bool `json:"configMatchesFile"`
 }
 
 type serviceDoc struct {
@@ -224,6 +237,14 @@ func cmdStatus(cfgPath string) int {
 	}
 	doc.Hosts = hostsDoc{Manage: cfg.Hosts.Manage, Entries: cfg.Hosts.Entries}
 
+	// 运行实例自报（谁在跑、吃的是哪份配置）：文件不在（或进程已退出）就说明没实例在跑。
+	if rd, ok := app.ReadRuntime(); ok {
+		rdoc := runtimeDoc{RuntimeDoc: rd}
+		fileSum := app.FileHash(cfgPath)
+		rdoc.ConfigMatchesFile = rd.Running && fileSum != "" && rd.ConfigHash == fileSum
+		doc.Runtime = &rdoc
+	}
+
 	doc.Tuning = map[string]any{
 		"domainResolve":    cfg.DomainResolveMode(),
 		"dialTimeout":      cfg.DialTimeoutDur().String(),
@@ -236,9 +257,95 @@ func cmdStatus(cfgPath string) int {
 		"patrolInterval":   cfg.PatrolInterval().String(),
 	}
 	doc.Notes = append(doc.Notes,
-		"-status 只读，不改任何状态；配置改动后用 -check 验证，再重启服务生效",
+		"-status 只读，不改任何状态；配置改动用 -check 验、用 -apply 落到运行实例（热生效），需要重启的项见 runtime.restartNeeded",
 		"人类可读的实时状态在界面里（托盘 → 显示主界面）；日志在 exe 同目录 logs\\nethub.log")
 	return emitStatus(doc, 0)
+}
+
+// cmdApply 把一份配置应用到正在运行的实例：校验 → 落盘 → 等它热生效。
+//
+// 退出码：0 = 已生效（或当前没有实例在跑，下次启动生效）；1 = 校验/写入失败；
+// 3 = 已写入但运行实例始终没吃进去（详见 logs\\nethub.log）。
+//
+// 为什么不是“直接 cp 覆盖”：覆盖完你不知道实例到底吃进去没有（热生效是轮询发现的）。
+// 这里写完会盯着运行实例自报的 configHash 等它变过来 —— 脚本与 agent 需要这个确定结论。
+func cmdApply(srcPath, cfgPath string, force bool) int {
+	if srcPath == "" || cfgPath == "" {
+		fmt.Println("apply: FAIL 用法：nethub.exe -apply <新配置.yaml> [-config <目标配置>] [-apply-force]")
+		return 1
+	}
+	cfg, err := config.Load(srcPath)
+	if err != nil {
+		fmt.Println("apply: FAIL 源配置无法载入")
+		for _, line := range strings.Split(err.Error(), "\n") {
+			fmt.Printf("  - %s\n", line)
+		}
+		return 1
+	}
+	if _, err := app.BuildRules(cfg); err != nil {
+		fmt.Println("apply: FAIL 规则编译失败（一个字节都没写）")
+		fmt.Printf("  - %s\n", err)
+		return 1
+	}
+
+	// 防并发覆盖：如果目标配置比源文件还新，说明有人在我们准备这份文件之后又改了它。
+	// 这时直接覆盖会把别人的改动吞掉 —— 除非显式 -apply-force。
+	if !force {
+		sSrc, e1 := os.Stat(srcPath)
+		sDst, e2 := os.Stat(cfgPath)
+		if e1 == nil && e2 == nil && sDst.ModTime().After(sSrc.ModTime()) {
+			fmt.Println("apply: FAIL 目标配置比源文件新（可能有人刚改过它），已拒绝覆盖")
+			fmt.Printf("  - 目标: %s  %s\n", cfgPath, sDst.ModTime().Format("2006-01-02 15:04:05"))
+			fmt.Printf("  - 源:   %s  %s\n", srcPath, sSrc.ModTime().Format("2006-01-02 15:04:05"))
+			fmt.Println("  - 确认要以源文件为准就用 -apply-force")
+			return 1
+		}
+	}
+
+	if err := cfg.SaveFile(cfgPath); err != nil {
+		fmt.Println("apply: FAIL 写入失败")
+		fmt.Printf("  - %s\n", err)
+		return 1
+	}
+	sum := app.FileHash(cfgPath)
+	fmt.Printf("apply: 已写入 %s（%d 条链 %d 条规则，旧配置已备份到 backups\\）\n",
+		cfgPath, len(cfg.Chains), len(cfg.Routes))
+
+	// 等运行实例吃进去（最坏 6 秒：轮询 2 秒 + 应用 + 自报）
+	deadline := time.Now().Add(6 * time.Second)
+	for {
+		rd, ok := app.ReadRuntime()
+		if !ok || !rd.Running {
+			fmt.Println("apply: 当前没有运行中的实例 —— 新配置在下次启动时生效")
+			return 0
+		}
+		if sum != "" && rd.ConfigHash == sum {
+			fmt.Printf("apply: OK 运行实例已生效（pid=%d 版本=%s 规则=%d 链=%d relay=%s）\n",
+				rd.PID, rd.Version, rd.Rules, rd.ChainCount, rd.Relay)
+			if len(rd.RestartNeeded) > 0 {
+				fmt.Printf("apply: 注意 这些改动要重启才生效：%s\n", strings.Join(rd.RestartNeeded, "、"))
+			}
+			return 0
+		}
+		if time.Now().After(deadline) {
+			fmt.Println("apply: FAIL 已写入，但运行实例没有应用（仍在用旧配置）")
+			fmt.Printf("  - 实例 pid=%d 生效于 %s 摘要=%s\n", rd.PID, rd.AppliedAt, shortHash(rd.ConfigHash))
+			if rd.LastError != "" {
+				fmt.Printf("  - 实例当前状态：%s\n", rd.LastError)
+			}
+			fmt.Println("  - 原因见 exe 同目录 logs\\nethub.log（校验不通过 / 规则热生效失败）")
+			return 3
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// shortHash 摘要前 12 位（给人看，不用看全）。
+func shortHash(s string) string {
+	if len(s) > 12 {
+		return s[:12]
+	}
+	return s
 }
 
 func emitStatus(doc statusDoc, code int) int {

@@ -1404,9 +1404,11 @@ func (b *Backend) SaveSettings(s SettingsView) error {
 			}
 		}
 	})
-	if err := b.a.SaveConfig(); err != nil {
+	res, err := b.a.SaveConfig()
+	if err != nil {
 		return err
 	}
+	b.afterSave(res, "设置已保存")
 	// 计划任务的“登录后延迟”是写死在任务 XML 里的 —— 已经装了就必须重建任务才生效。
 	// 放在 SaveConfig **之后**：配置先落盘，重建任务失败也不会丢掉用户刚改的设置。
 	if s.AutostartDelay != nil && autostart.Enabled() {
@@ -1476,7 +1478,7 @@ func (b *Backend) ApplyHosts(entries []string) error {
 		return err
 	}
 	b.a.Cfg.SetHosts(true, clean)
-	if err := b.a.SaveConfig(); err != nil {
+	if _, err := b.a.SaveConfig(); err != nil {
 		return err
 	}
 	b.a.Bus.Info("hosts 已写入 %d 条内网域名映射（已刷 DNS 缓存）", res.Written)
@@ -1495,7 +1497,7 @@ func (b *Backend) RemoveHosts() error {
 		return err
 	}
 	b.a.Cfg.SetHosts(false, nil)
-	if err := b.a.SaveConfig(); err != nil {
+	if _, err := b.a.SaveConfig(); err != nil {
 		return err
 	}
 	b.a.Bus.Info("已从 hosts 移除本程序的标记区块")
@@ -1791,10 +1793,11 @@ func (b *Backend) save(what string) error { return b.saveHint(-1, what) }
 // 但要说一声，否则用户会以为新规则在干活（它可能永远轮不到）。
 // 结论与规则页那一列、「重叠检查」按钮同源（config.RouteHints）。
 func (b *Backend) saveHint(hintFor int, what string) error {
-	if err := b.a.SaveConfig(); err != nil {
+	res, err := b.a.SaveConfig()
+	if err != nil {
 		return err
 	}
-	b.a.Bus.Info("%s（已保存到 config.yaml）", what)
+	b.afterSave(res, what)
 	if hintFor >= 0 {
 		for _, h := range b.a.Cfg.RouteHints(hintFor) {
 			b.a.Bus.Warn("提示（不拦保存）: %s", h)
@@ -1802,6 +1805,28 @@ func (b *Backend) saveHint(hintFor int, what string) error {
 	}
 	return nil
 }
+
+// afterSave 保存后的统一收尾：说清楚“热生效了没有、还有哪些改动要重启”。
+//
+// 界面 toast 另有一份（LastApplyHint），这里只写日志 —— 日志是现场排障的第一手材料。
+func (b *Backend) afterSave(res app.ApplyResult, what string) {
+	if res.Applied {
+		b.a.Bus.Info("%s（已保存到 config.yaml，规则 %d 条已热生效；已在跑的连接不受影响）", what, res.Rules)
+	} else {
+		b.a.Bus.Info("%s（已保存到 config.yaml）", what)
+	}
+	if res.Note != "" {
+		b.a.Bus.Warn("%s：%s", what, res.Note)
+	}
+	for _, f := range res.RestartNeeded {
+		b.a.Bus.Warn("%s：%s 的改动需要重启才生效", what, f)
+	}
+}
+
+// LastApplyHint 上一次保存的“附加说明”（需要重启才生效的项 / 异常）；空串＝没什么要说的。
+//
+// 界面每次保存成功后问一句，把结果接在 toast 里 —— 现场最怕“以为生效了其实没生效”。
+func (b *Backend) LastApplyHint() string { return b.a.LastApply().Hint() }
 
 func isElevated() bool {
 	return windows.GetCurrentProcessToken().IsElevated()
@@ -1885,18 +1910,23 @@ func (b *Backend) GetCountDirect() CountDirectView {
 	return CountDirectView{On: b.a.Cfg.CountDirectEnabled()}
 }
 
-// SetCountDirect 开关直连统计。改完要重启（过滤器在启动时装配），所以顺手重启一下。
+// SetCountDirect 开关直连统计。
+//
+// 以前这里要重启（过滤器在启动时装配）；现在规则改动是热的（含直连统计开关引起的
+// 过滤器变化），所以**不重启** —— 现场不会因为点个开关就把在跑的连接全断掉。
 func (b *Backend) SetCountDirect(on bool) error {
 	b.a.Cfg.SetCountDirect(on)
-	if err := b.a.SaveConfig(); err != nil {
+	res, err := b.a.SaveConfig()
+	if err != nil {
 		return err
 	}
+	b.afterSave(res, "直连统计开关")
 	if on {
 		b.a.Bus.Info("已开启直连流量统计（直连网段会进内核过滤器，每包有一点开销）")
 	} else {
 		b.a.Bus.Info("已关闭直连流量统计（直连流量不再经过我们，回到零开销）")
 	}
-	return b.a.Restart()
+	return nil
 }
 
 // CaptureView 抓包状态（界面用）。

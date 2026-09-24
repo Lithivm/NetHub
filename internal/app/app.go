@@ -42,6 +42,26 @@ type App struct {
 	// opMu 串行化 Start/Stop/Restart（托盘、界面、-quit 都会分别调）。
 	// 不加锁时，“停止”与“启动”会同时动 Engine 与 hosts 自检，结果是半死状态。
 	opMu sync.Mutex
+
+	// ── 配置热生效（细节见 hotconfig.go）──
+
+	// Version 版本号（main 注入；写进 runtime.json，-status 直接读它）。
+	Version string
+	// watchStop 配置文件轮询的停止信号（非 nil = 在轮询）。
+	watchStop chan struct{}
+	// appliedHash/badHash 当前**生效**的 config.yaml 摘要 / 最近一个报过错的摘要。
+	// badHash 是为了不每 2 秒重复报同一个坏文件。
+	appliedHash string
+	badHash     string
+	// appliedAt/appliedRules 最近一次规则热生效的时间与条数（界面正据）。
+	appliedAt    time.Time
+	appliedRules int
+	startedAt    time.Time
+	// startupSnap 引擎**按哪份配置启动的**（热重载对比基线，见 RestartRequired）。
+	startupSnap    config.ConfigSnapshot
+	hasStartupSnap bool
+	// lastApply 最近一次保存/热生效的结果（界面 toast 用）。
+	lastApply ApplyResult
 }
 
 // startHostsWatch 定期检查 hosts 是否还是我们要的样子。
@@ -261,7 +281,12 @@ func (a *App) startLockedInner() error {
 
 	a.mu.Lock()
 	a.running = true
+	a.startedAt = time.Now()
 	a.mu.Unlock()
+	// 记下“启动基线”并开始盯 config.yaml：之后改规则/链不用重启，
+	// 外部（脚本、手工、nethub.exe -apply）改了也自动吃进去。
+	a.snapshotStartup()
+	a.startConfigWatch()
 
 	total := len(a.Rules.List())
 	text := fmt.Sprintf("已接管 %d 条规则，relay %s", total, a.Engine.RelayAddr())
@@ -278,6 +303,7 @@ func (a *App) Stop() {
 }
 
 func (a *App) stopLocked() {
+	a.stopConfigWatch() // 先停轮询：别在收尾时又去应用配置
 	a.mu.Lock()
 	was := a.running
 	a.running = false
@@ -297,6 +323,8 @@ func (a *App) stopLocked() {
 	a.Bus.Info("正在停止…")
 	a.Engine.Stop()
 	// 引擎真的停完了才放锁：否则另一个进程可能在我们过滤器还在时就看到"空闲"
+	// 收尾前补一份“已停止”的运行态（还在持锁，写完再放）。
+	a.writeRuntime()
 	lock.release()
 	a.Bus.Info("✓ 已停止")
 	a.notify("NetHub 已停止", "拦截与隧道均已关闭", NotifyWarn)
@@ -313,19 +341,11 @@ func (a *App) Restart() error {
 	return a.startLocked()
 }
 
-// SaveConfig 保存配置并同步内存副本。
-//
-// 顺序有讲究：**先编译规则、再落盘**。rules.Load 比 Validate 多查一些东西
-// （链名非空、local_nets 合法…），以前先写文件后编译，会出现“文件已经改了、
-// 界面却显示保存失败”—— 下次启动引擎直接起不来。现在编译不过就一个字节也不写。
-func (a *App) SaveConfig() error {
-	if err := a.Cfg.Validate(); err != nil {
-		return err
-	}
-	if err := a.Rules.Load(toRules(a.Cfg.RoutesSnapshot())); err != nil {
-		return err
-	}
-	return a.Cfg.Save()
+// ownsEngine 本进程是不是真拿着引擎（只读降级态＝没拿，不写运行态）。
+func (a *App) ownsEngine() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.lock != nil
 }
 
 // toRules 把配置层的规则转成规则引擎的类型（两层各保持独立，避免互相依赖）。

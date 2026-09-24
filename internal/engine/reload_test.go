@@ -51,15 +51,15 @@ func TestBuildMainFilterEmptyWhenOnlyDirect(t *testing.T) {
 	}
 }
 
-// 热重载：引擎没在跑 → 明确报 errNotRunning（调用方要说“已落盘，但运行实例没应用”）。
+// 热重载：引擎没在跑 → 明确报 ErrNotRunning（调用方要说“已落盘，但运行实例没应用”）。
 func TestReloadRulesNotRunning(t *testing.T) {
 	rs := rules.New()
 	if err := rs.Load([]rules.Route{{Name: "内网", Targets: []string{"10.1.0.0/24"}, Chain: "etyy"}}); err != nil {
 		t.Fatal(err)
 	}
 	e := newRulesEngine(&config.Config{}, rs)
-	if err := e.ReloadRules(rs); err != errNotRunning {
-		t.Fatalf("应报 errNotRunning，得到 %v", err)
+	if err := e.ReloadRules(rs); err != ErrNotRunning {
+		t.Fatalf("应报 ErrNotRunning，得到 %v", err)
 	}
 	if err := e.ReloadRules(nil); err == nil {
 		t.Fatal("nil 规则集应报错")

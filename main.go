@@ -68,7 +68,9 @@ func main() {
 	clashCheck := flag.Bool("clash-check", false, "只检测系统代理/Clash 会不会把内网送进代理，然后退出（不需管理员）")
 	upTest := flag.Bool("test-upstream", false, "直接实测原生上游链路（不经 gost），然后退出（不需管理员）")
 	checkFlag := flag.Bool("check", false, "只校验配置文件（逐条列错误，不启动、不改任何东西），随后退出（不需管理员）")
-	statusFlag := flag.Bool("status", false, "打印机器可读的 JSON 现状（版本/服务/链路/规则/开关），随后退出（不需管理员）")
+	statusFlag := flag.Bool("status", false, "打印机器可读的 JSON 现状（版本/服务/链路/规则/开关/运行实例），随后退出（不需管理员）")
+	applyFlag := flag.String("apply", "", "把指定的配置文件应用到正在运行的实例（校验→落盘→热生效），随后退出（不需管理员）")
+	applyForce := flag.Bool("apply-force", false, "配合 -apply：即使目标配置比源文件新也覆盖")
 	flag.Parse()
 
 	if *verFlag {
@@ -182,12 +184,15 @@ func main() {
 		return
 	}
 
-	// -check / -status：只读，不改任何状态、不需管理员，供脚本与 agent 用
+	// -check / -status / -apply：配置的验、看、切；都不需管理员，也不动服务
 	if *checkFlag {
 		os.Exit(cmdCheck(configPathFor(*cfgPath)))
 	}
 	if *statusFlag {
 		os.Exit(cmdStatus(configPathFor(*cfgPath)))
+	}
+	if *applyFlag != "" {
+		os.Exit(cmdApply(*applyFlag, configPathFor(*cfgPath), *applyForce))
 	}
 
 	// 需要管理员：装 WinDivert 驱动、改 hosts、起驱动服务
@@ -262,6 +267,8 @@ func main() {
 	bus.Info("配置载入：%d 条链，%d 条规则", len(cfg.Chains), len(cfg.Routes))
 
 	a := app.New(cfg, bus)
+	// 版本号写进运行态文件（runtime.json），-status 直接读它 —— 不必去打 exe 参数。
+	a.Version = webui.Version
 
 	// 服务模式（SCM 拉起或手动 -service）：没有窗口、没有托盘，只跑引擎
 	if *serviceMode || winsvc.IsService() {

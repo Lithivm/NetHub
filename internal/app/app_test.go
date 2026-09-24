@@ -34,7 +34,7 @@ func TestSaveConfigDoesNotWriteWhenInvalid(t *testing.T) {
 	cfg.Routes = append(cfg.Routes, config.Route{
 		Name: "坏规则", Targets: []string{"10.0.0.0/24"}, Chain: ""})
 
-	if err := a.SaveConfig(); err == nil {
+	if _, err := a.SaveConfig(); err == nil {
 		t.Fatal("非法规则应当保存失败")
 	}
 	after, _ := os.ReadFile(p)
@@ -49,7 +49,7 @@ func TestSaveConfigWritesWhenValid(t *testing.T) {
 	cfg.Routes = append(cfg.Routes, config.Route{
 		Name: "ok", Targets: []string{"10.0.0.0/24"}, Chain: "proxy-a"})
 
-	if err := a.SaveConfig(); err != nil {
+	if _, err := a.SaveConfig(); err != nil {
 		t.Fatalf("合法规则不该失败: %v", err)
 	}
 	re, err := config.Load(p)

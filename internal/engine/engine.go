@@ -25,6 +25,7 @@ import (
 	"nethub/internal/winrun"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -264,6 +265,10 @@ type Engine struct {
 	dnsSeen  atomic.Uint64
 	dnsLearn atomic.Uint64
 	sniLearn atomic.Uint64
+	// quicBlocked 累计拦下的 QUIC 包数；quicNotices 是日志去重（目标 → 上次报的时间，
+	// 一次浏览能刷出上百个 QUIC 包，逐个记会把日志淹掉）。
+	quicBlocked atomic.Uint64
+	quicNotices map[string]time.Time
 	// fake/injector/tookOver/tookSeen：DNS 接管（发假 IP）。
 	fake     *fakeip.Pool
 	injector *divert.Handle // filter=false 的“只塞”句柄
@@ -344,6 +349,10 @@ func New(bus *logbus.Bus, rs *rules.Set, cfg *config.Config) *Engine {
 		proc:        proc.NewResolver(),
 		names:       dnsmap.New(),
 		dynDirty:    make(chan struct{}, 1),
+		// quicNotices 必须在这里建好：向 nil map 写入会 panic，而在 GUI 构建里
+		// （-H=windowsgui，没有控制台）goroutine 的 panic 是**静默**的 ——
+		// 整个进程直接消失、日志里一个字都没有。实测踩过这一下。
+		quicNotices: map[string]time.Time{},
 	}
 	e.rules.Store(rs)
 	return e
@@ -352,14 +361,44 @@ func New(bus *logbus.Bus, rs *rules.Set, cfg *config.Config) *Engine {
 // ruleSet 当前生效的规则集（永不为 nil，New 已装入；ReloadRules 只换非 nil 的）。
 func (e *Engine) ruleSet() *rules.Set { return e.rules.Load() }
 
-// startLoop 起一个受 WaitGroup 跟踪的协程。
+// startLoop 起一个受 WaitGroup 跟踪、且有 panic 兜底的常驻协程。
 //
 // 每个循环各自 Add(1)，**不要用固定数字** —— 条件分支一多就必然算错：曾经写成
 // Add(10)，而没有通配域名规则（或命中 TUN 让路）时只起了 8 个，于是 Stop 里的
 // wg.Wait() 永远不返回；开了 TLS 嗅探又多一次 Done，直接把计数打成负数 panic。
-func (e *Engine) startLoop(fn func()) {
+//
+// 兜底 panic 为什么必需：GUI 构建没有控制台（-H=windowsgui），goroutine 里的 panic
+// 会把整个进程直接带走，而 stderr 无处可去 —— 现场只能看到“程序突然没了”，
+// 日志里一个字都没有，连个下手的地方都没有（实测踩过）。
+func (e *Engine) startLoop(name string, fn func()) {
 	e.wg.Add(1)
-	go fn()
+	go e.guard(name, fn)
+}
+
+// guard 跑一个循环并兜住 panic。
+//
+// 循环自己 defer 的 wg.Done() 在 panic 展开时**照常执行**，所以计数不会漏；
+// 这里只负责把栈写进日志、把引擎置成“已中断”，再把消息弹给用户。
+func (e *Engine) guard(name string, fn func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			e.reportPanic(name, r)
+		}
+	}()
+	fn()
+}
+
+// reportPanic 把一个 panic 变成“能查的东西”：日志里有栈、界面/托盘有提示。
+func (e *Engine) reportPanic(name string, r any) {
+	err := fmt.Errorf("%s 内部错误: %v", name, r)
+	e.bus.Error("engine.panic: loop=%s err=%v", name, r)
+	for _, line := range strings.Split(string(debug.Stack()), "\n") {
+		e.bus.Error("    %s", line)
+	}
+	e.setFatal(err)
+	if e.Notify != nil {
+		e.Notify("引擎内部错误", fmt.Sprintf("%s 出错了：%v（已在日志里记下调用栈，请重启服务）", name, r), true)
+	}
 }
 
 // trackSniff 登记一个只读噢探句柄；返回 false 表示已经在停止中（调用方直接退出即可）。
@@ -401,6 +440,9 @@ func (e *Engine) RelayAddr() string {
 	defer e.mu.Unlock()
 	return e.relay
 }
+
+// RuleCount 当前生效的规则条数（运行态自报用：外部据此核验“热重载到底吃进去没有”）。
+func (e *Engine) RuleCount() int { return len(e.ruleSet().List()) }
 
 // Stats 返回 (累计连接数, 当前活跃数)。
 func (e *Engine) Stats() (uint64, int) {
@@ -523,14 +565,14 @@ func (e *Engine) Start() error {
 			builtinDirectPort)
 	}
 
-	e.startLoop(e.acceptLoop)
-	e.startLoop(func() { e.packetLoop(h, stop, loopMain) })
-	e.startLoop(e.janitor)
-	e.startLoop(e.relayWatch)
-	e.startLoop(e.nameLoop)
-	e.startLoop(e.healthLoop)
-	e.startLoop(e.targetLoop)
-	e.startLoop(e.localNetLoop)
+	e.startLoop("acceptLoop", e.acceptLoop)
+	e.startLoop("packetLoop", func() { e.packetLoop(h, stop, loopMain) })
+	e.startLoop("janitor", e.janitor)
+	e.startLoop("relayWatch", e.relayWatch)
+	e.startLoop("nameLoop", e.nameLoop)
+	e.startLoop("healthLoop", e.healthLoop)
+	e.startLoop("targetLoop", e.targetLoop)
+	e.startLoop("localNetLoop", e.localNetLoop)
 	// 只读嗅探 DNS + SNI/Host：只有真的用了通配域名才开（否则一分钱不花）。
 	// 它们负责把“应用实际要去哪个名字”学回来，并维护动态过滤器。
 	if e.ruleSet().HasWildcards() {
@@ -546,12 +588,12 @@ func (e *Engine) Start() error {
 		}
 	}
 	if e.ruleSet().HasWildcards() && !e.tunBlocked {
-		e.startLoop(e.dnsLoop)
-		e.startLoop(e.dynFilterLoop)
+		e.startLoop("dnsLoop", e.dnsLoop)
+		e.startLoop("dynFilterLoop", e.dynFilterLoop)
 		// SNI/Host：应对加密 DNS（DoH/DoT）与自带解析器的客户端 ——
 		// 那条路看不了 DNS，但握手是明文的。可在设置里关掉。
 		if e.cfg.TLSSniffEnabled() {
-			e.startLoop(e.sniLoop)
+			e.startLoop("sniLoop", e.sniLoop)
 		}
 		// 名字表跨重启保留着（学习结果不清空），但动态过滤器是上一轮关掉的，
 		// 这里按当前已覆盖到的 IP 直接建起来，否则得等下一次 DNS 观测才恢复。
@@ -584,7 +626,7 @@ func (e *Engine) Start() error {
 					e.bus.Info("DNS 接管：黑匣子已开启（%s）—— 每个查询/每次回答都记在里面", dnsBlackboxPath())
 				}
 				e.bus.Info("dns.takeover: started observe=shared-sniff inject=filter-false range=%s", e.fake.Range())
-				e.startLoop(e.dnsTakeoverGuard)
+				e.startLoop("dnsTakeoverGuard", e.dnsTakeoverGuard)
 			}
 		}
 	}
@@ -664,8 +706,8 @@ func (e *Engine) Stop() {
 	}
 }
 
-// errNotRunning 引擎没在跑时拒绝热重载（调用方当作“已落盘、运行实例在用旧规则”处理）。
-var errNotRunning = errors.New("引擎没有在运行")
+// ErrNotRunning 引擎没在跑时拒绝热重载（调用方当作“已落盘、运行实例在用旧规则”处理）。
+var ErrNotRunning = errors.New("引擎没有在运行")
 
 // ReloadRules 用新编译好的规则集替换正在跑的规则集（**不重启**引擎）。
 //
@@ -695,7 +737,7 @@ func (e *Engine) ReloadRules(ns *rules.Set) error {
 	e.mu.Lock()
 	if !e.run {
 		e.mu.Unlock()
-		return errNotRunning
+		return ErrNotRunning
 	}
 	// 用当前**真实** relay 端口算新过滤器（配置里可能是 0=自动分配）
 	newFilter, nrange := e.buildMainFilter(ns, portOf(e.relay))
@@ -726,7 +768,7 @@ func (e *Engine) ReloadRules(ns *rules.Set) error {
 	if !e.run { // 刚好在这中间被停了
 		e.mu.Unlock()
 		nh.Close()
-		return errNotRunning
+		return ErrNotRunning
 	}
 	oldH, oldStop := e.handle, e.mainStop
 	stop := make(chan struct{})
@@ -735,7 +777,7 @@ func (e *Engine) ReloadRules(ns *rules.Set) error {
 	e.wg.Add(1) // 在锁内 Add：Stop 要先拿 startMu，所以不会与 wg.Wait() 并发
 	e.mu.Unlock()
 
-	go e.packetLoop(nh, stop, loopMain)
+	go e.guard("packetLoop", func() { e.packetLoop(nh, stop, loopMain) })
 	if oldStop != nil {
 		close(oldStop)
 	}
@@ -1216,6 +1258,15 @@ func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}, kind loopKind)
 		}
 
 		src, dst, ihl, proto, ok := parseIPv4(pkt)
+		// QUIC（UDP 443）：这条包能到我们手上，说明它的目标落在“该走隧道”的网段里
+		// （过滤器只装了那些范围的 UDP 443，直连目标的 QUIC 根本不经过我们）。
+		// UDP 走不了隧道 —— 以前是静默直连漏出，现在回 ICMP 端口不可达让应用立刻回落 TCP。
+		if ok && proto != 6 {
+		}
+		if ok && proto == 17 {
+			e.blockQUIC(h, pkt, addr, src, dst, ihl)
+			continue
+		}
 		if !ok || proto != 6 || len(pkt) < ihl+20 {
 			_, _ = h.Send(pkt, addr)
 			continue
@@ -1577,7 +1628,7 @@ func (e *Engine) rebuildDynFilter() {
 	e.wg.Add(1)
 	e.mu.Unlock()
 
-	go e.packetLoop(nh, stop, loopDyn)
+	go e.guard("dynPacketLoop", func() { e.packetLoop(nh, stop, loopDyn) })
 	if oldH != nil {
 		if oldStop != nil {
 			close(oldStop)
@@ -2396,6 +2447,7 @@ func (e *Engine) janitor() {
 			return
 		case <-tk.C:
 			e.pruneLoops() // A14：清掉过期的环路检测窗口
+			e.pruneQUICNotices()
 			activeCut := time.Now().Add(-10 * time.Minute).UnixNano()
 			endedCut := time.Now().Add(-2 * time.Minute).UnixNano()
 			e.mu.Lock()
@@ -2529,24 +2581,43 @@ func (e *Engine) checkUnrelayed() {
 //
 // 只有“需要隧道”的区间才进来（直连规则的目标不进），带端口的规则会把端口条件
 // 一并写进过滤条件 —— 这样未列入的端口在驱动层就被放行，一次用户态都不用来。
-// buildMainFilter 用规则集拼主过滤器（含 DNS 接管覆盖的假 IP 段）。
+// buildMainFilter 用规则集拼主过滤器（含 DNS 接管覆盖的假 IP 段 + QUIC 的 UDP 侧）。
 //
 // 抽出来是为了让**启动**与**热重载**走同一条装配路径 —— 两处各写一遍必然漂移
 // （最典型的漂移就是漏掉假 IP 段，表现为“接管之后应用连不上假 IP”）。
 // 返回 (过滤器原文, 区间数)；返回空串表示“没有需要拦截的规则”（调用方决定怎么报）。
 func (e *Engine) buildMainFilter(s *rules.Set, relayPort uint16) (string, int) {
 	rs := s.FilterRanges(e.cfg.CountDirectEnabled())
+	var fake *rules.Range
 	if e.fake != nil {
 		if r := e.fake.Range(); r != nil {
 			first := rules.IP2U(r.IP.To4())
 			mask := rules.IP2U(net.IP(r.Mask).To4())
-			rs = append(rs, rules.Range{First: first, Last: first | ^mask})
+			fr := rules.Range{First: first, Last: first | ^mask}
+			rs = append(rs, fr)
+			fake = &fr
 		}
 	}
 	if len(rs) == 0 {
 		return "", 0
 	}
-	return buildFilter(rs, relayPort), len(rs)
+	filter := buildFilter(rs, relayPort)
+
+	// UDP 侧（QUIC 阻断）：只拿“走链 / 阻断”的区间 ——
+	// **直连目标不进来**，它们的 QUIC 我们一个包也不该碰。
+	// 假 IP 段要带上：应用拿着假 IP 去连 QUIC，那边根本没人在听，
+	// 回个 ICMP 让它立刻回落 TCP（真 IP 由 TCP 那条路换回来）。
+	if e.cfg.QuicBlockEnabled() {
+		urs := rules.RangesForPort(s.FilterRanges(false), quicPort)
+		if fake != nil {
+			urs = append(urs, *fake)
+		}
+		if len(urs) > 0 {
+			filter += fmt.Sprintf(" or (outbound and udp and udp.DstPort == %d and (%s))",
+				quicPort, rangeClause(urs))
+		}
+	}
+	return filter, len(rs)
 }
 
 func buildFilter(rs []rules.Range, relayPort uint16) string {
