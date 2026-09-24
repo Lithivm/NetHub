@@ -1488,13 +1488,7 @@ async function loadSettings() {
   setValue('setDialBudget', s.dialBudget || 10);
   setValue('setRaceAfter', s.raceAfter === 0 ? 0 : (s.raceAfter || 300));
   setValue('setWarm', s.warmSessions === 0 ? 0 : (s.warmSessions || 2));
-  const dh = document.getElementById('dialHint');
-  if (dh) {
-    // 这里只留**当前值**一行；每个数字的完整解释在旁边的“i”弹窗里
-    dh.textContent = '当前：单次 ' + (s.dialTimeout || 5) + ' 秒 / 总预算 ' + (s.dialBudget || 10) +
-      ' 秒 / 竞速 ' + (s.raceAfter === 0 ? 0 : (s.raceAfter || 300)) +
-      ' 毫秒 / 预热 ' + (s.warmSessions === 0 ? 0 : (s.warmSessions || 2)) + ' 条。改完点「保存并重启」生效。';
-  }
+  setValue('setAutoDelay', s.autostartDelay === 0 ? 0 : (s.autostartDelay || 20));
 }
 
 // 长说明统一放这里；界面上的小字只留一句概括 + 一个“i”按钮。
@@ -1593,7 +1587,7 @@ function intVal(id, def) {
   return Number.isFinite(n) && n > 0 ? n : def;
 }
 
-async function saveSettings(restart) {
+async function saveSettings() {
   const elEntries = document.getElementById('setHostsEntries');
   const elManage = document.getElementById('setHostsManage');
   const payload = {
@@ -1602,6 +1596,12 @@ async function saveSettings(restart) {
     theme: state.theme,
     dialTimeout: intVal('setDialTimeout', 5),
     dialBudget: intVal('setDialBudget', 10),
+    // 启动延迟允许 0（= 登录后立即启动），所以单独处理
+    autostartDelay: (function () {
+      const e = document.getElementById('setAutoDelay');
+      const n = e ? parseInt(e.value, 10) : NaN;
+      return Number.isFinite(n) && n >= 0 ? Math.min(n, 600) : 20;
+    })(),
     // 竞速起跑允许 0（= 关闭），所以单独处理
     raceAfter: (function () {
       const e = document.getElementById('setRaceAfter');
@@ -1616,9 +1616,53 @@ async function saveSettings(restart) {
   };
   try {
     await call('SaveSettings', payload);
-    toast('设置已保存', restart ? '正在重启服务…' : 'hosts 托管 / relay 的改动需要重启才生效', 'success');
-    if (restart) { await call('Restart'); await refreshState(); }
+    toast('设置已保存', 'hosts 接管 / 上游拨号 / 启动延迟的改动需要重启才生效', 'success');
   } catch (e) { fail(e); }
+}
+
+// 恢复设置：把设置页上的每一项都填回内置默认值并落盘。
+//
+// 与「重置」（上游拨号卡里那个，只把 4 个输入框填回默认、要再点保存）不同，
+// 这个是**整页**的，而且**直接生效** —— 所以先弹确认框把会变的东西列出来，
+// 尤其写明“会取消开机自启”（那会删掉计划任务，属于系统级副作用）。
+async function resetSettings() {
+  const ok = await confirmBox('恢复默认设置？',
+    '会把这页的设置改回默认并立即生效：\n' +
+    '· 取消开机自启（删除「计划任务 NetHub」）\n' +
+    '· 启动延迟 → 20 秒\n' +
+    '· 主题 → 浅色\n' +
+    '· hosts 接管 → 关闭，映射条目 → 内置默认\n' +
+    '· 上游拨号 → 单次 5 秒 / 总预算 10 秒 / 竞速 300 毫秒 / 预热 2 条\n' +
+    '\n链路与路由规则不受影响。', false, '恢复默认');
+  if (!ok) return;
+
+  setChecked('setAutostart', false);
+  setValue('setAutoDelay', 20);
+  setChecked('setHostsManage', false);
+  setValue('setHostsEntries', '');
+  setValue('setDialTimeout', 5);
+  setValue('setDialBudget', 10);
+  setValue('setRaceAfter', 300);
+  setValue('setWarm', 2);
+  applyThemeSoft('light');
+
+  const cbAuto = document.getElementById('setAutostart');
+  cbAuto.dataset.busy = '1';            // 别让状态轮询把刚写下的值又按系统状态改回去
+  try {
+    await call('SetAutostart', false);
+    await call('SetTheme', 'light');
+    await call('SaveSettings', {
+      hostsManage: false, hostsEntries: [], theme: 'light',
+      dialTimeout: 5, dialBudget: 10, raceAfter: 300, warmSessions: 2, autostartDelay: 20,
+    });
+    await loadSettings();               // 条目回落成内置默认（后端在空列表时才给默认）
+    toast('已恢复默认设置', '可点「重启」让改动生效', 'success');
+  } catch (e) {
+    fail(e);
+  } finally {
+    delete cbAuto.dataset.busy;
+    refreshState();
+  }
 }
 
 /* ═══════════════ 启动 ═══════════════ */
@@ -1756,8 +1800,8 @@ function wire() {
   document.getElementById('btnRuleAdd').onclick = () => ruleForm(null);
 
   // 设置页
-  document.getElementById('btnSaveSettings').onclick = () => saveSettings(false);
-  document.getElementById('btnSaveRestart').onclick = () => saveSettings(true);
+  document.getElementById('btnSaveSettings').onclick = () => saveSettings();
+  document.getElementById('btnResetSettings').onclick = () => resetSettings();
   document.getElementById('btnOpenConfig').onclick = () => call('OpenConfigFile').catch(fail);
   document.getElementById('btnOpenDir').onclick = () => call('OpenProgramDir').catch(fail);
   wireAbout();
@@ -1812,8 +1856,12 @@ function wire() {
     cbAuto.dataset.busy = '1';
     try {
       await call('SetAutostart', cbAuto.checked);
+      // 不用 intVal：它把 0 当成“没填”回落成 20，而 0 在这里是合法值（立即启动）
+      const raw = parseInt((document.getElementById('setAutoDelay') || {}).value, 10);
+      const sec = Number.isFinite(raw) && raw >= 0 ? raw : 20;
       toast(cbAuto.checked ? '已设置开机自启' : '已取消开机自启',
-            cbAuto.checked ? '下次登录后延迟 20 秒静默启动，不弹 UAC' : '', 'success');
+            cbAuto.checked ? (sec > 0 ? '下次登录后延迟 ' + sec + ' 秒静默启动，不弹 UAC'
+                                      : '下次登录后立即静默启动，不弹 UAC') : '', 'success');
     } catch (e) {
       cbAuto.checked = !cbAuto.checked;    // 回滚
       fail(e);
@@ -2100,13 +2148,13 @@ async function startUpdate(btn, info) {
   }, 500);
 }
 
-/* 上游拨号：重置为默认（只回填输入框。保存与重启仍由用户决定 —— 不在用户没点保存时动线上服务） */
+/* 上游拨号：重置（只回填输入框。保存仍由用户决定 —— 不在用户没点保存时动线上服务） */
 function resetDialDefaults() {
   setValue('setDialTimeout', 5);
   setValue('setDialBudget', 10);
   setValue('setRaceAfter', 300);
   setValue('setWarm', 2);
-  toast('已填回默认值', '单次 5s / 总预算 10s / 竞速起跑 300ms / 预热 2 条。点「保存并重启」才生效。', 'success');
+  toast('已填回默认值', '单次 5s / 总预算 10s / 竞速起跑 300ms / 预热 2 条。点「保存设置」才生效。', 'success');
 }
 
 

@@ -199,10 +199,17 @@ func main() {
 		return
 	}
 	if *doAutostart {
-		if err := autostart.Enable(); err != nil {
+		// 登录后延迟写在计划任务 XML 里 —— 先读一次配置取用户设的值。
+		// 读不到（配置坏了/首次运行）就用内置默认（config 侧同样是 20s 下限计），
+		// 不让“配置有问题”把开机自启这件事本身卡住。
+		delay := 20
+		if cfg, err := config.Load(*cfgPath); err == nil {
+			delay = int(cfg.AutostartDelayDur() / time.Second)
+		}
+		if err := autostart.Enable(delay); err != nil {
 			fatal("设置开机启动失败: %v", err)
 		}
-		fmt.Println("已加入开机启动（计划任务 " + autostart.TaskName + "）")
+		fmt.Printf("已加入开机启动（计划任务 %s，登录后延迟 %d 秒）\n", autostart.TaskName, delay)
 		return
 	}
 	if *noAutostart {

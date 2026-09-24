@@ -265,9 +265,9 @@ type Engine struct {
 	sniffMu      sync.Mutex
 	sniffHandles []*divert.Handle
 	sniffClosing bool
-	tookOver atomic.Uint64
-	tookSeen map[string]bool
-	dnsBox   *dnsBlackbox // 排查用：DNS 黑匣子（tuning.dns_blackbox 打开时才有）
+	tookOver     atomic.Uint64
+	tookSeen     map[string]bool
+	dnsBox       *dnsBlackbox // 排查用：DNS 黑匣子（tuning.dns_blackbox 打开时才有）
 	// tunBlocked 本机已有别的 TUN 模式代理在接管流量（检测到就自动让路）。
 	tunBlocked bool
 	// dohSeen 已报过的加密 DNS 端点（避免刷屏）。

@@ -222,6 +222,9 @@ type SettingsView struct {
 	RaceAfter *int `json:"raceAfter"`
 	// WarmSessions 预热会话条数：0 = 关闭（同样用指针区分“没传”）。
 	WarmSessions *int `json:"warmSessions"`
+	// AutostartDelay 开机自启的登录后延迟（秒）；nil = 前端没传 → 不改。
+	// 0 是合法值（登录后立即启动），所以用指针。
+	AutostartDelay *int `json:"autostartDelay"`
 }
 
 type ChainInput struct {
@@ -889,13 +892,14 @@ func (b *Backend) GetSettings() SettingsView {
 		entries = defaultHostsEntries()
 	}
 	return SettingsView{
-		HostsManage:  hosts.Manage,
-		HostsEntries: entries,
-		Theme:        b.a.Cfg.Theme(),
-		DialTimeout:  int(b.a.Cfg.DialTimeoutDur() / time.Second),
-		DialBudget:   int(b.a.Cfg.DialBudgetDur() / time.Second),
-		RaceAfter:    intPtr(int(b.a.Cfg.RaceAfterDur() / time.Millisecond)),
-		WarmSessions: intPtr(b.a.Cfg.WarmTarget()),
+		HostsManage:    hosts.Manage,
+		HostsEntries:   entries,
+		Theme:          b.a.Cfg.Theme(),
+		DialTimeout:    int(b.a.Cfg.DialTimeoutDur() / time.Second),
+		DialBudget:     int(b.a.Cfg.DialBudgetDur() / time.Second),
+		RaceAfter:      intPtr(int(b.a.Cfg.RaceAfterDur() / time.Millisecond)),
+		WarmSessions:   intPtr(b.a.Cfg.WarmTarget()),
+		AutostartDelay: intPtr(int(b.a.Cfg.AutostartDelayDur() / time.Second)),
 	}
 }
 
@@ -1239,6 +1243,9 @@ func (b *Backend) SaveSettings(s SettingsView) error {
 		entries = s.HostsEntries
 	}
 	cfg.SetHosts(s.HostsManage, entries)
+	if s.AutostartDelay != nil {
+		cfg.SetAutostartDelay(time.Duration(*s.AutostartDelay) * time.Second)
+	}
 	// 拨号调优：只在界面确实传了值时才改（0 = 没传，保持原样）；
 	// 竞速起跑 / 预热会话：nil = 前端没传 → 保持原值；0 = 明确关闭
 	cfg.UpdateTuning(func(t *config.Tuning) {
@@ -1266,8 +1273,17 @@ func (b *Backend) SaveSettings(s SettingsView) error {
 	if err := b.a.SaveConfig(); err != nil {
 		return err
 	}
-	b.a.Bus.Info("设置已保存（hosts 托管=%v；拨号单次 %s / 总预算 %s / 竞速起跑 %s / 预热 %d 条）",
-		b.a.Cfg.HostsCopy().Manage, cfg.DialTimeoutDur(), cfg.DialBudgetDur(), cfg.RaceAfterDur(), cfg.WarmTarget())
+	// 计划任务的“登录后延迟”是写死在任务 XML 里的 —— 已经装了就必须重建任务才生效。
+	// 放在 SaveConfig **之后**：配置先落盘，重建任务失败也不会丢掉用户刚改的设置。
+	if s.AutostartDelay != nil && autostart.Enabled() {
+		if err := autostart.Enable(int(cfg.AutostartDelayDur() / time.Second)); err != nil {
+			return err
+		}
+		b.refreshAutostart()
+	}
+	b.a.Bus.Info("设置已保存（hosts 托管=%v；拨号单次 %s / 总预算 %s / 竞速起跑 %s / 预热 %d 条；自启延迟 %s）",
+		b.a.Cfg.HostsCopy().Manage, cfg.DialTimeoutDur(), cfg.DialBudgetDur(), cfg.RaceAfterDur(), cfg.WarmTarget(),
+		cfg.AutostartDelayDur())
 	return nil
 }
 
@@ -1289,9 +1305,10 @@ func (b *Backend) SetTheme(mode string) error {
 
 // SetAutostart 开关开机自启（立即生效，不等"保存"）。
 func (b *Backend) SetAutostart(on bool) error {
+	delay := int(b.a.Cfg.AutostartDelayDur() / time.Second)
 	var err error
 	if on {
-		err = autostart.Enable()
+		err = autostart.Enable(delay)
 	} else {
 		err = autostart.Disable()
 	}
@@ -1300,7 +1317,7 @@ func (b *Backend) SetAutostart(on bool) error {
 	}
 	b.refreshAutostart()
 	if on {
-		b.a.Bus.Info("已设置开机自启（计划任务 %s，最高权限，登录后静默启动）", autostart.TaskName)
+		b.a.Bus.Info("已设置开机自启（计划任务 %s，最高权限，登录后延迟 %d 秒静默启动）", autostart.TaskName, delay)
 	} else {
 		b.a.Bus.Info("已取消开机自启")
 	}

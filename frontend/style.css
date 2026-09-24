@@ -575,6 +575,8 @@ code, .mono { font-family: var(--font-mono); }
 }
 .input-row { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
 .input-row .input { flex: 1; }
+/* 数字输入框不该占满整行（对齐上游拨号那几个 88px 的框） */
+.input-row .input.num { flex: 0 0 auto; width: 88px; }
 /* 多行文本框旁边挂按钮时顶部对齐，不让按钮跟着文本居中 */
 .input-row.top { align-items: flex-start; }
 
@@ -819,8 +821,8 @@ code, .mono { font-family: var(--font-mono); }
   flex: 0 0 auto;
   width: 88px;           /* 四个框同一个宽度 */
 }
-/* 预热会话落在第二行第一列（与“单次超时”同一列，左边缘对齐）；按钮靠右 */
-.dial-grid button { grid-column: 3; justify-self: end; }
+/* 预热会话落在第二行第一列（与“单次超时”同一列，左边缘对齐）。
+   重置按钮在卡片标题那一行（见 index.html），不再占网格位。 */
 
 /* 无凭据 = 需要你补的“缺东西”，用红色（绿色是“带凭据”的，别混） */
 .cred-tag.is-missing { color: var(--error); }

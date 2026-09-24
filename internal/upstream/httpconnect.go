@@ -145,6 +145,7 @@ func readResponseHeader(conn net.Conn, max int) ([]byte, error) {
 // 单独一个类型是为了让探活能区分两种“CONNECT 失败”：
 //   - 认证失败（407）→ 链路真的不可用，AuthOK 必须为 false；
 //   - 出口出不了公网（其他错误）→ 很多客户就是这样，不能因此报“链路坏”。
+//
 // 旧版 ProbeAuth 把两者混为一谈，HTTP 代理口令错了也报“可用”。
 type ProxyAuthError struct{ Line string }
 

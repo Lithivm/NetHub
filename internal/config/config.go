@@ -291,6 +291,12 @@ type UICfg struct {
 	Theme string `yaml:"theme"` // light | dark
 }
 
+// defaultAutostartDelay 开机自启的默认登录后延迟。
+//
+// 20 秒是现场试出来的：开机瞬间网络（VPN/其它代理）与其它自启程序还没就绪，
+// 抢跑会让首次拦截不可用；20 秒足够所有开机项安定下来。
+const defaultAutostartDelay = 20 * time.Second
+
 // Config 顶层配置。
 type Config struct {
 	// mu 保护下面所有可变字段（Chains/Routes/Patrol/Tuning/Hosts/UI/Relay）。
@@ -310,6 +316,10 @@ type Config struct {
 	Tuning Tuning   `yaml:"tuning,omitempty"` // 网络调优（上游拨号超时/总预算）
 	Hosts  HostsCfg `yaml:"hosts"`
 	UI     UICfg    `yaml:"ui"`
+
+	// AutostartDelay 开机自启（计划任务）在登录后的延迟，如 "20s"；空 = 默认 20s。
+	// 现场要能调它：开机瞬间网络与其它自启程序还没就绪，抢跑会导致首次拦截不可用。
+	AutostartDelay string `yaml:"autostart_delay,omitempty"`
 
 	path string
 }
@@ -2233,6 +2243,44 @@ func (c *Config) Theme() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.UI.Theme
+}
+
+// AutostartDelayDur 开机自启的登录后延迟（默认 20s；"0s" = 不延迟；上限 10 分钟）。
+//
+// 刻意不用 clampDur：它把 "0s" 当非法值回落到默认，而这里 0 是合法取值
+// （用户就是要"登录后立刻启动"）。
+func (c *Config) AutostartDelayDur() time.Duration {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.autostartDelayLocked()
+}
+
+func (c *Config) autostartDelayLocked() time.Duration {
+	s := strings.TrimSpace(c.AutostartDelay)
+	if s == "" {
+		return defaultAutostartDelay
+	}
+	d, err := time.ParseDuration(strings.ToLower(s))
+	if err != nil || d < 0 {
+		return defaultAutostartDelay
+	}
+	if d > 10*time.Minute {
+		d = 10 * time.Minute
+	}
+	return d
+}
+
+// SetAutostartDelay 设置开机自启延迟（负数按 0 处理）。
+func (c *Config) SetAutostartDelay(d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	if d > 10*time.Minute {
+		d = 10 * time.Minute
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.AutostartDelay = d.String()
 }
 
 // SetCountDirect 切换“统计直连流量”。

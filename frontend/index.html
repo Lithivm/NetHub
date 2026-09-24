@@ -241,7 +241,6 @@
               <button class="seg2-btn" id="btnThemeDark" data-theme="dark">深色</button>
             </div>
           </div>
-          <div class="hint">改完立即生效，也记进 config.yaml（换机器跟配置走）</div>
         </div>
       </div>
 
@@ -252,6 +251,11 @@
             <input type="checkbox" id="setAutostart">
             <span>开机自动启动<em>用计划任务 + 最高权限：登录后静默启动，不弹 UAC</em></span>
           </label>
+          <div class="input-row">
+            <span>启动延迟</span>
+            <input type="number" min="0" max="600" step="5" class="input input-sm num" id="setAutoDelay">
+            <span class="hint">秒 —— 登录后等这么久再启动，给网络与其它自启程序让路；0 = 立即启动</span>
+          </div>
           <div class="hint" id="autoInfo"></div>
         </div>
       </div>
@@ -284,6 +288,7 @@
           <h2>上游拨号</h2>
           <span class="hint">一条上游不响应时，等多久换下一条</span>
           <div class="spacer"></div>
+          <button class="btn btn-sm" id="btnDialReset">重置</button>
           <button class="info-btn" id="btnHelpDial" title="每个数字都是什么意思">i</button>
         </div>
         <div class="card-body form">
@@ -292,9 +297,8 @@
             <label>总预算<span class="unit-wrap"><input type="number" min="1" max="60" step="1" class="input input-sm" id="setDialBudget"><span class="unit">秒</span></span></label>
             <label>竞速起跑<span class="unit-wrap"><input type="number" min="0" max="2000" step="50" class="input input-sm" id="setRaceAfter"><span class="unit">毫秒</span></span></label>
             <label>预热会话<span class="unit-wrap"><input type="number" min="0" max="8" step="1" class="input input-sm" id="setWarm"><span class="unit">条</span></span></label>
-            <button class="btn btn-sm" id="btnDialReset">重置为默认</button>
           </div>
-          <div class="hint" id="dialHint"></div>        </div>
+          <div class="hint">重启后生效</div>        </div>
       </div>
 
       <div class="card">
@@ -385,7 +389,7 @@
     </div>
     <div class="settings-actions">
       <button class="btn btn-primary" id="btnSaveSettings">保存设置</button>
-      <button class="btn" id="btnSaveRestart">保存并重启</button>
+      <button class="btn" id="btnResetSettings">恢复设置</button>
     </div>
   </section>
 
