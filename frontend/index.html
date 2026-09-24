@@ -99,7 +99,7 @@
       <div class="card-head">
         <h2>路由规则</h2>
         <button class="info-btn" id="btnHelpRule" title="域名与通配域名是怎么匹配上的">i</button>
-        <span class="hint">自上而下匹配，命中即停；一条规则可含多个目标。改动即时保存，点「重启」生效</span>
+        <span class="hint">自上而下匹配，命中即停；一条规则可含多个目标。改动**即时保存并立即生效**（已在跑的连接不受影响；改中转端口、DNS 接管、hosts 才需要重启）</span>
         <div class="spacer"></div>
         <button class="btn btn-sm" id="btnRuleSort" title="前缀长的（/32 比 /24 具体）排前面，带端口条件的更靠前；本机自身 / 环回（127.0.0.0/8）类规则放最后——它是兜底，不跟内网网段抢位置；停用的规则原地不动">按优先级排序</button>
         <button class="btn btn-sm" id="btnRuleOverlap">检查重叠</button>
@@ -141,9 +141,25 @@
               代价是**连接列表里也看不到直连连接**（连 SYN 都看不到）。
               打开后直连网段会被拦下来数一次字节再原样放行（不改包），于是能回答
               “直连规则到底生效了吗、是谁在连、占了多少流量”。
-              只能数**出方向**（回来的包是入方向，不在过滤器里），要双向就得每包多两次内核交互。改完自动重启生效。</em></span>
+              只能数**出方向**（回来的包是入方向，不在过滤器里），要双向就得每包多两次内核交互。改完立即生效（不再重启服务、不断已有连接）。</em></span>
           </label>
           <div class="hint" id="countDirectInfo">—</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>QUIC（HTTP/3）阻断</h2></div>
+        <div class="card-body form">
+          <label class="check">
+            <input type="checkbox" id="setQuicBlock">
+            <span>拦下本该走隧道的 QUIC 流量<em>默认开。QUIC（HTTP/3）走 UDP，而我们不做 UDP 中继 ——
+              不拦的话这部分流量会绕过隧道直接出去（日志里连痕迹都没有），
+              现场看到的现象是“这个站有时快得反常”。
+              拦下来后浏览器会回落到 TCP，那条路仍由我们接管（该走链的走链、假 IP 会换成真 IP）。
+              只拦“走链路 / 阻断”的目标；直连目标的 QUIC 一个包也不碰。
+              改完立即生效。</em></span>
+          </label>
+          <div class="hint" id="quicBlockInfo">—</div>
         </div>
       </div>
     </div>
@@ -298,7 +314,7 @@
             <label>竞速起跑<span class="unit-wrap"><input type="number" min="0" max="2000" step="50" class="input input-sm" id="setRaceAfter"><span class="unit">毫秒</span></span></label>
             <label>预热会话<span class="unit-wrap"><input type="number" min="0" max="8" step="1" class="input input-sm" id="setWarm"><span class="unit">条</span></span></label>
           </div>
-          <div class="hint">重启后生效</div>        </div>
+          <div class="hint">改完立即生效（从下一次拨号开始按新值走）</div>        </div>
       </div>
 
       <div class="card">

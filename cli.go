@@ -251,6 +251,7 @@ func cmdStatus(cfgPath string) int {
 		"dialBudget":       cfg.DialBudgetDur().String(),
 		"raceAfter":        cfg.RaceAfterDur().String(),
 		"countDirect":      cfg.CountDirectEnabled(),
+		"quicBlock":        cfg.QuicBlockEnabled(),
 		"tlsSniff":         cfg.TLSSniffEnabled(),
 		"dnsTakeover":      cfg.DNSTakeoverEnabled(),
 		"dnsTakeoverRange": cfg.FakeIPRangeOr(),

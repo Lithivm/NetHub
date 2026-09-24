@@ -158,7 +158,7 @@ function showPage(name) {
   document.querySelectorAll('.page').forEach(p => p.classList.toggle('is-active', p.id === 'page-' + name));
   positionTabThumb();
   if (name === 'log') scrollLogToEnd();
-  if (name === 'conn') { loadConns(); loadCountDirect(); }
+  if (name === 'conn') { loadConns(); loadCountDirect(); loadQuicBlock(); }
   if (name === 'diag') { precheckConfig(true); loadTargetHealth(); loadPatrol(); loadLastSelfTest(); }
 }
 
@@ -925,7 +925,7 @@ async function chainForm(index, preset) {
       modal.close();
       await loadChains();
       toast(isNew ? '已添加链路' : '已更新链路',
-        payload.name + '（' + payload.forwards.length + ' 条上游）', 'success');
+        payload.name + '（' + payload.forwards.length + ' 条上游）' + await saveNote(), 'success');
     } catch (e) { modal.error(fail(e)); }
   });
 }
@@ -975,7 +975,7 @@ async function moveChainTo(from, to) {
 
 async function delChain(name) {
   if (!await confirmBox('删除链路', '确定删除链 ' + name + ' 吗？', true)) return;
-  try { await call('DeleteChain', name); await loadChains(); toast('已删除链路', name, 'success'); }
+  try { await call('DeleteChain', name); await loadChains(); toast('已删除链路', name + await saveNote(), 'success'); }
   catch (e) { fail(e); }
 }
 
@@ -1272,7 +1272,8 @@ function ruleForm(index) {
         (splitTargets(apps.value).length ? '，仅 ' + apps.value.trim().replace(/\s+/g, ' ') + ' 发起' : '') +
         ' → ' +
         actionName(sel.value) +
-        (splitTargets(localNets.value).length ? '（仅限本机在 ' + localNets.value.trim().replace(/\s+/g, ' ') + ' 时）' : ''),
+        (splitTargets(localNets.value).length ? '（仅限本机在 ' + localNets.value.trim().replace(/\s+/g, ' ') + ' 时）' : '') +
+        await saveNote(),
         'success');
     } catch (e) { modal.error(fail(e)); }
   });
@@ -1312,7 +1313,7 @@ async function delRoute(i) {
       '确定删除规则 ' + desc + '（' + ts.length + ' 个目标' +
       ((r.ports && r.ports.length) ? '，端口 ' + r.ports.join(',') : '') + ' → ' +
       actionName(r.block ? 'block' : r.direct ? 'direct' : r.chain) + '）吗？', true)) return;
-  try { await call('DeleteRoute', i); await loadRoutes(); toast('已删除规则', desc, 'success'); }
+  try { await call('DeleteRoute', i); await loadRoutes(); toast('已删除规则', desc + await saveNote(), 'success'); }
   catch (e) { fail(e); }
 }
 
@@ -1629,7 +1630,7 @@ async function saveSettings() {
   };
   try {
     await call('SaveSettings', payload);
-    toast('设置已保存', 'hosts 接管 / 上游拨号 / 启动延迟的改动需要重启才生效', 'success');
+    toast('设置已保存', '主机 hosts、中转端口、DNS 接管的改动需要重启才生效' + await saveNote(), 'success');
   } catch (e) { fail(e); }
 }
 
@@ -1669,7 +1670,7 @@ async function resetSettings() {
       dialTimeout: 5, dialBudget: 10, raceAfter: 300, warmSessions: 2, autostartDelay: 20,
     });
     await loadSettings();               // 条目回落成内置默认（后端在空列表时才给默认）
-    toast('已恢复默认设置', '可点「重启」让改动生效', 'success');
+    toast('已恢复默认设置', '已立即生效（hosts 与中转端口的改动需重启）' + await saveNote(), 'success');
   } catch (e) {
     fail(e);
   } finally {
@@ -1746,8 +1747,17 @@ function wire() {
   document.getElementById('setCountDirect').onchange = async (ev) => {
     try {
       await call('SetCountDirect', ev.target.checked);
-      toast('已保存', ev.target.checked ? '直连流量从现在起也会被统计（服务已重启）' : '直连流量不再经过我们（零开销）', 'success');
+      toast('已保存', (ev.target.checked ? '直连流量从现在起也会被统计' : '直连流量不再经过我们（零开销）') + await saveNote(), 'success');
       await loadCountDirect();
+    } catch (e) { fail(e); ev.target.checked = !ev.target.checked; }
+  };
+  document.getElementById('setQuicBlock').onchange = async (ev) => {
+    try {
+      await call('SetQuicBlock', ev.target.checked);
+      toast('已保存', (ev.target.checked
+        ? '本该走隧道的 QUIC 会被拦下（浏览器回落到 TCP，那条路仍走隧道）'
+        : 'QUIC 不再经过我们（这部分流量会直接出去）') + await saveNote(), 'success');
+      await loadQuicBlock();
     } catch (e) { fail(e); ev.target.checked = !ev.target.checked; }
   };
 
@@ -2002,6 +2012,31 @@ async function boot() {
 }
 
 window.addEventListener('DOMContentLoaded', () => boot().catch(e => toast('初始化失败', String(e), 'error')));
+
+// saveNote 保存成功后问一句后端的“附加说明”：哪些改动热生效了、哪些还得重启。
+// 由后端统一算（见 App.RestartRequired）—— 前端不在本地再判一遍，否则两边必然漂移。
+async function saveNote() {
+  try {
+    const s = await call('LastApplyHint');
+    return s ? '　' + s : '';
+  } catch (e) { return ''; }
+}
+
+/* QUIC 阻断开关 */
+async function loadQuicBlock() {
+  const cb = document.getElementById('setQuicBlock');
+  if (!cb) return;
+  let v = null;
+  try { v = await call('GetQuicBlock'); } catch (e) { return; }
+  if (!v) return;
+  cb.checked = !!v.on;
+  const info = document.getElementById('quicBlockInfo');
+  if (info) {
+    info.textContent = v.on
+      ? '当前：开。本该走隧道的 UDP 443 会被拦下并记一行 quic.block（不再直连漏出）。'
+      : '当前：关。QUIC 流量不经过我们（这些目标上的 HTTP/3 会直连出去）。';
+  }
+}
 
 /* 直连统计开关（A15） */
 async function loadCountDirect() {

@@ -1929,6 +1929,35 @@ func (b *Backend) SetCountDirect(on bool) error {
 	return nil
 }
 
+// QuicBlockView QUIC 阻断开关（「连接」页上的一个勾）。
+type QuicBlockView struct {
+	On bool `json:"on"`
+}
+
+// GetQuicBlock 当前是否阻断 QUIC（UDP 443）。
+func (b *Backend) GetQuicBlock() QuicBlockView {
+	return QuicBlockView{On: b.a.Cfg.QuicBlockEnabled()}
+}
+
+// SetQuicBlock 开关 QUIC 阻断（tuning.quic_block_disabled 的反面）。
+//
+// 它是主过滤器的一部分（UDP 子句），所以和规则改动一样是热的：改完立即生效，
+// 不重启、不断已有连接。
+func (b *Backend) SetQuicBlock(on bool) error {
+	b.a.Cfg.SetQuicBlock(on)
+	res, err := b.a.SaveConfig()
+	if err != nil {
+		return err
+	}
+	b.afterSave(res, "QUIC 阻断开关")
+	if on {
+		b.a.Bus.Info("已开启 QUIC 阻断（本该走隧道的 UDP 443 会被拦下并记一行，不再直连漏出）")
+	} else {
+		b.a.Bus.Info("已关闭 QUIC 阻断（UDP 443 不再经过我们）")
+	}
+	return nil
+}
+
 // CaptureView 抓包状态（界面用）。
 type CaptureView struct {
 	On      bool   `json:"on"`

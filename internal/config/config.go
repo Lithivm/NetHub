@@ -2318,6 +2318,13 @@ func (c *Config) SetCountDirect(on bool) {
 	c.Tuning.CountDirect = on
 }
 
+// SetQuicBlock 开关 QUIC（UDP 443）阻断（on = 拦下来）。
+func (c *Config) SetQuicBlock(on bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Tuning.QuicBlockDisabled = !on
+}
+
 // UpdateTuning 在锁下修改 Tuning（界面保存拨号调优用）。
 func (c *Config) UpdateTuning(fn func(*Tuning)) {
 	c.mu.Lock()
