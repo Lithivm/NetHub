@@ -27,7 +27,8 @@ Go + **Wails v2**（WebView2 界面）+ **WinDivert**（内核驱动），**仅 
 export PATH="/c/Program Files/Go/bin:$PATH"                 # git-bash
 go build -tags production -ldflags "-H=windowsgui -s -w" -o run/nethub.exe .
 go test ./internal/...
-pwsh -NoProfile -File ./local/check-ui.ps1                  # 改完前端必须跑
+pwsh -NoProfile -File ./local/check-ui.ps1                  # 改完前端必须跑（boot 不报错 + 没有未定义的函数）
+pwsh -NoProfile -File ./local/ui-controls-test.ps1          # 勾选/下拉真的调到了后端 + 卡片标题不被挤成两行
 pwsh -NoProfile -File ./local/restart.ps1                   # 优雅重启 + 复测内网目标
 ./run/nethub.exe -check | -status | -apply <新配置> | -quit   # 控制面：验 / 看 / 切 / 停（不需管理员）
 ```
