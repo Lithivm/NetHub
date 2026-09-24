@@ -73,6 +73,16 @@ system hosts 条目 —— `-status` 的 `runtime.restartNeeded` 会明说是哪
 脚本/agent 改配置建议用 `nethub.exe -apply 新配置.yaml`：它会校验、落盘，并等运行实例真的
 吃进去才返回（返回 0 = 已生效；3 = 写进去了但实例没应用，原因在日志里）。
 
+`-status` / `-check` 的输出是 **UTF-8**。PowerShell 里读它的 JSON 要先声明编码，否则管道会按
+控制台代码页解码、还可能把引号吃掉，`ConvertFrom-Json` 会报“JSON 解析失败”：
+
+```powershell
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$st = (nethub.exe -status | ConvertFrom-Json)
+$st.runtime            # 运行实例：pid / running / configMatchesFile / restartNeeded
+$st.tuning.quicBlock   # QUIC 阻断开着没有
+```
+
 `config.yaml` 是唯一配置来源，命令行与界面等价；配置文件就在 `nethub.exe` 同目录。
 
 ## 换一台机器：一个文件就够

@@ -25,6 +25,7 @@ import (
 
 	"nethub/internal/app"
 	"nethub/internal/config"
+	"nethub/internal/gostbat"
 	"nethub/internal/rules"
 	"nethub/internal/upstream"
 	"nethub/internal/webui"
@@ -205,9 +206,18 @@ func cmdStatus(cfgPath string) int {
 	for _, ch := range cfg.Chains {
 		d := chainDoc{Name: ch.Name, HasCred: false}
 		for _, raw := range ch.Upstreams() {
-			short := "（无法解析的上游）"
+			// 值必须**机器可读**（纯协议+主机:端口），不要拿 upstream.String() ——
+			// 它是给日志用的，会在尾部拼一个中文注记（带凭据），把 JSON 里的 URL
+			// 变成“不是 URL”；凭据这件事已经有 hasCred 布尔字段。
+			// 顺带：中文注记还会让“用非 UTF8 解码方式读 stdin”的消费方（PowerShell 的
+			// 管道默认按控制台代码页解码）解析失败 —— 而报错看起来像我们发的是坏 JSON。
+			short := gostbat.Redact(raw)
 			if u, perr := upstream.Parse(raw); perr == nil {
-				short = u.String()
+				proto := u.Protocol
+				if u.TLS {
+					proto += "+tls"
+				}
+				short = proto + "://" + u.Addr
 				if u.Creds.User != "" || u.Creds.Pass != "" {
 					d.HasCred = true
 				}

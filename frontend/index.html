@@ -99,7 +99,7 @@
       <div class="card-head">
         <h2>路由规则</h2>
         <button class="info-btn" id="btnHelpRule" title="域名与通配域名是怎么匹配上的">i</button>
-        <span class="hint">自上而下匹配，命中即停；一条规则可含多个目标。改动**即时保存并立即生效**（已在跑的连接不受影响；改中转端口、DNS 接管、hosts 才需要重启）</span>
+        <span class="hint">自上而下匹配，命中即停；一条规则可含多个目标。改动<b>即时保存并立即生效</b>（已在跑的连接不受影响；改中转端口、DNS 接管、hosts 才需要重启）</span>
         <div class="spacer"></div>
         <button class="btn btn-sm" id="btnRuleSort" title="前缀长的（/32 比 /24 具体）排前面，带端口条件的更靠前；本机自身 / 环回（127.0.0.0/8）类规则放最后——它是兜底，不跟内网网段抢位置；停用的规则原地不动">按优先级排序</button>
         <button class="btn btn-sm" id="btnRuleOverlap">检查重叠</button>
@@ -138,10 +138,10 @@
           <label class="check">
             <input type="checkbox" id="setCountDirect">
             <span>也统计直连流量的字节数<em>默认关：直连流量不进内核过滤器，一个包都不碰（零开销）——
-              代价是**连接列表里也看不到直连连接**（连 SYN 都看不到）。
+              代价是<b>连接列表里也看不到直连连接</b>（连 SYN 都看不到）。
               打开后直连网段会被拦下来数一次字节再原样放行（不改包），于是能回答
               “直连规则到底生效了吗、是谁在连、占了多少流量”。
-              只能数**出方向**（回来的包是入方向，不在过滤器里），要双向就得每包多两次内核交互。改完立即生效（不再重启服务、不断已有连接）。</em></span>
+              只能数<b>出方向</b>（回来的包是入方向，不在过滤器里），要双向就得每包多两次内核交互。改完立即生效（不再重启服务、不断已有连接）。</em></span>
           </label>
           <div class="hint" id="countDirectInfo">—</div>
         </div>
@@ -228,7 +228,7 @@
       <div class="card">
         <div class="card-head">
           <h2>配置体检</h2>
-          <span class="hint">只读报告：能不能干活、哪个目标被覆盖了、哪条链只填了单个上游；再逐条链**实测一次隧道**（上游认证 + 内网目标可达）</span>
+          <span class="hint">只读报告：能不能干活、哪个目标被覆盖了、哪条链只填了单个上游；再逐条链<b>实测一次隧道</b>（上游认证 + 内网目标可达）</span>
           <div class="spacer"></div>
           <button class="btn btn-sm" id="btnCopyPrecheck">复制结果</button>
           <button class="btn btn-sm btn-primary" id="btnPrecheck">重新体检</button>

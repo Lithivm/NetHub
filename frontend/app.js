@@ -870,7 +870,7 @@ async function chainForm(index, preset) {
   const credNote = el('div', 'hint');
   if (src.auth) {
     credNote.className = 'export-warn';
-    credNote.textContent = '⚠ 上面就是完整地址（含账号口令）。保存后也**明文**写在 config.yaml 里' +
+    credNote.textContent = '⚠ 上面就是完整地址（含账号口令）。保存后也以明文写在 config.yaml 里' +
       '（和 gost 的启动脚本一样），账号 ' + (src.credUser || '—') + '。';
   } else {
     credNote.textContent = '上游 URL 里带 user:pass@ 或 ?auth=base64(user:pass) 都可以；保存后明文写在 config.yaml 里，别外传。';
@@ -1346,7 +1346,7 @@ function updateClashBar(v) {
     noticeBar('error', '内网可能被其他代理接管（红线）',
       missed.length + ' 个目标不在系统代理的绕过列表里：' + missed.slice(0, 4).join('; ') +
         (missed.length > 4 ? ' 等' : '') +
-        '　—— 这几个不在系统代理的绕过列表里，按域名访问内网时**可能**先交给它（它用自己的 DNS 解析，内网域名有出内网的风险）· 实测环境：Clash Verge v2.5.2',
+        '　—— 这几个不在系统代理的绕过列表里，按域名访问内网时可能先交给它（它用自己的 DNS 解析，内网域名有出内网的风险）· 实测环境：Clash Verge v2.5.2',
       '复制要加的网段', async () => {
         const list = (v.bypassList || missed.join(';'));
         try {
@@ -1559,7 +1559,7 @@ const HELP = {
       '观察不到的情形：应用用了加密 DNS（DoH/DoT）、或自己实现了解析器 → 那时靠嗅探的通配规则不生效\n（接管开着的话仍然生效）。',
       '一个 IP 被多个域名共用时：命中任一匹配的名字即可（同一个 IP 属于通配覆盖范围就算命中）。',
       '想要“更稳”的写法：把关键内网域名同时写一条具体域名规则，不依赖观察。',
-      '另外：TCP 7680（Windows 更新传递优化）是**内置直连**的，不需要在规则里写 —— 它在客户内网里不该进隧道。',
+      '另外：TCP 7680（Windows 更新传递优化）是内置直连的，不需要在规则里写 —— 它在客户内网里不该进隧道。',
       '要关掉这个内置行为：config.yaml 的 tuning 下加 builtin_direct_disabled: true。',
     ],
   },
@@ -1789,7 +1789,7 @@ function wire() {
   document.getElementById('btnTakeover').onclick = async () => {
     if (!await confirmBox('由界面版接管引擎？',
         '会停掉正在运行的 Windows 服务版，然后把引擎交回界面版：\n' +
-        '· 服务注册**保留**（不卸载）—— 下次开机它仍会自己跑\n' +
+        '· 服务注册保留（不卸载）—— 下次开机它仍会自己跑\n' +
         '· 停机期间有几百毫秒空窗，TCP 会重传\n' +
         '\n如果你要的是“以后都别再让服务版自己跑”，请用「卸载服务」。', false, '接管')) return;
     try {
