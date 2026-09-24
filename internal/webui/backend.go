@@ -11,6 +11,7 @@ package webui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -33,6 +34,7 @@ import (
 	"nethub/internal/logbus"
 	"nethub/internal/upstream"
 	"nethub/internal/winrun"
+	"nethub/internal/winsvc"
 )
 
 // Backend 是绑定给前端的对象。
@@ -56,6 +58,16 @@ type Backend struct {
 	autoMu      sync.RWMutex
 	autoEnabled bool
 	autoDetail  string
+
+	// 只读态：引擎锁被别的进程（服务版/另一实例）拿着，本界面**不跑引擎**、
+	// 只展示状态，等用户点「接管」再抢回来。
+	//
+	// 为什么不用“起不来就报错”：两个引擎同时跑会各装一套 WinDivert 过滤器
+	// 各自改写到自己的 relay，是静默互相干扰（不是第二个报错退出）——
+	// 所以宁可降级成只读，也不能让用户随手就撞上去。
+	roMu     sync.RWMutex
+	readOnly bool
+	roWhy    string
 }
 
 func New(a *app.App) *Backend {
@@ -87,6 +99,14 @@ func (b *Backend) OnStartup(ctx context.Context) {
 		time.Sleep(600 * time.Millisecond)
 		b.a.Bus.Info("开始自动启动服务…")
 		if err := b.a.Start(); err != nil {
+			// 引擎锁被别的进程（服务版/另一实例）拿着：降级为只读，不弹错、不退出。
+			// 界面上会显示醒目状态 + 「接管」按钮，用户要抢回来只需点一下。
+			if errors.Is(err, app.ErrEngineBusy) {
+				why := describeEngineHolder()
+				b.setReadOnly(why)
+				b.a.Bus.Warn("%s —— 界面版以只读方式启动（不会碰流量）；要由界面接管请点顶栏「接管引擎」", why)
+				return
+			}
 			b.a.Bus.Error("自动启动失败（可在界面上手动重试）: %v", err)
 			return
 		}
@@ -154,6 +174,10 @@ type StateView struct {
 	HostsInFile bool   `json:"hostsInFile"` // hosts 里已存在我们的标记区块
 	Autostart   bool   `json:"autostart"`
 	AutoDetail  string `json:"autoDetail"`
+	// ReadOnly 引擎被别的进程拿着（服务版/另一实例），界面处于只读态；
+	// ReadOnlyWhy 是一句人话说明，直接显示给用户。
+	ReadOnly    bool   `json:"readOnly"`
+	ReadOnlyWhy string `json:"readOnlyWhy"`
 }
 
 type ChainView struct {
@@ -292,6 +316,7 @@ func (b *Backend) GetState() StateView {
 	running, errText := b.a.Status()
 	taken, _, warm := b.a.Engine.PoolStats()
 	_, hostsInFile, _, _ := hostsmgr.Read()
+	readOnly, why := b.readOnlyState()
 	return StateView{
 		Running:     running,
 		Error:       errText,
@@ -307,7 +332,116 @@ func (b *Backend) GetState() StateView {
 		HostsInFile: hostsInFile,
 		Autostart:   b.autostartCached(),
 		AutoDetail:  b.autostartDetailCached(),
+		ReadOnly:    readOnly,
+		ReadOnlyWhy: why,
 	}
+}
+
+// ───────── 引擎互斥：只读降级 / 接管 / 交棒 ─────────
+
+// setReadOnly / clearReadOnly：界面版的只读态（谁在跑、为什么）。
+func (b *Backend) setReadOnly(why string) {
+	b.roMu.Lock()
+	b.readOnly, b.roWhy = true, why
+	b.roMu.Unlock()
+}
+
+func (b *Backend) clearReadOnly() {
+	b.roMu.Lock()
+	b.readOnly, b.roWhy = false, ""
+	b.roMu.Unlock()
+}
+
+func (b *Backend) readOnlyState() (bool, string) {
+	b.roMu.RLock()
+	defer b.roMu.RUnlock()
+	return b.readOnly, b.roWhy
+}
+
+// describeEngineHolder 谁拿着引擎。能确定是服务版就说服务版，不确定就不猜。
+func describeEngineHolder() string {
+	if winsvc.State() == "running" {
+		return "Windows 服务版（headless）正在运行"
+	}
+	return "另一个 NetHub 实例正在运行（可能是 -headless 模式）"
+}
+
+// TakeoverEngine 界面版接管引擎：停掉正在跑的 Windows 服务，然后本进程把引擎拉起来。
+// 供只读态下的「接管」按钮调用。
+func (b *Backend) TakeoverEngine() (string, error) {
+	if b.a.Running() {
+		b.clearReadOnly()
+		return "引擎已经在界面版里运行", nil
+	}
+	stoppedService := false
+	if winsvc.State() == "running" {
+		b.a.Bus.Info("接管：先停止 Windows 服务版…")
+		if err := winsvc.Stop(); err != nil {
+			return "", fmt.Errorf("停止服务失败，没有接管: %w", err)
+		}
+		// 等服务真的停稳：它会放开引擎锁，锁没放开就抢不到
+		if err := winsvc.WaitStopped(10 * time.Second); err != nil {
+			return "", fmt.Errorf("服务没停稳，没有接管: %w", err)
+		}
+		stoppedService = true
+	}
+	if err := b.a.Start(); err != nil {
+		// 服务已停但锁仍被占 → 是别的实例拿着，说清楚别让人以为是服务的锅
+		if errors.Is(err, app.ErrEngineBusy) {
+			return "", fmt.Errorf("%s，接管没成功", describeEngineHolder())
+		}
+		return "", err
+	}
+	b.clearReadOnly()
+	if stoppedService {
+		b.a.Bus.Info("接管完成：服务版已停止，引擎现由界面版运行（服务注册还留着，下次开机仍会自己跑）")
+		return "已接管：服务版已停止（注册保留，下次开机仍会自启）", nil
+	}
+	return "已接管引擎", nil
+}
+
+// StartServiceHandOver 交棒给服务版：先停本机引擎（释放锁）→ 起服务 →
+// 等服务真的 Running 才返回。调用方拿到 nil 错误后再让界面优雅退出。
+//
+// 顺序必须是“先停自己再起服务”：反过来的话服务抢不到锁，起来也白起。
+// 代价是几百毫秒的真空期，TCP 会重传，比两个引擎同时抢流量安全得多。
+func (b *Backend) StartServiceHandOver() (string, error) {
+	wasRunning := b.a.Running()
+	if wasRunning {
+		b.a.Bus.Info("交棒：先停止界面版引擎，把互斥让给服务版…")
+		b.a.Stop()
+	}
+	if err := winsvc.Start(); err != nil {
+		b.rollbackEngine(wasRunning)
+		return "", fmt.Errorf("启动服务失败: %w", err)
+	}
+	if err := winsvc.WaitRunning(15 * time.Second); err != nil {
+		_ = winsvc.Stop()
+		b.rollbackEngine(wasRunning)
+		return "", fmt.Errorf("服务没起来: %w", err)
+	}
+	b.a.Bus.Info("交棒完成：服务版已接管（引擎锁现在服务进程里）")
+	// 界面自己退出。留 1.5 秒让前端把 toast 画出来（立即退会看起来像崩了）；
+	// 走 Quit 而不是 os.Exit —— 它会搞掉托盘图标，避免留下“僵尸图标”。
+	go func() {
+		time.Sleep(1500 * time.Millisecond)
+		b.Quit()
+	}()
+	return "服务版已接管；界面即将退出（托盘图标会一并移除）", nil
+}
+
+// rollbackEngine 交棒失败时把界面版引擎恢复回去 —— 否则会变成
+// “原来的停了、新的没起来”，隧道全断还看不到界面。
+func (b *Backend) rollbackEngine(wasRunning bool) {
+	if !wasRunning {
+		return
+	}
+	b.a.Bus.Warn("交棒失败，正在把界面版引擎恢复回去…")
+	if err := b.a.Start(); err != nil {
+		b.a.Bus.Error("回滚也失败了，现在没有引擎在跑: %v", err)
+		return
+	}
+	b.a.Bus.Info("已回滚：界面版引擎仍在运行")
 }
 
 // refreshAutostart 跑一次 schtasks 并把结果缓存起来（只在启动、切换自启时调）。

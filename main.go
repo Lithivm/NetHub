@@ -18,6 +18,7 @@ package main
 import (
 	"context"
 	"embed"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -59,6 +60,7 @@ func main() {
 	svcInstall := flag.Bool("service-install", false, "安装为 Windows 服务（自动启动，需管理员），随后退出")
 	svcUninstall := flag.Bool("service-uninstall", false, "卸载 Windows 服务，随后退出")
 	svcState := flag.Bool("service-state", false, "打印 Windows 服务状态，随后退出")
+	svcStop := flag.Bool("service-stop", false, "停止 Windows 服务（不卸载），随后退出")
 	doQuit := flag.Bool("quit", false, "请已在运行的界面版优雅退出（会先停服务、移除托盘图标），随后退出")
 	verFlag := flag.Bool("version", false, "打印版本号，随后退出")
 	rollbackFlag := flag.Bool("rollback", false, "回滚到上一版本并重启（一键更新出问题时用），随后退出")
@@ -116,10 +118,20 @@ func main() {
 		return
 	}
 
-	// 服务安装/卸载/查状态：不需要配置，也不需要界面
-	if *svcInstall || *svcUninstall || *svcState {
+	// 服务安装/卸载/启停/查状态：不需要配置，也不需要界面
+	if *svcInstall || *svcUninstall || *svcState || *svcStop {
 		if *svcState {
 			fmt.Println("NetHub 服务状态：" + winsvc.State())
+			return
+		}
+		if *svcStop {
+			if err := winsvc.Stop(); err != nil {
+				fatal("%v", err)
+			}
+			if err := winsvc.WaitStopped(15 * time.Second); err != nil {
+				fatal("%v", err)
+			}
+			fmt.Println("已停止 Windows 服务 " + winsvc.Name)
 			return
 		}
 		exe, err := os.Executable()
@@ -254,7 +266,7 @@ func main() {
 	// 服务模式（SCM 拉起或手动 -service）：没有窗口、没有托盘，只跑引擎
 	if *serviceMode || winsvc.IsService() {
 		err := winsvc.Run(func(ctx context.Context) error {
-			if err := a.Start(); err != nil {
+			if err := startEngineWithTakeover(a, bus); err != nil {
 				bus.Error("服务模式启动失败: %v", err)
 				return err
 			}
@@ -342,7 +354,7 @@ func runGUI(a *app.App, bus *logbus.Bus, cfgPath string) {
 
 // runHeadless 无界面运行，Ctrl+C / 杀进程时清理子进程。
 func runHeadless(a *app.App, bus *logbus.Bus) {
-	if err := a.Start(); err != nil {
+	if err := startEngineWithTakeover(a, bus); err != nil {
 		bus.Error("启动失败: %v", err)
 		os.Exit(1)
 	}
@@ -352,6 +364,40 @@ func runHeadless(a *app.App, bus *logbus.Bus) {
 	bus.Info("收到退出信号")
 	a.Stop()
 	bus.Close()
+}
+
+// startEngineWithTakeover 起引擎；若引擎锁被界面版拿着，先请它**优雅退出**再重试。
+//
+// 为什么是“请”而不是“杀”：界面版/服务版/另一份 headless 用的是**同一个 exe**，
+// 跨会话强杀得枚举进程再比命令行才能区分，认错就是杀掉正在干活的引擎；
+// 强杀还会留下项目里记过的僵尸托盘图标、可能写坏 config.yaml。而优雅通道
+// （Global\ 命名事件，服务在 session 0 也够得着）拿不到就明确报错，不静默做错事。
+//
+// 失败时返回原始错误 → 服务由 SCM 记一次启动失败，headless 非零退出，都看得见。
+func startEngineWithTakeover(a *app.App, bus *logbus.Bus) error {
+	err := a.Start()
+	if !errors.Is(err, app.ErrEngineBusy) {
+		return err
+	}
+	bus.Warn("引擎已被另一个进程占用（多半是界面版）—— 请它优雅退出，最多等 5 秒")
+	if !webui.RequestQuitCrossSession() {
+		bus.Warn("没找到在跑的界面版实例（可能刚退出），直接重试抢锁")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		time.Sleep(500 * time.Millisecond)
+		err = a.Start()
+		if err == nil {
+			bus.Info("界面版已让位，引擎现由本进程接管")
+			return nil
+		}
+		if !errors.Is(err, app.ErrEngineBusy) {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("等了 5 秒界面版仍占用引擎，无法接管: %w", err)
+		}
+	}
 }
 
 // ───────────────────────── 提权 ─────────────────────────

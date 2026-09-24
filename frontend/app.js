@@ -526,17 +526,33 @@ async function refreshState() {
 
   const on = !!s.running;
   const bad = !on && !!(s.error);
+  // 只读态：引擎锁被别的进程（服务版/另一实例）拿着 —— 本界面不跑引擎，只展示。
+  // 两种引擎同时跑会各自改写到自己的 relay（静默互扰），所以宁可只读也不降级启动。
+  const ro = !!s.readOnly;
   const rs = document.getElementById('runState');
   rs.classList.toggle('is-on', on);
-  rs.classList.toggle('is-bad', bad);
-  // 三态：Ready（绿，呼吸）/ Error（红，呼吸）/ 已停止（灰，静止）
-  document.getElementById('runStateText').textContent = on ? 'Ready' : (bad ? 'Error' : '已停止');
+  rs.classList.toggle('is-bad', bad && !ro);   // 只读不是故障：别同时挂 is-bad（琥珀会被红色盖掉）
+  rs.classList.toggle('is-busy', ro);          // 琥珀色、不呼吸
+  // 四态：Ready（绿，呼吸）/ Error（红，呼吸）/ 只读（琥珀，静止）/ 已停止（灰，静止）
+  document.getElementById('runStateText').textContent =
+    ro ? '只读' : (on ? 'Ready' : (bad ? 'Error' : '已停止'));
   // 出错原因平时不占位置，悬停能看；内部中转端口同样只在悬停里出现
-  rs.title = bad
-    ? s.error
-    : ('内部中转端口 ' + (s.relay || '—') + '（实现细节，无需配置）');
-  document.getElementById('btnToggle').textContent = on ? '停止服务' : '启动服务';
-  document.getElementById('btnToggle').className = on ? 'btn' : 'btn btn-primary';
+  rs.title = ro
+    ? (s.readOnlyWhy || '服务版正在运行') + ' —— 点「接管引擎」可切回界面版'
+    : (bad ? s.error : ('内部中转端口 ' + (s.relay || '—') + '（实现细节，无需配置）'));
+  // 只读态下别让用户去点会失败的东西：藏掉启动/停止、置灰重启，只留「接管引擎」
+  document.getElementById('btnTakeover').style.display = ro ? '' : 'none';
+  const tog = document.getElementById('btnToggle');
+  tog.style.display = ro ? 'none' : '';
+  tog.textContent = on ? '停止' : '启动';
+  tog.className = on ? 'btn' : 'btn btn-primary';
+  document.getElementById('btnRestart').disabled = ro;
+  if (ro && !state.roNotified) {
+    state.roNotified = true;
+    toast('服务版正在运行', '界面以只读方式启动（不碰流量）；要由界面接管，点顶栏「接管引擎」', 'warn');
+  } else if (!ro) {
+    state.roNotified = false;
+  }
 
   document.getElementById('stTotal').textContent = s.totalConns;
   document.getElementById('stActive').textContent = s.activeConns;
@@ -1760,9 +1776,29 @@ function wire() {
     } catch (e) { fail(e); }
     await loadService();
   };
+  document.getElementById('btnTakeover').onclick = async () => {
+    if (!await confirmBox('由界面版接管引擎？',
+        '会停掉正在运行的 Windows 服务版，然后把引擎交回界面版：\n' +
+        '· 服务注册**保留**（不卸载）—— 下次开机它仍会自己跑\n' +
+        '· 停机期间有几百毫秒空窗，TCP 会重传\n' +
+        '\n如果你要的是“以后都别再让服务版自己跑”，请用「卸载服务」。', false, '接管')) return;
+    try {
+      const msg = await call('TakeoverEngine');
+      toast('已接管引擎', msg || '', 'success');
+    } catch (e) { fail(e); }
+    await loadService();
+  };
   document.getElementById('btnSvcStart').onclick = async () => {
-    try { await call('StartService'); toast('服务已启动', '无界面运行中（日志在程序目录）', 'success'); }
-    catch (e) { fail(e); }
+    if (!await confirmBox('交棒给服务版？',
+        '把引擎交给 Windows 服务版（无人登录也能跑）：\n' +
+        '· 先停界面版引擎（几百毫秒空窗，TCP 会重传）\n' +
+        '· 再启动服务；服务真的跑起来后，界面版会自己退出（托盘图标一并移除）\n' +
+        '· 之后再开界面，它会以只读方式启动 —— 点顶栏「接管引擎」可随时抢回来\n' +
+        '\n服务没起来的话，界面版会自动把引擎恢复回去。', false, '交棒')) return;
+    try {
+      const msg = await call('StartServiceHandOver');
+      toast('已交棒给服务版', msg || '', 'success');
+    } catch (e) { fail(e); }
     await loadService();
   };
   document.getElementById('btnSvcStop').onclick = async () => {

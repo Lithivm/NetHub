@@ -3,9 +3,10 @@
 package hostsmgr
 
 import (
-	"os/exec"
 	"sync"
 	"syscall"
+
+	"nethub/internal/winrun"
 )
 
 var (
@@ -27,7 +28,9 @@ func flushDNS() error {
 			return nil // 返回 0 但没报错：也算刷过了（该接口不保证返回值）
 		}
 	}
-	// 退路：老办法起一个 ipconfig（慢一点，但一定能刷）
-	_, err := exec.Command("ipconfig", "/flushdns").CombinedOutput()
+	// 退路：老办法起一个 ipconfig。**必须走 winrun**：本程序是 GUI 子系统、自己没有
+	// 控制台，裸 exec 一个控制台程序会弹出一个黑框（同包内 winrun 的注释里写了这个坑，
+	// 这里曾经是唯一漏网的一处）。
+	_, err := winrun.Command("ipconfig", "/flushdns").CombinedOutput()
 	return err
 }

@@ -30,7 +30,9 @@
     <span class="kv">活跃 <b id="stActive">0</b></span>
   </div>
   <div class="actions">
-    <button class="btn btn-primary" id="btnToggle">启动服务</button>
+    <!-- 只读态（服务版在跑）时显示：点一下就把引擎从服务版手里抢回界面 -->
+    <button class="btn" id="btnTakeover" style="display:none" title="停掉正在运行的 Windows 服务版，把引擎交回界面版（服务注册保留）">接管引擎</button>
+    <button class="btn btn-primary" id="btnToggle">启动</button>
     <button class="btn" id="btnRestart">重启</button>
     <button class="btn tab-top btn-icon" id="btnSettings" data-page="settings" title="设置" aria-label="设置">
       <!-- 扁平齿轮：顶栏里文字“设置”换成图标（与旁边的按钮同高，宽度固定不跳动） -->

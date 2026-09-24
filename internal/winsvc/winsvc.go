@@ -3,7 +3,11 @@
 //
 // 实现用 golang.org/x/sys/windows/svc（x/sys 本来就在依赖里，不引新库）。
 // 服务模式跑的是**无界面**引擎 —— 界面照旧可以由普通用户双击 exe 打开，
-// 两者共用同一份 config.yaml；同一时间只应该跑一个（SingleInstanceLock 会挡）。
+// 两者共用同一份 config.yaml。
+//
+// 同一时间只能有一个引擎在跑：靠 `internal/app` 的命名互斥（Global\NetHubEngineLock）
+// 仲裁 —— 界面版抢不到就降级为只读，服务版抢不到会先请界面版优雅退出。
+// （不要指望 Wails 的 SingleInstanceLock：它只管界面版之间，服务进程根本不走 Wails。）
 package winsvc
 
 import (
@@ -11,6 +15,7 @@ import (
 	"fmt"
 	"time"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
@@ -106,9 +111,18 @@ func Install(exePath, configPath string) error {
 
 	if s, err := m.OpenService(Name); err == nil {
 		defer s.Close()
+		// 这里的 ServiceType / ErrorControl **必须显式给**：UpdateConfig 不像
+		// CreateService 那样把 0 补成默认值，而是原样传给 ChangeServiceConfig，
+		// 而 0 不是 SERVICE_NO_CHANGE(0xFFFFFFFF) → 直接 ERROR_INVALID_PARAMETER。
+		// 实测报 "The parameter is incorrect"，后果是“更新已装的服务”永远失败、
+		// 服务里注册的还是旧路径/旧参数（GUI 与 -service-install 都走这里）。
+		// ErrorControl=0 则是 SERVICE_ERROR_IGNORE，会把服务的错误处理静默降级。
 		if err := s.UpdateConfig(mgr.Config{
 			DisplayName: DisplayName, Description: Description,
-			StartType: mgr.StartAutomatic, BinaryPathName: quote(exePath) + " " + joinArgs(args),
+			ServiceType:    windows.SERVICE_WIN32_OWN_PROCESS,
+			StartType:      mgr.StartAutomatic,
+			ErrorControl:   mgr.ErrorNormal,
+			BinaryPathName: quote(exePath) + " " + joinArgs(args),
 		}); err != nil {
 			return fmt.Errorf("更新已有服务失败: %w", err)
 		}
@@ -116,9 +130,11 @@ func Install(exePath, configPath string) error {
 	}
 
 	s, err := m.CreateService(Name, exePath, mgr.Config{
-		DisplayName: DisplayName,
-		Description: Description,
-		StartType:   mgr.StartAutomatic,
+		DisplayName:  DisplayName,
+		Description:  Description,
+		ServiceType:  windows.SERVICE_WIN32_OWN_PROCESS,
+		StartType:    mgr.StartAutomatic,
+		ErrorControl: mgr.ErrorNormal, // 同样不能留 0（= SERVICE_ERROR_IGNORE）
 	}, args...)
 	if err != nil {
 		return fmt.Errorf("创建服务失败: %w", err)
@@ -197,6 +213,31 @@ func Start() error {
 	}
 	defer s.Close()
 	return s.Start()
+}
+
+// WaitRunning / WaitStopped 等服务到达目标状态（最多等 d）。
+//
+// 为什么要等：SCM 的“启动”只是把请求交给服务进程，进程里还得装配 WinDivert
+// 过滤器 —— 不等就以为它好了，会造成“旧的引擎已停、新的还没起来”的空窗。
+func WaitRunning(d time.Duration) error { return waitFor("running", d) }
+
+// WaitStopped 等服务停稳（里面会放开引擎互斥）。
+func WaitStopped(d time.Duration) error { return waitFor("stopped", d) }
+
+func waitFor(want string, d time.Duration) error {
+	deadline := time.Now().Add(d)
+	last := State()
+	for time.Now().Before(deadline) {
+		if last == want {
+			return nil
+		}
+		time.Sleep(200 * time.Millisecond)
+		last = State()
+	}
+	if last == want {
+		return nil
+	}
+	return fmt.Errorf("%s 秒内服务没变成 %s（当前 %s）", d, want, last)
 }
 
 func Stop() error {

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"sync"
 	"syscall"
 	"unsafe"
 
@@ -375,38 +376,73 @@ func QuitRunningInstance() bool {
 // Windows 的 UIPI 拦掉（实测 "Access is denied"）。而命名事件是内核对象，不受 UIPI 限制，
 // 同一用户的两个进程（一个提权一个不提权）可以互相通知。
 //
-// 用途：重启脚本先 `nethub.exe -quit` 让旧实例走正常退出路径（停服务 → NIM_DELETE 摘掉
-// 托盘图标），而不是直接 Kill —— 强杀会留下"僵尸图标"，鼠标扫过才消失。
-const quitEventName = `Local\NetHubQuitRequest`
+// 两个名字都监听，因为两种调用方够得着的通道不一样：
+//
+//	Local\  —— 同会话（-quit / 重启脚本）。**不能去掉**：Global\ 对象要求
+//	          SeCreateGlobalPrivilege，不提权的 shell 建不出来也开不了，
+//	          而 local/restart.ps1 就是这么调的。
+//	Global\ —— 跨会话：服务版跑在 session 0，界面版在用户会话，只有 Global 够得着。
+const (
+	quitEventLocal  = `Local\NetHubQuitRequest`
+	quitEventGlobal = `Global\NetHubQuitRequest`
+)
 
-// WatchQuitSignal 起一个等待线程：收到退出请求就调 onQuit（返回 stop 用于收尾）。
+// WatchQuitSignal 起等待线程：收到退出请求就调 onQuit（返回 stop 用于收尾）。
 // 只在界面版调用；服务/无界面模式没有托盘，不该被这条通道关掉。
 func WatchQuitSignal(onQuit func()) (stop func()) {
-	name, err := windows.UTF16PtrFromString(quitEventName)
-	if err != nil {
-		return func() {}
-	}
-	h, err := windows.CreateEvent(nil, 0 /* 自动 reset */, 0, name)
-	if err != nil {
-		return func() {}
-	}
-	go func() {
-		// 等一次就够：这个事件只用于"请退出"
-		windows.WaitForSingleObject(h, windows.INFINITE)
+	// 两条通道可能同时到（服务版会把两个都发一遍），只允许退一次
+	var once sync.Once
+	fire := func() {
 		if onQuit != nil {
-			onQuit()
+			once.Do(onQuit)
 		}
-	}()
-	return func() { windows.CloseHandle(h) }
+	}
+	var handles []windows.Handle
+	for _, name := range []string{quitEventLocal, quitEventGlobal} {
+		p, err := windows.UTF16PtrFromString(name)
+		if err != nil {
+			continue
+		}
+		h, err := windows.CreateEvent(nil, 0 /* 自动 reset */, 0, p)
+		if err != nil || h == 0 {
+			// 建不出来（典型：不提权时 Global\ 被拒）就当没这条通道，不影响其它功能
+			continue
+		}
+		handles = append(handles, h)
+		go func(h windows.Handle) {
+			// 等一次就够：这个事件只用于"请退出"
+			_, _ = windows.WaitForSingleObject(h, windows.INFINITE)
+			fire()
+		}(h)
+	}
+	return func() {
+		for _, h := range handles {
+			_ = windows.CloseHandle(h)
+		}
+	}
 }
 
-// RequestQuit 请求正在运行的界面版优雅退出；返回是否真的找到了运行中的实例。
+// RequestQuit 请求正在运行的界面版优雅退出（-quit 用）；返回是否真的找到了运行中的实例。
 func RequestQuit() bool {
-	name, err := windows.UTF16PtrFromString(quitEventName)
+	return signalQuit(quitEventLocal)
+}
+
+// RequestQuitCrossSession 服务/headless 用：请用户会话里的界面版让位。
+//
+// 为什么不能只用 Local\：服务在 session 0，界面版在用户会话，Local\ 名字空间
+// 根本看不到；窗口消息又跨不了会话（还被 UIPI 拦）。两条都发一遍，各自尽力。
+func RequestQuitCrossSession() bool {
+	global := signalQuit(quitEventGlobal)
+	local := signalQuit(quitEventLocal) // 若服务恰好与界面版同会话（手动 -headless）
+	return global || local
+}
+
+func signalQuit(name string) bool {
+	p, err := windows.UTF16PtrFromString(name)
 	if err != nil {
 		return false
 	}
-	h, err := windows.OpenEvent(windows.EVENT_MODIFY_STATE, false, name)
+	h, err := windows.OpenEvent(windows.EVENT_MODIFY_STATE, false, p)
 	if err != nil {
 		return false // 没人在跑（事件不存在）
 	}

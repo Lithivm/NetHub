@@ -2,6 +2,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -36,6 +37,7 @@ type App struct {
 	running   bool
 	lastErr   string        // 最近一次失败的原因（启动失败 / 拦截中断）；成功启动后清空
 	hostsStop chan struct{} // 停 hosts 定期自检
+	lock      *engineLock   // 引擎互斥（非 nil = 本进程在跑引擎）
 
 	// opMu 串行化 Start/Stop/Restart（托盘、界面、-quit 都会分别调）。
 	// 不加锁时，“停止”与“启动”会同时动 Engine 与 hosts 自检，结果是半死状态。
@@ -170,6 +172,40 @@ func (a *App) Start() error {
 }
 
 func (a *App) startLocked() error {
+	// 先抢引擎锁：服务版/另一个实例正在跑时，不要再装第二套过滤器去抢同一批包。
+	// 抢不到就把话说清楚并回 ErrEngineBusy —— 界面版据此降级为只读，不是报错退出。
+	lock, degraded, err := acquireEngineLock()
+	if err != nil {
+		// 引擎被别的进程（服务版/另一实例）拿着**不是故障**：界面版据此降级为只读，
+		// 服务侧会先请对方退出再重试。所以用 WARN 而不是 ERROR，也不写 LastError ——
+		// 否则界面上会冒出一个红色的 Error 状态，而其实一切正常（实测日志里就是这条先出现）。
+		a.Bus.Warn("启动被拒：%v", err)
+		if !errors.Is(err, ErrEngineBusy) {
+			a.setLastError(err.Error())
+		}
+		return err
+	}
+	if degraded != "" {
+		a.Bus.Warn("引擎互斥不可用（%s）—— 多个实例可能同时接管流量，请勿同时运行界面版与服务版", degraded)
+	}
+	a.mu.Lock()
+	a.lock = lock
+	a.mu.Unlock()
+
+	if err := a.startLockedInner(); err != nil {
+		// 启动没成功就把锁放开 —— 否则会变成"占着锁却没有引擎"，
+		// 服务版也跟着起不来，等于两边都用不了。
+		a.mu.Lock()
+		a.lock = nil
+		a.mu.Unlock()
+		lock.release()
+		return err
+	}
+	return nil
+}
+
+// startLockedInner 真正装配并启动引擎（调用方必须已持有引擎锁）。
+func (a *App) startLockedInner() error {
 	a.setLastError("") // 重新启动就清掉上次的错
 	a.mu.Lock()
 	if a.running {
@@ -247,15 +283,21 @@ func (a *App) stopLocked() {
 	a.running = false
 	stop := a.hostsStop
 	a.hostsStop = nil
+	lock := a.lock
+	a.lock = nil
 	a.mu.Unlock()
 	if stop != nil {
 		close(stop)
 	}
 	if !was {
+		// 没在跑也要把锁放掉（防御性：抢到锁之后到 running=true 之间失败时）
+		lock.release()
 		return
 	}
 	a.Bus.Info("正在停止…")
 	a.Engine.Stop()
+	// 引擎真的停完了才放锁：否则另一个进程可能在我们过滤器还在时就看到"空闲"
+	lock.release()
 	a.Bus.Info("✓ 已停止")
 	a.notify("NetHub 已停止", "拦截与隧道均已关闭", NotifyWarn)
 }
