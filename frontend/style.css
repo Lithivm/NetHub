@@ -896,12 +896,12 @@ html.theme-anim,
 html.theme-anim *,
 html.theme-anim *::before,
 html.theme-anim *::after {
-  transition: background-color 280ms var(--ease-soft),
-              color 280ms var(--ease-soft),
-              border-color 280ms var(--ease-soft),
-              box-shadow 280ms var(--ease-soft),
-              fill 280ms var(--ease-soft),
-              stroke 280ms var(--ease-soft) !important;
+  transition: background-color 560ms var(--ease-soft),
+              color 560ms var(--ease-soft),
+              border-color 560ms var(--ease-soft),
+              box-shadow 560ms var(--ease-soft),
+              fill 560ms var(--ease-soft),
+              stroke 560ms var(--ease-soft) !important;
 }
 html.theme-anim .seg2-thumb { transition: transform 220ms var(--ease-soft) !important; }
 @media (prefers-reduced-motion: reduce) {

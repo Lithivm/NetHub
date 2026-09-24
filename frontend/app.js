@@ -110,8 +110,8 @@ async function setTheme(mode) {
 
 // 切主题时让**整页颜色**淡过去，而不是所有颜色硬切一下。
 //
-// 做法：切换前给 <html> 挂 .theme-anim（CSS 里那份 280ms 色彩过渡），切完 400ms 摘掉。
-// 用临时类而不是常驻：常驻的话日常 hover/选中也会被拖到 280ms，反而发胝。
+// 做法：切换前给 <html> 挂 .theme-anim（CSS 里那份 560ms 色彩过渡），切完摘掉。
+// 用临时类而不是常驻：常驻的话日常 hover/选中也会被拖到 560ms，反而发黏。
 // 只动颜色、不动 transform —— 标签指示块与主题滑块自己的动画得以保留。
 let themeAnimTimer = 0;
 function applyThemeSoft(mode) {
@@ -122,7 +122,8 @@ function applyThemeSoft(mode) {
   void root.offsetWidth;   // 让 .theme-anim 先落地：同一个任务里加类又改色，有实现不会补过渡
   applyTheme(mode);
   clearTimeout(themeAnimTimer);
-  themeAnimTimer = setTimeout(() => root.classList.remove('theme-anim'), 400);
+  // 800ms > CSS 里的 560ms：过渡走完再摘类，否则最后一段会硬跳
+  themeAnimTimer = setTimeout(() => root.classList.remove('theme-anim'), 800);
 }
 
 /* ═══════════════ 标签页 ═══════════════ */
