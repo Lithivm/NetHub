@@ -2,6 +2,7 @@ package engine
 
 import (
 	"net"
+	"sort"
 	"strconv"
 	"time"
 
@@ -159,3 +160,31 @@ func (e *Engine) pruneQUICNotices() {
 
 // QUICBlocked 累计拦了多少个 QUIC 包（界面/排查用）。
 func (e *Engine) QUICBlocked() uint64 { return e.quicBlocked.Load() }
+
+// QUICStats 累计拦下的包数 + **最近**被拦的目标（最多 5 个，新的在前）。
+//
+// 为什么要“最近”：光看包数回答不了现场那句“到底拦了什么、是不是我的业务”。
+// 数据来自日志去重表（每个目标头一次被拦就记下时间，10 分钟没再见到就清掉）——
+// 所以它说的是“这段时间谁在被拦”，不是“历史上出现过的所有目标”。
+func (e *Engine) QUICStats() (uint64, []string) {
+	type hit struct {
+		target string
+		at     time.Time
+	}
+	e.mu.Lock()
+	hits := make([]hit, 0, len(e.quicNotices))
+	for k, t := range e.quicNotices {
+		hits = append(hits, hit{k, t})
+	}
+	e.mu.Unlock()
+	sort.Slice(hits, func(i, j int) bool { return hits[i].at.After(hits[j].at) })
+	const max = 5
+	if len(hits) > max {
+		hits = hits[:max]
+	}
+	out := make([]string, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, h.target)
+	}
+	return e.quicBlocked.Load(), out
+}

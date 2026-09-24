@@ -238,10 +238,25 @@
         </div>
       </div>
 
+      <div class="card">
+        <div class="card-head">
+          <h2>UDP（QUIC）能力探测</h2>
+          <span class="hint">本版本不转发 UDP —— QUIC 只拦不转；这一项只<b>探一探</b>上游有没有这个能力，答“为什么我们没有 UDP”</span>
+          <div class="spacer"></div>
+          <button class="btn btn-sm" id="btnUdpCopy">复制结果</button>
+          <button class="btn btn-sm btn-primary" id="btnUdpProbe">开始探测</button>
+        </div>
+        <div class="card-body form">
+          <pre class="explain-out" id="udpProbeOut">点「开始探测」：逐条链问一次上游能不能中继 UDP（只发一次公网 DNS 查询，不碰客户内网）。
+
+结论怎么读：
+  ✓ 可用 = 上游真能中继 UDP（这时才有讨论“要不要上 UDP”的前提）
+  ✗ 往返没回包 = 上游接受了请求但数据面不通（大概率它那边没放行 UDP 端口）</pre>
+        </div>
+      </div>
+
     </div>
   </section>
-
-  <section class="page" id="page-settings">
     <div class="settings-scroll">
 
       <div class="card">

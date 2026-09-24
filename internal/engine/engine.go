@@ -1253,16 +1253,15 @@ func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}, kind loopKind)
 
 		// 我们自己的解析（realResolver 从 53901-53910 发）不能被自己答成假 IP ——
 		// 那就是自己骗自己。用源端口在代码里排掉（过滤器保持最简）。
-		if info, _, ok := udpPayload(pkt); ok && info.sport >= dnsProbePortLo && info.sport <= dnsProbePortHi {
+		// 只取源端口、不取地址与载荷 —— 每个包都跑这段，udpPayload 会白白分配两块 slice。
+		if sport, ok := udpSrcPort(pkt); ok && sport >= dnsProbePortLo && sport <= dnsProbePortHi {
 			continue
 		}
 
 		src, dst, ihl, proto, ok := parseIPv4(pkt)
 		// QUIC（UDP 443）：这条包能到我们手上，说明它的目标落在“该走隧道”的网段里
 		// （过滤器只装了那些范围的 UDP 443，直连目标的 QUIC 根本不经过我们）。
-		// UDP 走不了隧道 —— 以前是静默直连漏出，现在回 ICMP 端口不可达让应用立刻回落 TCP。
-		if ok && proto != 6 {
-		}
+		// UDP 走不了隧道 —— 以前是静默直连漏出，现在丢掉并记一行（回 ICMP 是尽力而为）。
 		if ok && proto == 17 {
 			e.blockQUIC(h, pkt, addr, src, dst, ihl)
 			continue
@@ -2013,6 +2012,20 @@ func (e *Engine) sweepFakeIP() {
 }
 
 // udpPayload 从 IP 包里取出 UDP 负载，并返回地址/端口（DNS 接管要互换它们）。
+// udpSrcPort 只取 UDP 源端口（不做分配、不取地址/载荷）。
+//
+// 为什么单独一个：包循环里拿它排掉“我们自己解析器发的查询”，**每个包都要跑**。
+// 用 udpPayload 会把两个地址各 copy 一块新 slice（实测每包两次小分配 → GC 压力），
+// 而我们只想要那个端口号。
+func udpSrcPort(pkt []byte) (uint16, bool) {
+	_, _, ihl, proto, ok := parseIPv4(pkt)
+	if !ok || proto != 17 || len(pkt) < ihl+4 {
+		return 0, false
+	}
+	return be16(pkt, ihl), true
+}
+
+// udpPayload 一个 UDP 包的地址、端口与载荷。
 func udpPayload(pkt []byte) (udpInfo, []byte, bool) {
 	var u udpInfo
 	_, _, ihl, proto, ok := parseIPv4(pkt)

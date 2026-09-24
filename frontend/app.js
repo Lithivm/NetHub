@@ -967,6 +967,19 @@ function field(label, node, hint) {
   return f;
 }
 
+/* 勾选行（弹窗里用）：返回 { node, input }，调用方拿 input.checked 取值。
+   id 传了就挂上 —— 界面自检要靠它找到这个勾。 */
+function checkField(checked, text, id) {
+  const l = el('label', 'check');
+  const cb = el('input');
+  cb.type = 'checkbox';
+  cb.checked = !!checked;
+  if (id) cb.id = id;
+  l.appendChild(cb);
+  l.appendChild(el('span', null, text));
+  return { node: l, input: cb };
+}
+
 /* 拖拽排序：把第 from 条移到第 to 条（绝对值，拖拽落点算出）。 */
 async function moveChainTo(from, to) {
   try { await call('MoveChain', from, to); } catch (e) { fail(e); }
@@ -1050,7 +1063,14 @@ async function loadRoutes() {
     row.appendChild(nameCell);
 
     row.appendChild(targetsCell(r.targets || [], r.ports || [], r.shadowed || [], r.localNets || [], r.inactive, r.apps || [], r.hostResolves || [], r.wildcards || []));
-    row.appendChild(el('div', 'cell' + (r.direct || r.block ? ' dim' : ''), actionLabel(r)));
+    const actCell = el('div', 'cell' + (r.direct || r.block ? ' dim' : ''));
+    actCell.appendChild(el('span', null, actionLabel(r)));
+    if (r.allowQuic) {
+      const q = el('span', 'sub', '  不拦 QUIC');
+      q.title = '这条规则的目标放行 QUIC：UDP 443 直连出去，不进过滤器（TCP 仍按本规则走）';
+      actCell.appendChild(q);
+    }
+    row.appendChild(actCell);
 
     const acts = el('div', 'cell actions');
     acts.appendChild(btn('编辑', 'btn btn-xs', () => ruleForm(r.index)));
@@ -1222,6 +1242,9 @@ function ruleForm(index) {
     } catch (e) { fail(e); }
   }));
 
+  // 档 2：这条规则的目标放行 QUIC（UDP 443 直连）。默认跟着全局阻断走。
+  const quic = checkField(src.allowQuic, '这条规则的目标不拦 QUIC（UDP 443 直接出去）', 'ruleAllowQuic');
+
   // A16：可选“仅在这些本机网段下生效”
   const localNets = textarea((src.localNets || []).join('\n'),
     '留空 = 总是生效。填了就要求“本机也有个地址在这些网段里”才生效，\n示例：10.0.0.0/8（在公司才走隧道，回家自动直连）', 3);
@@ -1252,6 +1275,10 @@ function ruleForm(index) {
     field('生效条件（可选）', lnBox,
       '只在这台机器处于某个网络时才生效 —— 笔记本在公司走隧道、回家自动直连。' +
       '当前不满足条件的规则会在列表里标灰，不会模棱两可地“好像没生效”'),
+    field('QUIC（可选）', quic.node,
+      '默认跟全局「QUIC 阻断」走：本该走链的目标，它的 UDP 443 会被拦下（UDP 不走隧道，不拦就是绕过隧道直连漏出）。' +
+      '真碰到“只认 HTTP/3”的系统时勾这里 —— 只放它的 QUIC 直连，TCP 那条路仍按本规则走。' +
+      '勾了之后这些目标不进 UDP 侧过滤器，一个包也不收回用户态。'),
   ];
 
   modal.open(isNew ? '添加规则' : '编辑规则', nodes, async () => {
@@ -1259,10 +1286,12 @@ function ruleForm(index) {
       if (isNew) await call('SaveRoute', -1, {
         name: name.value, targets: targets.value, chain: sel.value,
         ports: ports.value, localNets: localNets.value, apps: apps.value,
+        allowQuic: quic.input.checked,
       });
       else await call('SaveRoute', index, {
         name: name.value, targets: targets.value, chain: sel.value,
         ports: ports.value, localNets: localNets.value, apps: apps.value,
+        allowQuic: quic.input.checked,
       });
       modal.close();
       await loadRoutes();
@@ -1270,6 +1299,7 @@ function ruleForm(index) {
         (name.value.trim() || '未命名') + '：' + splitTargets(targets.value).length + ' 个目标' +
         (splitTargets(ports.value).length ? '，端口 ' + ports.value.trim() : '') +
         (splitTargets(apps.value).length ? '，仅 ' + apps.value.trim().replace(/\s+/g, ' ') + ' 发起' : '') +
+        (quic.input.checked ? '，它的 QUIC 直连' : '') +
         ' → ' +
         actionName(sel.value) +
         (splitTargets(localNets.value).length ? '（仅限本机在 ' + localNets.value.trim().replace(/\s+/g, ' ') + ' 时）' : '') +
@@ -1791,6 +1821,27 @@ function wire() {
 
   // 设置页：体检 / 诊断包 / Windows 服务
   document.getElementById('btnPrecheck').onclick = () => precheckConfig(false);
+  // UDP 能力探测（档 1b）：只在点的时候跑（每条链一次探测，最多 4 秒）
+  const btnUdpProbe = document.getElementById('btnUdpProbe');
+  if (btnUdpProbe) btnUdpProbe.onclick = async () => {
+    const out = document.getElementById('udpProbeOut');
+    if (out) out.textContent = '正在探测…（逐条链问一次上游，最多 4 秒）';
+    try {
+      const lines = await call('ProbeUDPRelay');
+      if (out) out.textContent = (lines || []).join('\n');
+      pushLog({ time: now(), level: 'INFO', text: 'UDP 能力探测完成' });
+    } catch (e) {
+      if (out) out.textContent = '探测失败：' + ((e && e.message) || e);
+    }
+  };
+  const btnUdpCopy = document.getElementById('btnUdpCopy');
+  if (btnUdpCopy) btnUdpCopy.onclick = async () => {
+    const out = document.getElementById('udpProbeOut');
+    const txt = ((out && out.textContent) || '').trim();
+    if (!txt || txt.indexOf('正在探测') === 0) { toast('还没有探测结果', '点一下「开始探测」', 'info'); return; }
+    try { await navigator.clipboard.writeText(txt); toast('已复制', '探测结果已复制到剪贴板', 'success'); }
+    catch { toast('复制失败', '手动选中上面的文本复制即可', 'warn'); }
+  };
   document.getElementById("btnDiag").onclick = exportDiagnostics;
   document.getElementById("btnCopyPrecheck").onclick = copyPrecheck;
   document.getElementById('btnSvcInstall').onclick = async () => {
@@ -2002,7 +2053,7 @@ async function boot() {
   // 连接列表只看当前页：不在这一页就不拉，省得白跑
   setInterval(() => {
     const p = document.getElementById('page-conn');
-    if (p && p.classList.contains('is-active')) loadConns();
+    if (p && p.classList.contains('is-active')) { loadConns(); loadQuicBlock(); }
   }, 1500);
   // 链路页的上游健康：只在这一页时刷新
   setInterval(() => {
@@ -2048,9 +2099,16 @@ async function loadQuicBlock() {
   cb.checked = !!v.on;
   const info = document.getElementById('quicBlockInfo');
   if (info) {
-    info.textContent = v.on
+    // 档 1a：光看开关看不到“到底拦了什么” —— 把包数与最近目标一并摆出来，
+    // 现场某个业务不通时一眼能看出“是我拦的”（而不是去翻日志）。
+    let seen = '还没拦到过';
+    if (v.blocked) {
+      seen = '已拦 ' + v.blocked + ' 个包';
+      if (v.recent && v.recent.length) seen += '（最近：' + v.recent.join('、') + '）';
+    }
+    info.textContent = (v.on
       ? '当前：开。本该走隧道的 UDP 443 会被拦下并记一行 quic.block（不再直连漏出）。'
-      : '当前：关。QUIC 流量不经过我们（这些目标上的 HTTP/3 会直连出去）。';
+      : '当前：关。QUIC 流量不经过我们（这些目标上的 HTTP/3 会直连出去）。') + ' ' + seen + '。';
   }
 }
 

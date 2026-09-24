@@ -1943,11 +1943,15 @@ func (b *Backend) SetCountDirect(on bool) error {
 // QuicBlockView QUIC 阻断开关（「连接」页上的一个勾）。
 type QuicBlockView struct {
 	On bool `json:"on"`
+	// Blocked 累计拦下的包数；Recent 最近被拦的目标（最多 5 个，新的在前）
+	Blocked uint64   `json:"blocked"`
+	Recent  []string `json:"recent"`
 }
 
-// GetQuicBlock 当前是否阻断 QUIC（UDP 443）。
+// GetQuicBlock 当前是否阻断 QUIC（UDP 443）+ 拦了多少、拦了谁。
 func (b *Backend) GetQuicBlock() QuicBlockView {
-	return QuicBlockView{On: b.a.Cfg.QuicBlockEnabled()}
+	n, recent := b.a.Engine.QUICStats()
+	return QuicBlockView{On: b.a.Cfg.QuicBlockEnabled(), Blocked: n, Recent: recent}
 }
 
 // SetQuicBlock 开关 QUIC 阻断（tuning.quic_block_disabled 的反面）。
@@ -1967,6 +1971,59 @@ func (b *Backend) SetQuicBlock(on bool) error {
 		b.a.Bus.Info("已关闭 QUIC 阻断（UDP 443 不再经过我们）")
 	}
 	return nil
+}
+
+// udpProbeTarget 探测用的公网 UDP 目标（**不碰客户内网**）：一个公开 DNS。
+const udpProbeTarget = "114.114.114.114:53"
+
+// ProbeUDPRelay 探每条链的 UDP 中继能力（只读探测：不改配置、不碰客户内网）。
+//
+// 为什么要这个按钮：现在被问“你们支持 UDP 吗”，界面只能答一句“不支持”（设计如此）。
+// 有了它，答案变成**实测**：“上游接受了 ASSOCIATE，但真实往返没有回包 —— 上游侧大概率
+// 没放行 UDP 端口”。上游一改就能点一下复测，不用凭感觉改架构。
+//
+// 每条链并行，整体耗时 ≈ 单条超时。
+func (b *Backend) ProbeUDPRelay() []string {
+	chains := b.a.Cfg.ChainsSnapshot()
+	if len(chains) == 0 {
+		return []string{"还没有配置任何链"}
+	}
+	dstHost, dstPortStr, _ := net.SplitHostPort(udpProbeTarget)
+	dstIP := net.ParseIP(dstHost)
+	dstPort, _ := strconv.Atoi(dstPortStr)
+
+	lines := make([]string, len(chains))
+	var wg sync.WaitGroup
+	for i := range chains {
+		ch := chains[i]
+		ups := b.a.Cfg.UpstreamsResolved(ch)
+		if len(ups) == 0 {
+			lines[i] = "链 " + ch.Name + "：没有上游"
+			continue
+		}
+		wg.Add(1)
+		go func(i int, name, raw string) {
+			defer wg.Done()
+			up, err := upstream.Parse(raw)
+			if err != nil {
+				lines[i] = fmt.Sprintf("链 %s：上游地址看不懂（%v）", name, err)
+				return
+			}
+			r := upstream.ProbeUDP(up, dstIP, uint16(dstPort), 4*time.Second)
+			shown := gostbat.Redact(raw)
+			if r.Supported {
+				lines[i] = fmt.Sprintf("✓ 链 %s（%s）：UDP 中继可用，往返 %s", name, shown, r.RTT.Round(time.Millisecond))
+				b.a.Bus.Info("udp.probe: chain=%s supported=true rtt=%s bnd=%s", name, r.RTT.Round(time.Millisecond), r.BND)
+				return
+			}
+			lines[i] = fmt.Sprintf("✗ 链 %s（%s）：%s", name, shown, r.Reason)
+			b.a.Bus.Info("udp.probe: chain=%s supported=false reason=%s", name, r.Reason)
+		}(i, ch.Name, ups[0])
+	}
+	wg.Wait()
+
+	head := fmt.Sprintf("本版本不转发 UDP（QUIC 只拦不转）—— 这里只探上游有没有这个能力。目标 %s：", udpProbeTarget)
+	return append([]string{head}, lines...)
 }
 
 // CaptureView 抓包状态（界面用）。
