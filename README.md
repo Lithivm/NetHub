@@ -22,6 +22,10 @@
   发配置给别人看用「导出配置（抹掉口令）」。**不要把 config.yaml 提交进 git 或发到群里**
 - **界面**（Wails + WebView2）—— 实时日志、链路自检、与 Clash 共存检测、深/浅主题、托盘常驻
 - **不抢设置** —— 不改系统代理、不动路由表，和 Clash / v2rayN 这类工具共存
+- **改完不用重启** —— 规则 / 链路 / 上游/ 拨号参数保存即生效（不断已有连接）；
+  CLI 用 `nethub.exe -apply` 改完能等到“运行实例真的吃进去了”才返回
+- **QUIC 不再漏出去** —— 本该走链的目标上的 HTTP/3（UDP 443）会被拦下并记一行日志，
+  而不是默默地直连出去；浏览器随即回落 TCP，那条路仍由我们接管
 
 ## 安装
 
@@ -43,7 +47,8 @@
 
 ```bash
 nethub.exe -check                # 只校验配置文件，逐条列出错误（不启动、不改任何东西，不需管理员）
-nethub.exe -status               # 打印机器可读的 JSON 现状：版本/服务状态/链路/规则/开关/通配目标
+nethub.exe -status               # 打印机器可读的 JSON 现状：版本/服务状态/链路/规则/开关/运行实例（含它在用哪份配置）
+nethub.exe -apply <新配置.yaml>   # 校验 → 落盘 → 让正在运行的实例热生效（不重启、不断已有连接）
 nethub.exe -headless             # 无界面只跑引擎（自动化用）
 nethub.exe -service-install      # 装成 Windows 服务（开机即启、无人登录也跑）
 nethub.exe -service-uninstall    # 卸载服务
@@ -59,8 +64,14 @@ nethub.exe -version              # 打印版本号
 改动配置的标准流程（人、脚本、agent 都一样）：
 
 ```
-改 config.yaml（或界面里改）→ nethub.exe -check → 重启（-quit 后重新启动，或重启服务）→ nethub.exe -status 确认
+改 config.yaml（或界面里改）→ nethub.exe -check → nethub.exe -status 确认生效
 ```
+
+**规则、链路、上游的改动是即时生效的**（界面里保存就生效，外部改文件后 2 秒内自动生效），
+不用重启进程、也不会断掉正在用的连接。只有三项要重启：本机中转端口、DNS 接管（假 IP）、
+system hosts 条目 —— `-status` 的 `runtime.restartNeeded` 会明说是哪一项。
+脚本/agent 改配置建议用 `nethub.exe -apply 新配置.yaml`：它会校验、落盘，并等运行实例真的
+吃进去才返回（返回 0 = 已生效；3 = 写进去了但实例没应用，原因在日志里）。
 
 `config.yaml` 是唯一配置来源，命令行与界面等价；配置文件就在 `nethub.exe` 同目录。
 
