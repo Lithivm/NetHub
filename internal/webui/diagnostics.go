@@ -39,6 +39,13 @@ func (b *Backend) ExportDiagnostics() (string, error) {
 	if raw, err := os.ReadFile(b.a.Cfg.Path()); err == nil {
 		_ = addZip(zw, "config.脱敏.yaml", []byte(redactConfig(string(raw))))
 	}
+	// 2) 内核过滤器原文（单独一个文件：它三 KB 一行，塞进日志没人读得下去，
+	// 但“包到底有没有被内核送过来”只有它能回答）
+	if ft := b.a.Engine.MainFilterText(); ft != "" {
+		_ = addZip(zw, "内核过滤器.txt", []byte("# NetHub 内核过滤器（WinDivert 条件）原文\n"+
+			"# 读法：只有**落在这串条件里**的包才会被送进用户态由引擎决定命运；\n"+
+			"# 不在里面的包在驱动层就放行了（直连目标、其余端口、其余协议）。\n\n"+ft+"\n"))
+	}
 	// 3) 日志（连轮转出去的历史一起带，否则“出问题之前发生了什么”就断了）
 	if lp := b.a.Bus.FilePath(); lp != "" {
 		if raw, err := os.ReadFile(lp); err == nil {
@@ -58,6 +65,7 @@ func (b *Backend) ExportDiagnostics() (string, error) {
 	_ = addZip(zw, "说明.txt", []byte(`诊断包里有什么：
   报告.txt          —— 版本、系统、规则、链路上游、健康与巡检结果、hosts 与 Clash 共存状态
   config.脱敏.yaml  —— 你的配置，上游凭据已抹掉（auth= 与 user:pass 都替换成 ***）
+  内核过滤器.txt     —— 内核当前实际在拦什么（一台机器上“规则配了却不生效”的第一手材料）
   nethub.log        —— 最近的日志（最后 2000 行）
   nethub.log.1/.2   —— 轮转出去的历史（日志单文件 8 MB 上限，最多 3 个文件）
 
