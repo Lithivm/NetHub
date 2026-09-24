@@ -110,15 +110,25 @@ async function setTheme(mode) {
 
 /* ═══════════════ 标签页 ═══════════════ */
 
-// 顶部标签条的滑动指示块：跟着当前 tab 走（宽度/位置由 JS 量出来，不写死）
-function positionTabThumb() {
+// 顶部标签条的滑动指示块：跟着当前 tab 走（位置/宽度由 JS 量出来，不写死）。
+//
+// 位置走 transform（合成器上跑，不触发布局）；宽度只有切到不等宽的「诊断」才会变。
+// opts.immediate = 直接落位、不滑动 —— 首次渲染、字体加载完、窗口尺寸变化时用，
+// 否则会看到它从 0 滑过来 / 拖着一路动画。
+function positionTabThumb(opts) {
   const nav = document.getElementById('tabs');
   if (!nav) return;
   const thumb = nav.querySelector('.tab-thumb');
   const active = nav.querySelector('.tab.is-active');
   if (!thumb || !active) return;
-  thumb.style.left = active.offsetLeft + 'px';
+  const immediate = !!(opts && opts.immediate);
+  if (immediate) {
+    thumb.classList.add('no-anim');
+    void thumb.offsetWidth;   // 强制回流：先让 no-anim 生效，这次改动才不会补动画
+  }
+  thumb.style.transform = 'translateX(' + active.offsetLeft + 'px)';
   thumb.style.width = active.offsetWidth + 'px';
+  if (immediate) requestAnimationFrame(() => thumb.classList.remove('no-anim'));
 }
 
 function showPage(name) {
@@ -1601,8 +1611,12 @@ function wire() {
 
   // 标签
   document.querySelectorAll('.tab').forEach(t => t.onclick = () => showPage(t.dataset.page));
-  window.addEventListener('resize', positionTabThumb);
-  positionTabThumb();
+  window.addEventListener('resize', () => positionTabThumb({ immediate: true }));
+  positionTabThumb({ immediate: true });
+  // 字体度量定下来后重新量一次（落位，不滑）：否则指示块可能停在旧宽度上
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(() => positionTabThumb({ immediate: true }));
+  }
   wireRowDrag('ruleTable', moveRouteTo);
   wireRowDrag('chainTable', moveChainTo);
   document.getElementById('btnSettings').onclick = () => showPage('settings');

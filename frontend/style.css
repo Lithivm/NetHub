@@ -23,7 +23,12 @@
   --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px;
 
   --titlebar-h: 36px;
+  /* --ease 是整条 transition 值（时长+曲线），只能整条用；
+     需要自定义时长时必须用下面这条纯曲线，否则写成 `x .2s var(--ease)`
+     会变成「200ms 时长 + 140ms 延迟」—— 动画看起来发僵，其实是慢半拍。 */
   --ease: 140ms cubic-bezier(.4, 0, .2, 1);
+  --ease-soft: cubic-bezier(.22, 1, .36, 1);   /* 快起长收：丝滑但不拖沓 */
+  --dur-tab: 240ms;
 }
 
 /* ── 浅色：中性白底 + 深蓝主色 ── */
@@ -308,13 +313,22 @@ code, .mono { font-family: var(--font-mono); }
   position: absolute; top: 0; left: 0; height: 100%; width: 0;
   background: var(--primary); border-radius: var(--r-chip);
   box-shadow: 0 1px 3px rgba(0, 0, 0, .18);
-  transition: left .18s var(--ease), width .18s var(--ease);
+  /* 位置走 transform（合成器上跑，不碰布局）；只有切到不等宽的「诊断」时宽度才会变 */
+  transform: translateX(0);
+  transition: transform var(--dur-tab) var(--ease-soft), width var(--dur-tab) var(--ease-soft);
+  will-change: transform;
   z-index: 0; pointer-events: none;
 }
-.tabs .tab { position: relative; z-index: 1; }
-.tabs .tab.is-active { background: transparent; box-shadow: none; color: var(--on-primary); }
+.tabs .tab-thumb.no-anim { transition: none; }
+.tabs .tab { position: relative; z-index: 1; transition: background var(--ease), color 120ms var(--ease-soft); }
+/* 出去的标签立刻变灰，进来的等胶囊快到了再变白 —— 否则白字会先落在浅底上闪一下 */
+.tabs .tab.is-active { background: transparent; box-shadow: none; color: var(--on-primary);
+  transition: color 140ms var(--ease-soft) 80ms; }
 .tabs .tab.is-active:hover { background: transparent; color: var(--on-primary); }
-@media (prefers-reduced-motion: reduce) { .tabs .tab-thumb { transition: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .tabs .tab-thumb, .tabs .tab, .tabs .tab.is-active,
+  .tab-badge, .tab.is-active .tab-badge { transition: none; }
+}
 .tabs .tab {
   /* 紧凑：横向内边距用 --s3（比默认 --s4 窄 8px） */
   padding: 6px var(--s3);
@@ -346,8 +360,10 @@ code, .mono { font-family: var(--font-mono); }
   min-width: 18px; padding: 0 5px; border-radius: var(--r-pill);
   background: var(--card-strong); color: var(--muted);
   text-align: center;
+  transition: background 120ms var(--ease-soft), color 120ms var(--ease-soft);
 }
-.tab.is-active .tab-badge { background: rgba(255, 255, 255, .22); color: #fff; }
+.tab.is-active .tab-badge { background: rgba(255, 255, 255, .22); color: #fff;
+  transition: background 140ms var(--ease-soft) 80ms, color 140ms var(--ease-soft) 80ms; }
 
 /* ═══════════════ 内容区 ═══════════════ */
 
@@ -640,7 +656,7 @@ code, .mono { font-family: var(--font-mono); }
   box-shadow: var(--shadow-pop);
   padding: var(--s3) var(--s4);
   animation: slidein 180ms cubic-bezier(.2, .8, .2, 1);
-  transition: opacity .2s var(--ease), transform .2s var(--ease);
+  transition: opacity 180ms var(--ease-soft), transform 180ms var(--ease-soft);
 }
 .toast.is-out { opacity: 0; transform: translateY(4px); }
 .toast .toast-bar {
