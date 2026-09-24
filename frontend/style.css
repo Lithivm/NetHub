@@ -790,13 +790,17 @@ code, .mono { font-family: var(--font-mono); }
 .trow.is-off { opacity: .45; }
 .trow.is-off .rule-switch { opacity: 1; }
 
-/* 常驻告警条：只在红线问题（内网被别的代理接管）出现，修好自动消失 */
+/* 常驻告警条：只在内存被别的代理接管这类问题上出现，修好自动消失 */
 .noticebar { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap;
   padding: 6px var(--s4); font-size: var(--fs-sm); border-bottom: 1px solid var(--hairline); }
 .noticebar.is-error { background: var(--error-soft); color: var(--error); border-bottom-color: color-mix(in srgb, var(--error) 30%, transparent); }
 .noticebar.is-warn  { background: var(--warning-soft); color: var(--warning); border-bottom-color: color-mix(in srgb, var(--warning) 30%, transparent); }
 .noticebar .nb-title { font-weight: 600; }
 .noticebar .nb-text { flex: 1; min-width: 200px; }
+/* 关闭按钮：margin-left:auto 把它钉在最右边（文字短的时候也不会跟到中间） */
+.noticebar .nb-close { margin-left: auto; flex: 0 0 auto; padding: 0 4px; border: 0; background: none;
+  color: inherit; opacity: .65; font: inherit; font-size: 16px; line-height: 1; cursor: pointer; }
+.noticebar .nb-close:hover { opacity: 1; }
 /* 深色不用再单独写一套：is-error/is-warn 已改成走 --*-soft/--* 语义色 token，明暗自动跟着。 */
 
 /* 表头与开关列的居中（表头文字默认左对齐，会和居中的开关错开一格） */

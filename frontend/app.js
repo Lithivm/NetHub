@@ -1319,12 +1319,20 @@ async function delRoute(i) {
 
 /* ═══════════════ Clash 共存检测 ═══════════════ */
 
-/* 常驻告警条：把"内网可能被 Clash 接管"这种红线从日志提到界面上。
-   它不自动消失 —— 只有检测结果变成 OK 才隐。这样即使人当时不在电脑前，回来也能看到。 */
+/* 常驻告警条：把"内网可能被 Clash 接管"这种问题从日志提到界面上。
+   它不自动消失 —— 只有检测结果变成 OK 才隐。这样即使人当时不在电脑前，回来也能看到。
+   右边的 × 可以关掉；关掉只对本次运行有效（按标题记，条件恢复后自动忘掉）。 */
+const noticeDismissed = new Set();
 function noticeBar(kind, title, text, actionLabel, actionFn) {
   const bar = document.getElementById('noticeBar');
+  if (!kind) {
+    noticeDismissed.clear();   // 问题没了 → 忘掉之前关过的，下次再出还会提示
+    bar.replaceChildren();
+    bar.hidden = true;
+    return;
+  }
+  if (noticeDismissed.has(title)) { bar.hidden = true; return; }
   bar.replaceChildren();
-  if (!kind) { bar.hidden = true; return; }
   bar.hidden = false;
   bar.className = 'noticebar is-' + kind;
   bar.appendChild(el('span', 'nb-title', title));
@@ -1336,17 +1344,25 @@ function noticeBar(kind, title, text, actionLabel, actionFn) {
     const c = document.getElementById('clashDetail');
     if (c) c.scrollIntoView({ block: 'center' });
   }));
+  const close = btn('×', 'nb-close', () => {
+    noticeDismissed.add(title);
+    bar.replaceChildren();
+    bar.hidden = true;
+  });
+  close.setAttribute('aria-label', '关闭');
+  close.title = '关闭（本次运行内不再提示）';
+  bar.appendChild(close);
 }
 
-/* 内网被交给 Clash 是红线（DNS 外泄/封号），所以用它驱动常驻横幅。 */
+/* 内网被交给别的代理会出问题（DNS 外泄/封号），所以用它驱动常驻横幅。 */
 function updateClashBar(v) {
   if (!v) { noticeBar(null); return; }
   if (v.coverage && v.coverage.ok === false && (v.coverage.missed || []).length) {
     const missed = v.coverage.missed;
-    noticeBar('error', '内网可能被其他代理接管（红线）',
+    noticeBar('error', '内网可能被其他代理接管',
       missed.length + ' 个目标不在系统代理的绕过列表里：' + missed.slice(0, 4).join('; ') +
         (missed.length > 4 ? ' 等' : '') +
-        '　—— 这几个不在系统代理的绕过列表里，按域名访问内网时可能先交给它（它用自己的 DNS 解析，内网域名有出内网的风险）· 实测环境：Clash Verge v2.5.2',
+        '　—— 这几个不在系统代理的绕过列表里，按域名访问内网时可能先交给它（它用自己的 DNS 解析，内网域名有出内网的风险）',
       '复制要加的网段', async () => {
         const list = (v.bypassList || missed.join(';'));
         try {

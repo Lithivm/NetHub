@@ -597,7 +597,7 @@ func (b *Backend) ClashCheck() ClashCheckView {
 	if len(misrouted) > 0 {
 		v.NeedFix = true
 		v.BypassList = strings.Join(misrouted, ";")
-		base := fmt.Sprintf("有 %d 个内网域名可能被交给 Clash（红线：Clash 会用自己的 DNS 解析，内网域名可能出内网）：%s。",
+		base := fmt.Sprintf("有 %d 个内网域名可能被交给 Clash（它会用自己的 DNS 解析，内网域名可能出内网）：%s。",
 			len(misrouted), strings.Join(misrouted, ", "))
 		if pm.Mode == "pac" {
 			v.Verdict = base + "PAC 模式下绕过列表不生效，建议改用普通系统代理，再按下方内容配绕过。"
