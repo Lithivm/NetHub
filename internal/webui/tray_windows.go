@@ -21,13 +21,13 @@ import (
 )
 
 const (
-	wmApp           = 0x8000 // WM_APP
-	wmTrayMsg       = wmApp + 1
-	wmRButtonUp     = 0x0205
-	wmLButtonDBLCLK = 0x0203
-	wmCommand       = 0x0111
-	wmDestroy       = 0x0002
-	wmClose         = 0x0010
+	wmApp       = 0x8000 // WM_APP
+	wmTrayMsg   = wmApp + 1
+	wmRButtonUp = 0x0205
+	wmLButtonUp = 0x0202
+	wmCommand   = 0x0111
+	wmDestroy   = 0x0002
+	wmClose     = 0x0010
 
 	nimAdd    = 0x00000000
 	nimDelete = 0x00000002
@@ -211,7 +211,8 @@ func (t *Tray) run(iconPath string) {
 		uCallbackMessage: wmTrayMsg,
 		hIcon:            hIcon,
 	}
-	copyUTF16(t.nid.szTip[:], "NetHub · 内网隧道代理（双击图标打开窗口）")
+	// 悬停提示只留名字：托盘提示长了会遮住旁边一片图标，而且那个“怎么办”用户不需要（有菜单）。
+	copyUTF16(t.nid.szTip[:], "NetHub")
 	if r, _, _ := pShellNotifyIconW.Call(nimAdd, uintptr(unsafe.Pointer(&t.nid))); r == 0 {
 		t.event("托盘图标注册失败（Shell_NotifyIconW 返回 0）")
 	} else {
@@ -253,7 +254,9 @@ func (t *Tray) wndProc(hwnd windows.Handle, msg uint32, wParam, lParam uintptr) 
 		switch uint32(lParam) & 0xffff {
 		case wmRButtonUp:
 			t.popupMenu()
-		case wmLButtonDBLCLK:
+		case wmLButtonUp:
+			// 单击即打开（以前是双击）。双击会依次产生 UP、DBLCLK、UP，
+			// 这里只认 UP：多调一次 onShow 也无害（它就是 ShowMainWindow，幂等）。
 			if t.onShow != nil {
 				t.onShow()
 			}
