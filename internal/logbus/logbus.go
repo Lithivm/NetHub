@@ -40,7 +40,12 @@ type Bus struct {
 // 一天就能写出几百 MB；而日志又没人看没人删，不能任它涨。
 const (
 	DefaultMaxBytes = 8 << 20
-	DefaultKeep     = 2
+	// DefaultKeep 保留几份。
+	//
+	// 2 份 = 总共只留 16MB：现场出事时日志很可能已经被刷走（一次贴给 agent 的就是
+	// 当时那一段，没有上一段就没法对比“之前是不是也这样”）。参考 squid 默认留 10 份、
+	// Proxifier 根本不轮转；这里取 5 份（共 40MB）兼顾可回查与占盘。
+	DefaultKeep = 5
 )
 
 func New(max int) *Bus {
