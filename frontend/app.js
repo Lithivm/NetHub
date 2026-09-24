@@ -119,7 +119,9 @@ function applyThemeSoft(mode) {
   const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   if (reduce) { applyTheme(mode); return; }   // 系统要求减少动效：直接切
   root.classList.add('theme-anim');
-  void root.offsetWidth;   // 让 .theme-anim 先落地：同一个任务里加类又改色，有实现不会补过渡
+  // 刻意**不做**强制回流（`void root.offsetWidth`）：transition 是拿「变化后的样式」
+  // 判定要不要起动画的，所以同一个任务里加类 + 改色就够了；而那句会强制一次
+  // **全页同步样式计算+布局**（日志页几千行时非常贵），反过来造成"点了半天才开始变"。
   applyTheme(mode);
   clearTimeout(themeAnimTimer);
   // 800ms > CSS 里的 560ms：过渡走完再摘类，否则最后一段会硬跳

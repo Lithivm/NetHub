@@ -28,6 +28,13 @@
      会变成「200ms 时长 + 140ms 延迟」—— 动画看起来发僵，其实是慢半拍。 */
   --ease: 140ms cubic-bezier(.4, 0, .2, 1);
   --ease-soft: cubic-bezier(.22, 1, .36, 1);   /* 快起长收：丝滑但不拖沓 */
+  /* 主题切换专用：比 --ease-soft 更早起跑。
+     CDP 逐帧采页面底色实测（255→19，百分比 = 已走行程）：
+       --ease-soft   ：35ms #E0E0E0（13%）· 83ms #C3C3C3（25%）—— 前 100ms 走得极少，
+                       而且全花在“白→浅灰”这段最看不出来的区间 ⇒ 主观上“点了没反应”。
+       --ease-theme  ：45ms #CCCCCC（22%）· 69ms #888888（50%）· 85ms #727272（60%）
+                       ⇒ 一两帧就看得出在变。总时长仍 560ms，尾巴照旧绵长。 */
+  --ease-theme: cubic-bezier(.1, .8, .2, 1);
   --dur-tab: 240ms;
 }
 
@@ -896,12 +903,12 @@ html.theme-anim,
 html.theme-anim *,
 html.theme-anim *::before,
 html.theme-anim *::after {
-  transition: background-color 560ms var(--ease-soft),
-              color 560ms var(--ease-soft),
-              border-color 560ms var(--ease-soft),
-              box-shadow 560ms var(--ease-soft),
-              fill 560ms var(--ease-soft),
-              stroke 560ms var(--ease-soft) !important;
+  transition: background-color 560ms var(--ease-theme),
+              color 560ms var(--ease-theme),
+              border-color 560ms var(--ease-theme),
+              box-shadow 560ms var(--ease-theme),
+              fill 560ms var(--ease-theme),
+              stroke 560ms var(--ease-theme) !important;
 }
 html.theme-anim .seg2-thumb { transition: transform 220ms var(--ease-soft) !important; }
 @media (prefers-reduced-motion: reduce) {
