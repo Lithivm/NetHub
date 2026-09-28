@@ -163,11 +163,16 @@ var sessionCache = tls.NewLRUClientSessionCache(64)
 
 // tlsConfig 统一构造 TLS 配置（socks5+tls 与 https 共用）。
 func (u *Upstream) tlsConfig() *tls.Config {
-	return &tls.Config{
+	c := &tls.Config{
 		ServerName:         u.ServerName,
 		InsecureSkipVerify: !u.Verify,    //nolint:gosec // 默认与 gost 行为一致；要校验就加 ?secure=true
 		ClientSessionCache: sessionCache, // 会话复用：重建连接少一个 RTT（见上）
 	}
+	// 客户端证书（mTLS）：证书在解析期已经加载好了（现在加载不上的是配置错，不是运行时错）。
+	if u.ClientCert != nil {
+		c.Certificates = []tls.Certificate{*u.ClientCert}
+	}
+	return c
 }
 
 func truncate(s string, n int) string {

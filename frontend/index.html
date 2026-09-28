@@ -70,7 +70,7 @@
         <h2>运行日志</h2>
         <span class="hint">同时写到程序目录的 nethub.log</span>
         <div class="spacer"></div>
-        <label class="check" title="排障用：会多记每个直连目标、学到的域名、探测过程等；关着时只写连接、启停、状态变化与错误">
+        <label class="check" title="切换至详细模式">
           <input type="checkbox" id="setLogVerbose"><span>详细日志</span>
         </label>
         <button class="btn btn-sm" id="btnOpenLog">打开日志目录</button>
@@ -172,6 +172,29 @@
   <section class="page" id="page-diag">
     <div class="settings-scroll">
 
+      <!-- 装之前就该做的一步：装完才发现驱动被拦，从日志里挖半天（错误码还是误导人的“系统资源不足”）。
+           所以既挂一行静态清单（随时能查），也在真的被拦时用顶部告警条把人带到这里。 -->
+      <div class="card" id="cardWhitelist">
+        <div class="card-head">
+          <h2>安全软件白名单</h2>
+          <span class="hint">漏了这步，驱动可能在开机时被杀软拦掉</span>
+          <div class="spacer"></div>
+          <button class="btn btn-sm" id="btnCopySysPath">复制驱动路径</button>
+          <button class="btn btn-sm" id="btnOpenProgDir">打开程序目录</button>
+          <button class="info-btn" id="btnHelpWhitelist" title="为什么只加信任区不够、加完为什么要重启杀软">i</button>
+        </div>
+        <div class="card-body form">
+          <div class="wl-table">
+            <div>要放行的文件</div><div>加到哪里</div>
+            <div class="mono">nethub.exe</div>
+            <div>杀软的<b>信任区</b>（免得主程序被当木马删掉）</div>
+            <div class="mono">WinDivert64.sys</div>
+            <div>火绒 6.0：<b>系统防护 → 漏洞驱动拦截 → 例外驱动</b>；360 / 腾讯管家：驱动（内核）防护白名单</div>
+          </div>
+          <div class="hint">两个文件都在程序目录里。火绒只加信任区往往不够 —— 驱动要进「例外驱动」，原因见右上「i」。</div>
+        </div>
+      </div>
+
       <div class="card">
         <div class="card-head">
           <h2>链路自检</h2>
@@ -248,6 +271,7 @@
           <div class="spacer"></div>
           <button class="btn btn-sm" id="btnUdpCopy">复制结果</button>
           <button class="btn btn-sm btn-primary" id="btnUdpProbe">开始探测</button>
+          <button class="info-btn" id="btnHelpUdp" title="为什么不做 UDP、同行怎么做">i</button>
         </div>
         <div class="card-body form">
           <pre class="explain-out" id="udpProbeOut">点「开始探测」：逐条链问一次上游能不能中继 UDP（只发一次公网 DNS 查询，不碰客户内网）。
@@ -389,7 +413,7 @@
         </div>
       </div>
 
-      <div class="card card-about">
+      <div class="card card-about" id="cardAbout">
         <div class="card-head">
           <h2>关于</h2>
           <div class="spacer"></div>

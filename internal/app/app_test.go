@@ -1,6 +1,8 @@
 package app
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +10,7 @@ import (
 	"time"
 
 	"nethub/internal/config"
+	"nethub/internal/engine"
 	"nethub/internal/hostsmgr"
 	"nethub/internal/logbus"
 )
@@ -36,6 +39,35 @@ func TestReloadRetriesHalfWrittenFile(t *testing.T) {
 	}
 	if !found {
 		t.Error("应当记一行“重试后读到完整文件”—— 否则现场不知道刚才那次失败只是写了一半")
+	}
+}
+
+// 「驱动被安全软件拦」必须能被界面认出来，否则只能让前端去正则匹配那句中文错误消息。
+// 完整链：engine 的哨兵错误 → App.driverBlocked → GetState.driverBlocked → 顶部告警条。
+// 这里锁住中间一环：标记要跟着“原始错误”走，而不是跟着错误文本。
+func TestDriverBlockedFlagFollowsCause(t *testing.T) {
+	a, _, _ := seedConfig(t)
+
+	cause := fmt.Errorf("%w（已重试 6 次）: %v", engine.ErrDriverBlocked,
+		errors.New("Insufficient system resources exist to complete the requested service."))
+	a.setLastError("拦截启动失败："+cause.Error(), cause)
+	if !a.DriverBlocked() {
+		t.Error("驱动被拦却没打上标记 —— 界面不会弹那条告警条，现场只能从日志里挖")
+	}
+	if !strings.Contains(a.LastError(), "拦截启动失败") {
+		t.Errorf("LastError 不该被改动：%q", a.LastError())
+	}
+
+	// 换个原因（配置不合法）：标记必须跟着掉下来，否则驱动修好了横幅还挂着
+	a.setLastError("配置不合法：路由为空", errors.New("路由为空"))
+	if a.DriverBlocked() {
+		t.Error("失败原因已经变了（配置不合法），却还挂着“驱动被拦”的标记")
+	}
+
+	// 启动成功会 setLastError("", nil) 清错 —— 标记也要一起清
+	a.setLastError("", nil)
+	if a.DriverBlocked() || a.LastError() != "" {
+		t.Error("启动成功（清空 LastError）后标记没清干净")
 	}
 }
 

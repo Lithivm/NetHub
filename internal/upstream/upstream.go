@@ -25,7 +25,12 @@
 //	https://proxy:8443?auth=<base64>
 //	可选参数 secure=true 开启证书校验（默认不校，与 gost 的 socks5+tls 默认行为一致）
 //
-// 传输层后缀目前支持 `+tls` / `+mtls`（mtls 视同 tls，客户端证书待需要时再加）。
+// 传输层后缀目前支持 `+tls` / `+mtls`（mtls 视同 tls，与 gost 的写法兼容）。
+// 客户端证书（mTLS）用参数给：`?cert=<证书>&key=<私钥>` —— **不要**靠 `mtls` 后缀去猜：
+// gost 的 `mtls` 是 multiplexed TLS，与常见的 mutual TLS 撞名。
+//
+// 协议实现是**可插拔的**：分发走 protocol.go 的注册表，加协议 = 新写一个文件 + register，
+// 新协议必须过 contract_test.go 里那套契约（写完注册就会自动被考核）。
 //
 // 不做哪些（评估结论）：gost 的 quic/kcp/http2/obfs4 传输是要复刻 gost 自研的
 // 多路复用与帧封装，不是"套一层"，成本高且随 gost 版本变；
@@ -60,6 +65,12 @@ type Upstream struct {
 
 	// ServerName 校验/SNI 用的主机名
 	ServerName string
+
+	// 客户端证书（mTLS）：CertFile/KeyFile 是 URL 里的 ?cert= / ?key=；
+	// ClientCert 是**解析期就加载好的**证书 —— 免得第一次拨号才发现文件不对。
+	CertFile   string
+	KeyFile    string
+	ClientCert *tls.Certificate
 }
 
 // looksMasked 这串是不是脱敏占位符（`***` / `••••` 这类）。
@@ -162,6 +173,31 @@ func Parse(raw string) (*Upstream, error) {
 	if q := u.Query(); q.Get("secure") == "true" {
 		up.Verify = true
 	}
+
+	// 客户端证书（mTLS）：`?cert=<证书路径>&key=<私钥路径>`
+	//
+	// 为什么不把 `+mtls` 直接当成“要客户端证书”：gost 的 `mtls` 是 **m**ultiplexed TLS，
+	// 与业界通常说的 mutual TLS **撞名**（KB 特意记过这个坑）。用 URL 参数显式给证书，
+	// 既不猜语义，也不会让写了 `+mtls` 的老配置突然失败。
+	certFile, keyFile := queryRaw(u.RawQuery, "cert"), queryRaw(u.RawQuery, "key")
+	switch {
+	case certFile != "" && keyFile == "":
+		return nil, fmt.Errorf("?cert= 给了客户端证书，但缺 ?key=（私钥）")
+	case keyFile != "" && certFile == "":
+		return nil, fmt.Errorf("?key= 给了私钥，但缺 ?cert=（证书）")
+	case certFile != "" || keyFile != "":
+		if !up.TLS {
+			return nil, fmt.Errorf("?cert=/?key=（客户端证书）只在 TLS 上游上有意义 —— " +
+				"协议要写成 socks5+tls / https 之类才有 TLS")
+		}
+		// 在**解析期**就把文件读出来：配置一看就是错的就应当场挡住，
+		// 而不是等第一次拨号才报“证书加载失败”（那时现场只会看到业务连不上）。
+		c, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			return nil, fmt.Errorf("加载客户端证书失败（cert=%s key=%s）: %w", certFile, keyFile, err)
+		}
+		up.ClientCert = &c
+	}
 	return up, nil
 }
 
@@ -170,10 +206,14 @@ func Parse(raw string) (*Upstream, error) {
 // 为什么不用 u.Query()：base64 里会出现 `+`，而 url.Values 会把 `+` 解成空格，
 // 于是合法凭据被解成非法 base64，报“auth 参数不是合法的 base64” —— 概率约 1/64 每字符。
 // 这里用 PathUnescape：它会解 %2B，但不会把字面量 `+` 变成空格。
-func queryAuth(rawQuery string) string {
+func queryAuth(rawQuery string) string { return queryRaw(rawQuery, "auth") }
+
+// queryRaw 取一个查询参数的**原值**（同样不做 `+` → 空格）。
+// 路径类参数（cert/key）也用它 —— Windows 路径里理论上也能出现 `+`，同一套更安全。
+func queryRaw(rawQuery, key string) string {
 	for _, kv := range strings.Split(rawQuery, "&") {
 		k, v, ok := strings.Cut(kv, "=")
-		if !ok || k != "auth" {
+		if !ok || k != key {
 			continue
 		}
 		if d, err := url.PathUnescape(v); err == nil {
@@ -199,22 +239,14 @@ func (u *Upstream) String() string {
 
 // Dial 连到 targetIP:port。
 // 目标从内核拦截拿到的是 IP，所以不需要（也不应该）让上游去解析域名。
+//
+// 具体协议的实现按注册表分发（见 protocol.go）—— 加协议不该动这里。
 func (u *Upstream) Dial(targetIP net.IP, targetPort uint16, timeout time.Duration) (net.Conn, error) {
-	v4 := targetIP.To4()
-	if v4 == nil {
-		return nil, fmt.Errorf("仅支持 IPv4 目标: %v", targetIP)
+	p, err := u.proxy()
+	if err != nil {
+		return nil, err
 	}
-	switch u.Protocol {
-	case "socks5":
-		return socks.DialTLS(u.Addr, u.Creds, u.tls(), v4, targetPort, timeout)
-	case "socks4", "socks4a":
-		// SOCKS4 协议本身没有 TLS；但 gost 允许 "socks4+tls" 这种"TLS 传输 + SOCKS4 协议"
-		return socks.DialSOCKS4TLS(u.Addr, u.Creds.User, v4.String(), targetPort, u.tls(), timeout)
-	case "http":
-		return dialHTTPConnect(u, v4, targetPort, timeout)
-	default:
-		return nil, fmt.Errorf("未实现的上游协议 %q", u.Protocol)
-	}
+	return p.Dial(targetIP, targetPort, timeout)
 }
 
 // tls 返回 TLS 配置；不需要 TLS 时返回 nil（调用方据此判断是否包裹）。
@@ -237,38 +269,23 @@ func (u *Upstream) tls() *tls.Config {
 
 // Prepare 连上上游并把握手做到"只差 CONNECT"。不支持的上游返回 ErrNoPrepare。
 func (u *Upstream) Prepare(timeout time.Duration) (net.Conn, error) {
-	switch u.Protocol {
-	case "socks5":
-		return socks.Prepare(u.Addr, u.Creds, u.tls(), timeout)
-	case "socks4", "socks4a":
-		return socks.PrepareSOCKS4(u.Addr, u.tls(), timeout)
-	case "http":
-		return prepareHTTPConnect(u, timeout)
-	default:
+	p, err := u.proxy()
+	if err != nil {
+		return nil, err
+	}
+	if !p.SupportsPrepare() {
 		return nil, ErrNoPrepare
 	}
+	return p.Prepare(timeout)
 }
 
 // ConnectOn 在预备好的连接上打通到 targetIP:port。
 func (u *Upstream) ConnectOn(conn net.Conn, targetIP net.IP, targetPort uint16, timeout time.Duration) error {
-	v4 := targetIP.To4()
-	if v4 == nil {
-		return fmt.Errorf("仅支持 IPv4 目标: %v", targetIP)
+	p, err := u.proxy()
+	if err != nil {
+		return err
 	}
-	switch u.Protocol {
-	case "socks5":
-		return socks.ConnectOn(conn, v4, targetPort, timeout)
-	case "socks4", "socks4a":
-		host := v4.String()
-		if u.Protocol == "socks4a" {
-			host = v4.String() // 目标是 IP，4a 与 4 等價
-		}
-		return socks.ConnectSOCKS4On(conn, u.Creds.User, host, targetPort, timeout)
-	case "http":
-		return connectHTTPConnect(u, conn, v4, targetPort, timeout)
-	default:
-		return ErrNoPrepare
-	}
+	return p.ConnectOn(conn, targetIP, targetPort, timeout)
 }
 
 // ErrNoPrepare 这条上游不支持"先预备后打通"（只能整体 Dial）。
@@ -291,24 +308,9 @@ func (u *Upstream) DialHost(host string, port uint16, timeout time.Duration) (ne
 	if host == "" {
 		return nil, fmt.Errorf("域名为空")
 	}
-	switch u.Protocol {
-	case "socks5":
-		return socks.DialTLSHost(u.Addr, u.Creds, u.tls(), host, port, timeout)
-	case "socks4a":
-		return socks.DialSOCKS4TLS(u.Addr, u.Creds.User, host, port, u.tls(), timeout)
-	case "socks4":
-		ips, err := net.LookupIP(host)
-		if err != nil || len(ips) == 0 {
-			return nil, fmt.Errorf("SOCKS4 不支持域名，且本机解析 %s 失败: %v", host, err)
-		}
-		v4 := ips[0].To4()
-		if v4 == nil {
-			return nil, fmt.Errorf("SOCKS4 只支持 IPv4，%s 解析到 %v", host, ips[0])
-		}
-		return socks.DialSOCKS4TLS(u.Addr, u.Creds.User, v4.String(), port, u.tls(), timeout)
-	case "http":
-		return dialHTTPConnectHost(u, host, port, timeout)
-	default:
-		return nil, fmt.Errorf("这条上游不支持把域名交给它解析（协议 %s）", u.Protocol)
+	p, err := u.proxy()
+	if err != nil {
+		return nil, err
 	}
+	return p.DialHost(host, port, timeout)
 }

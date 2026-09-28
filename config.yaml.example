@@ -22,6 +22,10 @@ chains:                     # 每条链 = 一个上游代理（程序内置实�
 #   socks5+tls://host:port?auth=<base64(user:pass)>   ← 最常见的 gost 风格
 #   socks5://user:pass@host:port
 #   socks4://host:port      http://host:port      https://host:port
+#
+# 两个可选参数（加在地址后面，用 & 接）：
+#   ?secure=true                            校验上游证书（默认不校，与 gost 的 socks5+tls 一致）
+#   ?cert=D:\client.crt&key=D:\client.key    客户端证书（mTLS，上游要求双向认证时用；只在 TLS 写法上有意义）
 
 # 路由规则：一条规则 = 名字 + 一组目标 + （可选）一组端口 + 走哪个链
 # （形状对齐 Proxifier 的 Rules）自上而下匹配、命中即止；一条规则内任一目标命中即算命中。

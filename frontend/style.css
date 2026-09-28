@@ -112,6 +112,12 @@
 
 * { box-sizing: border-box; }
 
+/* hidden 属性只带一条 **UA 样式** `[hidden]{display:none}`，而作者样式永远压过 UA 样式 ——
+   所以只要给元素写了 display（.noticebar 是 flex、.field 也是 flex），`el.hidden = true` 就完全失效。
+   症状很坑：告警条清空内容后自己还在（只剩 padding 的一条空壳挂在顶部）；
+   这里统一兜住，别再逐个类去补 `[hidden]`。 */
+[hidden] { display: none !important; }
+
 html, body {
   margin: 0; padding: 0;
   height: 100%; overflow: hidden;
@@ -631,6 +637,24 @@ code, .mono { font-family: var(--font-mono); }
 .clash-no { color: var(--error); font-weight: 600; }
 .clash-warn { color: var(--warning); font-weight: 600; }
 
+/* 安全软件白名单（诊断页）：两列，第二列要能换行 —— 修法是一整句话，不能被省略号截掉。
+   不做成 .clash-table 的变体：它那套 nth-child(-n+3) 表头规则是按三列写死的。 */
+.wl-table {
+  display: grid;
+  grid-template-columns: minmax(150px, auto) minmax(200px, 1fr);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-btn);
+  overflow: hidden;
+  font-size: var(--fs-sm);
+}
+.wl-table > div { padding: 6px var(--s3); border-bottom: 1px solid var(--hairline-soft); }
+.wl-table > div:nth-child(-n+2) {
+  background: var(--card-strong); font-size: var(--fs-xs); font-weight: 700;
+  color: var(--muted); letter-spacing: .02em;
+}
+.wl-table > div:nth-last-child(-n+2) { border-bottom: 0; }
+.wl-table .mono { font-family: var(--font-mono); font-size: var(--fs-xs); word-break: break-all; }
+
 /* ═══════════════ 设置页布局 ═══════════════ */
 
 .settings-scroll {
@@ -795,6 +819,8 @@ code, .mono { font-family: var(--font-mono); }
   padding: 6px var(--s4); font-size: var(--fs-sm); border-bottom: 1px solid var(--hairline); }
 .noticebar.is-error { background: var(--error-soft); color: var(--error); border-bottom-color: color-mix(in srgb, var(--error) 30%, transparent); }
 .noticebar.is-warn  { background: var(--warning-soft); color: var(--warning); border-bottom-color: color-mix(in srgb, var(--warning) 30%, transparent); }
+/* info：不是故障，但也不能一闪而过（“有新版本”就用它）—— 用主色系，与错误/告警区分开 */
+.noticebar.is-info  { background: var(--primary-soft); color: var(--primary); border-bottom-color: color-mix(in srgb, var(--primary) 30%, transparent); }
 .noticebar .nb-title { font-weight: 600; }
 .noticebar .nb-text { flex: 1; min-width: 200px; }
 /* 关闭按钮：margin-left:auto 把它钉在最右边（文字短的时候也不会跟到中间） */

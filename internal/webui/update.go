@@ -18,17 +18,74 @@ import (
 	"nethub/internal/selfupdate"
 )
 
-// 「检查更新」。
+// 更新：先只读地「检查」，用户点了才走完整的「下载 → 校验 → 替换 → 重启」。
 //
-// 为什么只做"检查"、不做"自动下载替换"（评估结论）：
-//  1. 客户在医院内网，多半直连不了 github.com —— 自动更新会变成一个"总在失败的按钮"。
-//     真要一键更新，得先有**可达的更新源**（内网镜像 / 对象存储上的一个静态文件）。
-//  2. 无人值守地替换程序，会让现场排障时"程序什么时候变的"说不清；
-//     所以哪怕以后做，也应该是「点一下 → 显示新版本和说明 → 再点确认 → 校验哈希 → 替换重启」。
-//  3. 替换正在运行的 exe 在 Windows 上要走"改名自己 → 写新文件 → 重启 → 清理"这套，
-//     还要带回滚，属于要做就得做扎实的活（约 1 天），不急在这一步。
+// 分两段是因为风险和前提不同：
 //
-// 现在这一步：查最新的 Release 标签，和当前版本比一比，只读、不改任何东西。
+//  1. CheckUpdate 只读、不改任何东西 —— 查 GitHub 最新 Release 标签跟当前版本比一比。
+//     查不到（内网不通、限流）**不当作错误**，只回一句 note：界面不该因为网络不通就报红。
+//  2. 一键更新（UpdateNow）是用户**明确点按钮**之后才走的：下载 zip → 校验（PE 头 + sha256）
+//     → 解到 update/ 并写 pending.json → 换掉正在跑的 exe → 拉起新进程 →
+//     新进程在**装载 WinDivert 之前**收尾那些当时被占用的 DLL/驱动。
+//     运行中的 exe/DLL 在 Windows 上覆盖不掉，所以这套必须跨进程做，脏活在 internal/selfupdate。
+//     失败或想反悔都能一键回滚：旧版本一直留着（nethub.exe.old），`-rollback` 换回来。
+//     同一套逻辑拆成了独立函数 `UpdateNow`（不是只写成 Backend 方法），
+//     本意是让命令行也能跑一遍、从而能被脚本化验证 ——
+//     但**那个命令行入口当时没接上**（`-update-now` 这个 flag 不存在），
+//     现在只有界面上的「下载并更新」在调它。要脚本化验证得先把 flag 补上。
+//
+// **真正的前提是「更新源可达」**：客户在医院内网时多半直连不了 github.com，
+// 那时「下载并更新」会失败（「检查更新」也只会回一句查不到）。
+// 要让它可用，得先有一个内网可达的静态更新源（内网镜像 / 对象存储），
+// 而**不是**改这段代码 —— 当前没有，所以内网现场请走「手工拷 NetHub.zip」那条路。
+
+// 自动检查更新：启动后查一次，之后每 updateCheckEvery 再查一次。
+//
+// 为什么要自动查：以前只有用户点「关于」卡上那个按钮才查 —— 现场多半不会点，
+// 于是“有新版本”永远没人知道，而漏更新正好会漏掉我们修过的那些坑。
+// 现在查到会挂**常驻告警条**（不自动消失），人不在电脑前回来也能看到。
+//
+// 静默条件（都不挂告警条，也不报错）：
+//   - dev 构建：没有版本号可比（UpdateInfo.Dev）
+//   - 查不到：客户内网直连不了更新源是常态，不该因此报红
+const updateCheckEvery = 6 * time.Hour
+
+func (b *Backend) startUpdateCheck() {
+	go func() {
+		// 先等几秒：刚启动时引擎、hosts、DNS 都在装配，没必要跟它们抢日志与网络
+		time.Sleep(8 * time.Second)
+		for {
+			b.checkUpdateQuiet()
+			time.Sleep(updateCheckEvery)
+		}
+	}()
+}
+
+// checkUpdateQuiet 查一次并把结果缓存下来（Notices 会用它决定挂不挂告警条）。
+func (b *Backend) checkUpdateQuiet() {
+	info := b.CheckUpdate()
+	b.updInfoMu.Lock()
+	b.updInfoLast = info
+	b.updInfoMu.Unlock()
+
+	switch {
+	case info.Dev:
+		b.a.Bus.Detail("更新检查：本地/dev 构建，跳过版本比较")
+	case info.HasNew:
+		b.a.Bus.Warn("发现新版本 %s（当前 %s）—— 界面顶部会挂一条告警，到「设置 → 关于」可一键更新",
+			info.Latest, info.Current)
+	default:
+		// 查不到也走这条（Note 里会写清原因），不报错、不打扰
+		b.a.Bus.Detail("更新检查：%s（当前 %s）", strings.TrimSpace(info.Note), info.Current)
+	}
+}
+
+// updateInfo 最近一次自动检查的结果（没查过就返回零值 = 不挂告警条）。
+func (b *Backend) updateInfo() UpdateInfo {
+	b.updInfoMu.Lock()
+	defer b.updInfoMu.Unlock()
+	return b.updInfoLast
+}
 
 // UpdateInfo 检查更新的结果。
 type UpdateInfo struct {
@@ -176,10 +233,10 @@ func (b *Backend) GetUpdateStatus() UpdateStatus {
 // 装载驱动之前再换）。失败时上一版本还在（nethub.exe.old），可一键回滚。
 // UpdateNow 执行一次完整更新：查 → 下载 → 校验 → 暂存 → 换 exe → 拉起新进程。
 //
-// 拆成独立函数（而不是只写成 Backend 方法）是为了两件事：
-//  1. 命令行也能跑（nethub.exe -update-now）—— 支持远程指导客户"跑一下这个命令"，
-//     也让"一键更新"这条链路本身可以被脚本化验证（不需要人去点界面）。
-//  2. 复用同一份逻辑，避免界面和命令行各写一遍、只修一处。
+// 为什么拆成独立函数（而不是只写成 Backend 方法）：本意是让命令行也能跑、
+// 以及避免界面和命令行各写一遍只修一处。
+// **但命令行入口从没接上**（`-update-now` 这个 flag 在 main.go 里不存在），
+// 现在唯一的调用方是界面按钮 `DownloadAndUpdate`。
 //
 // 返回新版本号；没有新版本时返回 "" 且 err 为 nil。progress 可为 nil。
 func UpdateNow(progDir string, progress func(stage, text string, pct int)) (string, error) {

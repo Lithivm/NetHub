@@ -35,11 +35,15 @@ type App struct {
 	// Notify 由 GUI 注入：把状态变化变成系统托盘通知。
 	Notify func(title, text string, kind NotifyKind)
 
-	mu        sync.Mutex
-	running   bool
-	lastErr   string        // 最近一次失败的原因（启动失败 / 拦截中断）；成功启动后清空
-	hostsStop chan struct{} // 停 hosts 定期自检
-	lock      *engineLock   // 引擎互斥（非 nil = 本进程在跑引擎）
+	mu      sync.Mutex
+	running bool
+	lastErr string // 最近一次失败的原因（启动失败 / 拦截中断）；成功启动后清空
+	// driverBlocked 最近一次失败是不是“内核驱动被安全软件拦了”。
+	// 单独存一个 bool 而不是让界面去认错误文本：那句“系统资源不足”是杀软伪造的，
+	// 想让界面报准就不能靠匹配中文；前端只读 GetState 的 driverBlocked。
+	driverBlocked bool
+	hostsStop     chan struct{} // 停 hosts 定期自检
+	lock          *engineLock   // 引擎互斥（非 nil = 本进程在跑引擎）
 
 	// opMu 串行化 Start/Stop/Restart（托盘、界面、-quit 都会分别调）。
 	// 不加锁时，“停止”与“启动”会同时动 Engine 与 hosts 自检，结果是半死状态。
@@ -121,10 +125,20 @@ func (a *App) LastError() string {
 	return a.lastErr
 }
 
-// setLastError 记下（或清空）最近一次异常。
-func (a *App) setLastError(s string) {
+// DriverBlocked 最近一次失败是不是“内核驱动被安全软件拦了”。
+// 界面据此挂常驻告警条（把完整修法摆出来），而不是让人从日志里挖。
+func (a *App) DriverBlocked() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.driverBlocked
+}
+
+// setLastError 记下（或清空）最近一次异常。cause 是原始错误（没有就给 nil），
+// 只用它判定“是不是驱动被拦”，不拿它的文本给用户看。
+func (a *App) setLastError(s string, cause error) {
 	a.mu.Lock()
 	a.lastErr = s
+	a.driverBlocked = errors.Is(cause, engine.ErrDriverBlocked)
 	a.mu.Unlock()
 }
 
@@ -223,7 +237,7 @@ func (a *App) startLocked() error {
 		// 否则界面上会冒出一个红色的 Error 状态，而其实一切正常（实测日志里就是这条先出现）。
 		a.Bus.Warn("启动被拒：%v", err)
 		if !errors.Is(err, ErrEngineBusy) {
-			a.setLastError(err.Error())
+			a.setLastError(err.Error(), err)
 		}
 		return err
 	}
@@ -252,7 +266,7 @@ func (a *App) startLocked() error {
 
 // startLockedInner 真正装配并启动引擎（调用方必须已持有引擎锁）。
 func (a *App) startLockedInner() error {
-	a.setLastError("") // 重新启动就清掉上次的错
+	a.setLastError("", nil) // 重新启动就清掉上次的错
 	a.mu.Lock()
 	if a.running {
 		a.mu.Unlock()
@@ -262,7 +276,7 @@ func (a *App) startLockedInner() error {
 
 	if err := a.Cfg.Validate(); err != nil {
 		a.Bus.Error("配置不合法: %v", err)
-		a.setLastError("配置不合法：" + err.Error())
+		a.setLastError("配置不合法："+err.Error(), err)
 		a.notify("启动失败", err.Error(), NotifyError)
 		return err
 	}
@@ -276,7 +290,7 @@ func (a *App) startLockedInner() error {
 	}
 	if err := a.Rules.Load(toRules(a.Cfg.RoutesSnapshot())); err != nil {
 		a.Bus.Error("规则载入失败: %v", err)
-		a.setLastError("规则载入失败：" + err.Error())
+		a.setLastError("规则载入失败："+err.Error(), err)
 		a.notify("启动失败", err.Error(), NotifyError)
 		return err
 	}
@@ -302,7 +316,7 @@ func (a *App) startLockedInner() error {
 	// 2) 拦截
 	if err := a.Engine.Start(); err != nil {
 		a.Bus.Error("%v", err)
-		a.setLastError("拦截启动失败：" + err.Error())
+		a.setLastError("拦截启动失败："+err.Error(), err)
 		a.notify("拦截启动失败", err.Error(), NotifyError)
 		return err
 	}

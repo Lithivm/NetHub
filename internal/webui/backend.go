@@ -68,6 +68,11 @@ type Backend struct {
 	roMu     sync.RWMutex
 	readOnly bool
 	roWhy    string
+
+	// updInfoLast / updInfoMu：最近一次**自动**检查更新的结果（Notices 用它决定挂不挂“有新版本”）。
+	// 刻意不叫 upd 开头：包外那个 updMu/updStatus 是“一键更新的进度”，两回事。
+	updInfoMu   sync.Mutex
+	updInfoLast UpdateInfo
 }
 
 func New(a *app.App) *Backend {
@@ -93,6 +98,10 @@ func (b *Backend) OnStartup(ctx context.Context) {
 	// 后台巡检 Clash 绕过覆盖：内网被交给 Clash 是红线（DNS 外泄/封号风险），
 	// 不能只靠用户打开界面才发现 —— 每 60 秒查一次（只读注册表，不发网络请求）
 	go b.clashWatch()
+
+	// 自动检查更新：启动后几秒查一次，之后每 6 小时一次；有新版本就挂**常驻告警条**。
+	// 以前只有用户点「关于」那个按钮才查 —— 现场多半不点，于是永远没人知道有新版本。
+	b.startUpdateCheck()
 
 	// 起来就把服务拉起（计划任务开机自启靠这个：进程起来 = 隧道就绪）
 	go func() {
@@ -178,6 +187,13 @@ type StateView struct {
 	// ReadOnlyWhy 是一句人话说明，直接显示给用户。
 	ReadOnly    bool   `json:"readOnly"`
 	ReadOnlyWhy string `json:"readOnlyWhy"`
+	// DriverBlocked 最近一次启动失败是“内核驱动被安全软件拦了”（错误码 1450/1275）。
+	// 前端据此挂常驻告警条 —— 那个错误码字面像内存不够，实际基本只有杀软一种原因。
+	DriverBlocked bool   `json:"driverBlocked"`
+	DriverPath    string `json:"driverPath"` // 驱动文件绝对路径（告警条上「复制驱动路径」用）
+	// Notices 该挂的常驻告警（后端出数据、前端只渲染；多条时前端取 Priority 最高的）。
+	// 跟着这个 1.5 秒的轮询走，就不用再单开一条 60 秒的横幅轮询。
+	Notices []Notice `json:"notices"`
 }
 
 type ChainView struct {
@@ -322,22 +338,25 @@ func (b *Backend) GetState() StateView {
 	_, hostsInFile, _, _ := hostsmgr.Read()
 	readOnly, why := b.readOnlyState()
 	return StateView{
-		Running:     running,
-		Error:       errText,
-		PoolWarm:    warm,
-		PoolHits:    taken,
-		Relay:       relay,
-		TotalConns:  total,
-		ActiveConns: active,
-		ConfigPath:  b.a.Cfg.Path(),
-		LogPath:     b.a.Bus.FilePath(),
-		Theme:       b.a.Cfg.Theme(),
-		HostsPath:   hostsmgr.Path(),
-		HostsInFile: hostsInFile,
-		Autostart:   b.autostartCached(),
-		AutoDetail:  b.autostartDetailCached(),
-		ReadOnly:    readOnly,
-		ReadOnlyWhy: why,
+		Running:       running,
+		Error:         errText,
+		PoolWarm:      warm,
+		PoolHits:      taken,
+		Relay:         relay,
+		TotalConns:    total,
+		ActiveConns:   active,
+		ConfigPath:    b.a.Cfg.Path(),
+		LogPath:       b.a.Bus.FilePath(),
+		Theme:         b.a.Cfg.Theme(),
+		HostsPath:     hostsmgr.Path(),
+		HostsInFile:   hostsInFile,
+		Autostart:     b.autostartCached(),
+		AutoDetail:    b.autostartDetailCached(),
+		ReadOnly:      readOnly,
+		ReadOnlyWhy:   why,
+		DriverBlocked: b.a.DriverBlocked(),
+		DriverPath:    engine.DriverSysPath(),
+		Notices:       b.Notices(),
 	}
 }
 

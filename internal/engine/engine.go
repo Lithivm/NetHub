@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/imgk/divert-go"
+	"golang.org/x/sys/windows"
 
 	"nethub/internal/config"
 	"nethub/internal/logbus"
@@ -293,7 +294,18 @@ func (e *Engine) logStatsSummary() {
 		}
 		fmt.Fprintf(&b, "%s:%d", x.chain, x.n)
 	}
-	e.bus.Info("stats: total=%d new=%d active=%d chain=%s", total, total-prev, active, b.String())
+	// 两张会随运行时间变化的表（名字表 / 假 IP 池）也报出来 ——
+	// 客户机连跑几个月，"到底住不住"要看的就是这几个数，光看进程内存看不出是哪个表在涨。
+	// 详见 local/memwatch.ps1 的采样与 KB 的长跑结论。
+	names, fakeUsed, fakeCap := 0, 0, 0
+	if e.names != nil {
+		names = len(e.names.Status())
+	}
+	if e.fake != nil {
+		fakeUsed, fakeCap = e.fake.Stats()
+	}
+	e.bus.Info("stats: total=%d new=%d active=%d names=%d fake=%d/%d chain=%s",
+		total, total-prev, active, names, fakeUsed, fakeCap, b.String())
 }
 
 // fillMissingProcs 给“还在活动、但进程名还没查到”的连接补一次查询（janitor 调）。
@@ -454,6 +466,14 @@ type Engine struct {
 	// proc 端口→进程（A20）：只在规则里写了进程条件时才查（见 rules.NeedsProc）
 	proc *proc.Resolver
 
+	// sockH / reflectH：WinDivert 的 SOCKET 与 REFLECT 层（详见 divertwatch.go：
+	// SOCKET 的 connect 事件给进程名，REFLECT 答"还有谁在用 WinDivert"）。
+	sockH, reflectH *divert.Handle
+	// divertPeers 别的在用 WinDivert 的进程（pid → 层/优先级/flags）；
+	// peersReported 表示"启动时那批"已经汇总过（之后的才逐条告警，避免开机刷一屏）。
+	divertPeers   map[uint32]divertPeer
+	peersReported bool
+
 	// names 域名↔IP 映射（域名规则 + 把域名交给上游都用它）
 	names *dnsmap.Map
 
@@ -612,6 +632,10 @@ func (e *Engine) Start() error {
 	if e.proc != nil {
 		e.proc.Start() // 端口→进程 的后台刷新（幂等、可重启）
 	}
+	// SOCKET 层：应用 connect() 那一刻就带 PID，补上"刷表 500ms 快照"那段盲窗（见 divertwatch.go）。
+	e.startDivertNameFeed()
+	// REFLECT 层：把"还有谁在用 WinDivert"变成一句确定的话（拦包被抢时不再靠猜）。
+	e.startDivertReflect()
 
 	// 1) 先起 relay，拿到真实端口（端口可能配的是 0=自动分配，过滤器要用它）
 	ln, err := net.Listen("tcp", e.cfg.RelayAddr())
@@ -766,7 +790,9 @@ func (e *Engine) Start() error {
 					e.dnsBox = openDNSBlackbox(dnsBlackboxPath(), 4<<20)
 					e.bus.Info("DNS 接管：黑匣子已开启（%s）—— 每个查询/每次回答都记在里面", dnsBlackboxPath())
 				}
-				e.bus.Info("dns.takeover: started observe=shared-sniff inject=filter-false range=%s", e.fake.Range())
+				e.bus.Info("dns.takeover: started observe=shared-sniff inject=filter-false range=%s"+
+					"（只答命中通配规则的名字：A 给假 IP；其余类型一律答“没有这条记录”——"+
+					"AAAA 是防应用走 IPv6 绕过我们，其它类型是防 SVCB/HTTPS 的 ipv4hint 把真实地址漏出去）", e.fake.Range())
 				e.startLoop("dnsTakeoverGuard", e.dnsTakeoverGuard)
 			}
 		}
@@ -805,6 +831,8 @@ func (e *Engine) Stop() {
 	mainStop := e.mainStop
 	dyn, dynStop := e.dynHandle, e.dynStop
 	inj := e.injector
+	sockH, reflectH := e.sockH, e.reflectH
+	e.sockH, e.reflectH = nil, nil
 	done := e.done
 	running := make([]net.Conn, 0, len(e.relayConns))
 	for c := range e.relayConns {
@@ -832,6 +860,13 @@ func (e *Engine) Stop() {
 	}
 	if inj != nil {
 		inj.Close()
+	}
+	// SOCKET / REFLECT 的 Recv 也靠关句柄唤醒（同一招）。
+	if sockH != nil {
+		sockH.Close()
+	}
+	if reflectH != nil {
+		reflectH.Close()
 	}
 	e.dnsBox.Close()
 	if dynStop != nil {
@@ -1704,7 +1739,19 @@ func (e *Engine) takeoverQuery(pkt []byte, addr *divert.Address) bool {
 	case 28:
 		ansIP = nil // AAAA：答“没有这条记录”，否则应用可能走 IPv6 绕过我们
 	default:
-		return true
+		// 其余类型（TXT / SRV / MX / **HTTPS-SVCB** …）也一律答“没有这条记录”，
+		// **不放原查询出去**。
+		//
+		// 为什么（2026-09-28 复核发现的一个真泄漏面）：HTTPS/SVCB 记录里能带
+		// `ipv4hint` / `ipv6hint`（RFC 9460）—— 应用拿到它就能直连真实 IP，绕过我们。
+		// 原来这里 `return true` 让原查询照常发出去，等于把“本该走链”的名字的真实地址
+		// 漏给了应用。Proxifier 对同一件事有个专门的开关「block non A/AAAA DNS queries」。
+		//
+		// 影响面只限**命中通配规则**的名字（不命中的在上面就 return 了），
+		// 而这些名字本来就要接管，应用连它们靠的是 A/AAAA。
+		ansIP = nil
+		e.bus.Detail("dns.takeover: name=%s qtype=%s answer=NOERROR/empty（防空地址从 SVCB/HTTPS 的 ipv4hint 漏出去）",
+			q.Name, dnsTypeName(q.Type))
 	}
 	resp := buildDNSResponse(pkt, info, q, ansIP)
 	if resp == nil {
@@ -1728,7 +1775,7 @@ func (e *Engine) takeoverQuery(pkt []byte, addr *divert.Address) bool {
 	if e.dnsBox != nil {
 		e.dnsBox.Writef("已回答 %s → %v（已注入应答）", q.Name, ansIP)
 	}
-	e.noteTookOver(q.Name)
+	e.noteTookOver(q.Name, q.Type)
 	return true
 }
 
@@ -2258,8 +2305,8 @@ const (
 	dnsProbePortHi = 53910
 )
 
-// noteTookOver 第一次接管某个名字时说一行（带名字与假 IP），之后静默计数。
-func (e *Engine) noteTookOver(name string) {
+// noteTookOver 第一次接管某个名字时说一行，之后静默计数。
+func (e *Engine) noteTookOver(name string, qtype uint16) {
 	e.mu.Lock()
 	if e.tookSeen == nil {
 		e.tookSeen = map[string]bool{}
@@ -2274,10 +2321,36 @@ func (e *Engine) noteTookOver(name string) {
 	}
 	ip, _ := e.fake.IPFor(name)
 	if ip == nil {
-		e.bus.Info("dns.takeover: name=%s qtype=AAAA answer=NOERROR/empty", name)
+		// 非 A 查询走这条：AAAA（防走 IPv6）或其它类型（防 SVCB/HTTPS 的 ipv4hint 漏地址）。
+		// 报**真实的 qtype**，不要写死 AAAA —— 否则现场看到这条会以为只可能是 AAAA。
+		e.bus.Info("dns.takeover: name=%s qtype=%s answer=NOERROR/empty", name, dnsTypeName(qtype))
 		return
 	}
 	e.bus.Info("dns.takeover: name=%s fake_ip=%s ttl=%s", name, ip, dnsFakeTTL)
+}
+
+// dnsTypeName DNS 查询类型的短名（只列我们日志里会碰到的几种）。
+func dnsTypeName(t uint16) string {
+	switch t {
+	case 1:
+		return "A"
+	case 5:
+		return "CNAME"
+	case 12:
+		return "ANY"
+	case 15:
+		return "MX"
+	case 16:
+		return "TXT"
+	case 28:
+		return "AAAA"
+	case 33:
+		return "SRV"
+	case 65:
+		return "HTTPS(SVCB)"
+	default:
+		return fmt.Sprintf("type%d", t)
+	}
 }
 
 // ───────────────────────── 名字反查：假 IP 优先 ─────────────────────────
@@ -2978,7 +3051,10 @@ func (e *Engine) checkUnrelayed() {
 		e.bus.Error("   %s （链 %s，%s，已等 %.1fs）", b.dst, b.chain, who, b.since.Seconds())
 	}
 	e.bus.Error("   怎么办：① 把内网网段加进 Clash 等代理的「绕过/直连」列表（否则它们的内核钩子会先把包吃掉）；" +
-		"② 安全软件里信任 nethub.exe 与 WinDivert64.sys（含 TUN 类驱动）；③ 确认没有同时开着第二个 nethub。")
+		"② 安全软件里放行 nethub.exe 与 WinDivert64.sys（火绒 6.0 的驱动要在「系统防护 → 漏洞驱动拦截 → 例外驱动」里加，只加信任区不够）；" +
+		"③ 确认没有同时开着第二个 nethub；" +
+		"④ 看日志开始的 `reflectwatch:` 那行 —— 它会列出本机**还有谁在用 WinDivert**（那是最可能抢包的；" +
+		"注意 Clash 的 TUN 与杀软驱动不在那个列表里，它们不用 WinDivert）。")
 
 	// 应用内也提一句（同一分钟内只说一次，避免刷屏）
 	if e.Notify != nil {
@@ -3075,8 +3151,64 @@ func portFilter(ps []rules.PortRange) string {
 	return strings.Join(out, " or ")
 }
 
-// openDivert 打开 WinDivert；首次安装驱动会失败一次（服务被创建但启动失败，
-// 报 ERROR_NO_SYSTEM_RESOURCES），所以这里带重试 + 主动拉起服务。
+// ErrDriverBlocked 表示 WinDivert 驱动装不上，而且**几乎总是安全软件在内核层把它拦了**。
+//
+// 为什么值得单独一个哨兵错误：WinDivert 这时报的是 1450 ERROR_NO_SYSTEM_RESOURCES
+// （「系统资源不足，无法完成请求的服务」），字面把人往内存/权限/“残留状态”上带 ——
+// 实测（火绒 6.0）内核池完全健康、以管理员跑、服务条目干净、驱动签名有效，照样 1450。
+// 真正的原因要看杀软自己的日志：火绒把 WinDivert64.sys 判成 BYOVD_network_redirect
+// 并写了 modblock（原话在 C:\ProgramData\Huorong\Sysdiag\log.db-wal 里）。
+//
+// 有它之后，上层就能把“驱动被拦”和“别的原因起不来”分开报，而不是让现场去猜。
+var ErrDriverBlocked = errors.New("内核驱动被安全软件拦下")
+
+// isDriverBlocked 判断这个错是不是“被安全软件拦了”。
+//
+// 两个码都算：1275 ERROR_DRIVER_BLOCKED（WinDivert 文档点名的“安全软件拦截”）、
+// 1450 ERROR_NO_SYSTEM_RESOURCES（火绒拦驱动时回的就是它）。
+// 按错误码判，不按英文消息认 —— 消息随系统语言变，正则一漂就是虚警。
+func isDriverBlocked(err error) bool {
+	if err == nil {
+		return false
+	}
+	var de divert.Error
+	if errors.As(err, &de) {
+		return de == divert.Error(windows.ERROR_DRIVER_BLOCKED) ||
+			de == divert.Error(windows.ERROR_NO_SYSTEM_RESOURCES)
+	}
+	// 兜底：包装过一层、错误码拿不到了，再认一次消息里最不可能误伤的那几个词。
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "no_system_resources") || strings.Contains(s, "driver blocked") ||
+		strings.Contains(s, "insufficient system resources")
+}
+
+// DriverSysPath 驱动文件在哪（安全软件白名单要填的就是它）。
+// 给界面「复制驱动路径」与诊断报告用 —— 它们是同一个文件，只能有一处定义。
+func DriverSysPath() string { return driverSysPath() }
+
+// driverSysPath 本程序旁边那个驱动文件 —— 安全软件的“例外/白名单”要填的就是它。
+// 注意：**不是** nethub.exe。
+func driverSysPath() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return "WinDivert64.sys"
+	}
+	return filepath.Join(filepath.Dir(exe), "WinDivert64.sys")
+}
+
+// driverBlockHint 驱动被拦时给的那几句 —— 要能照着直接做完。
+//
+// 特意不写“重启系统试试”：那个提示在真因是杀软时会把人带偏一整天。
+func driverBlockHint() string {
+	return "  这不是真的缺资源（内核池/内存都可能是健康的）。这个错误码基本只有一种原因：" +
+		"安全软件把内核驱动拦了 —— 它按文件判定，跟你把程序装在哪个目录、改不改名无关。\n" +
+		"    火绒 6.0：系统防护 → 漏洞驱动拦截 → 例外驱动 → 添加 " + driverSysPath() + "\n" +
+		"    360 / 腾讯管家：在驱动（内核）防护白名单里放行同一个文件\n" +
+		"  只把 nethub.exe 加进信任区没用：拦的是**内核装驱动那一步**（火绒日志里发起方是 System）。\n" +
+		"  加完要重启安全软件 —— 例外/白名单是它启动时读进内存的，不重启不生效。\n" +
+		"  想看杀软自己的判定：C:\\ProgramData\\Huorong\\Sysdiag\\log.db-wal 里搜 WinDivert64。"
+}
+
 // driverPathMatches 看驱动服务登记的 .sys 是不是就在当前目录旁边。
 // 返回 (路径相符/无法判断, 当前登记的路径)。
 func driverPathMatches() (bool, string) {
@@ -3128,8 +3260,7 @@ func serviceState(name string) string {
 // 而且这个错误会把人往“杀毒软件拦截”上带，很难查。
 // 所以：先 stop，**轮询等它真的 STOPPED**，再 delete，**再等它真的消失**。
 func rebuildDriverService(bus *logbus.Bus, oldPath string) {
-	exe, _ := os.Executable()
-	want := filepath.Join(filepath.Dir(exe), "WinDivert64.sys")
+	want := driverSysPath()
 	bus.Warn("驱动服务指向旧路径（%s），重建为 %s", oldPath, want)
 
 	_ = winrun.Command("sc", "stop", "WinDivert").Run()
@@ -3153,6 +3284,8 @@ func waitFor(cond func() bool, timeout time.Duration) bool {
 	return false
 }
 
+// openDivert 打开 WinDivert；首次安装驱动会失败一次（服务被创建但启动失败，
+// 报 ERROR_NO_SYSTEM_RESOURCES），所以这里带重试 + 主动拉起服务。
 func openDivert(bus *logbus.Bus, filter string) (*divert.Handle, error) {
 	var lastErr error
 	// 先直接试。【不要】一上来就动驱动服务 —— 服务重建本身有风险，
@@ -3183,15 +3316,12 @@ func openDivert(bus *logbus.Bus, filter string) (*divert.Handle, error) {
 		time.Sleep(time.Duration(attempt) * 700 * time.Millisecond)
 	}
 
-	// 报错要能指向正确方向：1450 在内存池健康时通常不是“真的缺资源”，
-	// 而是残留状态或安全软件拦截，别让人去查内存。
-	hint := ""
-	if strings.Contains(lastErr.Error(), "resources") {
-		hint = "\n  提示：内存池健康时出现这个错误，通常不是真的缺资源，而是：\n" +
-			"    ① 反复加载/卸载驱动留下的残留状态 → 重启系统即可恢复\n" +
-			"    ② 安全软件（火绒/360 等）拦截了驱动加载 → 检查其拦截记录，把 nethub.exe 与 WinDivert 加入信任"
+	// 报错要能指向正确方向：1450/1275 基本只有一种原因 —— 安全软件把驱动在内核层拦了，
+	// 别让人去查内存、权限或“残留状态”。
+	if isDriverBlocked(lastErr) {
+		return nil, fmt.Errorf("%w（已重试 6 次）: %v\n%s", ErrDriverBlocked, lastErr, driverBlockHint())
 	}
-	return nil, fmt.Errorf("重试 6 次仍失败: %w%s", lastErr, hint)
+	return nil, fmt.Errorf("重试 6 次仍失败: %w", lastErr)
 }
 
 func parseIPv4(p []byte) (src, dst net.IP, ihl int, proto uint8, ok bool) {

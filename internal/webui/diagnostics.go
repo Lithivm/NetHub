@@ -9,8 +9,10 @@ import (
 	"strings"
 	"time"
 
+	"nethub/internal/engine"
 	"nethub/internal/gostbat"
 	"nethub/internal/hostsmgr"
+	"nethub/internal/winrun"
 )
 
 // ExportDiagnostics 打一个"一键诊断包"：脱敏配置 + 日志 + 环境与运行态报告。
@@ -63,14 +65,18 @@ func (b *Backend) ExportDiagnostics() (string, error) {
 	}
 	// 4) 说明
 	_ = addZip(zw, "说明.txt", []byte(`诊断包里有什么：
-  报告.txt          —— 版本、系统、规则、链路上游、健康与巡检结果、hosts 与 Clash 共存状态
-  config.脱敏.yaml  —— 你的配置，上游凭据已抹掉（auth= 与 user:pass 都替换成 ***）
-  内核过滤器.txt     —— 内核当前实际在拦什么（一台机器上“规则配了却不生效”的第一手材料）
-  nethub.log        —— 最近的日志（最后 2000 行）
-  nethub.log.1/.2   —— 轮转出去的历史（日志单文件 8 MB 上限，最多 3 个文件）
+  报告.txt           —— 版本、系统、规则、链路上游、健康与巡检结果、hosts 与 Clash 共存状态
+  config.脱敏.yaml    —— 你的配置，上游凭据已抹掉（auth= 与 user:pass 都替换成 ***）
+  内核过滤器.txt      —— 内核当前实际在拦什么（一台机器上“规则配了却不生效”的第一手材料）
+  安全软件白名单.txt  —— 装之前要在杀软里放行哪两个文件（驱动被拦时先看这个）
+  nethub.log         —— 最近的日志（最后 2000 行）
+  nethub.log.1/.2    —— 轮转出去的历史（日志单文件 8 MB 上限，最多 3 个文件）
 
 可以直接发给维护者。里面不含任何上游口令。
 `))
+	// 5) 安全软件白名单（现场装机最容易漏的一步：漏了驱动会被杀软在内核层拦掉，
+	//    程序直接起不来，而错误码“系统资源不足”会把人往内存上带）
+	_ = addZip(zw, "安全软件白名单.txt", []byte(whitelistText()))
 	return name, nil
 }
 
@@ -92,6 +98,19 @@ func (b *Backend) diagReport() string {
 	fmt.Fprintf(&s, "配置：%s\n", b.a.Cfg.Path())
 	fmt.Fprintf(&s, "日志：%s\n", b.a.Bus.FilePath())
 	fmt.Fprintf(&s, "服务：%v   累计连接 %d   活跃 %d\n\n", b.a.Running(), total, active)
+
+	// 内核层：一个是 1450 那个坑的第一手材料（驱动服务状态），
+	// 一个是"还有谁在用 WinDivert"（抢包的候选，见 engine/divertwatch.go）。
+	s.WriteString("── 内核层（WinDivert）──\n")
+	s.WriteString("  " + winDivertServiceLine() + "\n")
+	if peers := b.a.Engine.DivertPeers(); len(peers) == 0 {
+		s.WriteString("  其它 WinDivert 使用者：无（只有本程序）\n")
+	} else {
+		s.WriteString("  其它 WinDivert 使用者（可能抢走本该我们处理的包）：\n")
+		for _, p := range peers {
+			s.WriteString("      " + p + "\n")
+		}
+	}
 
 	s.WriteString("── 配置体检 ──\n")
 	for _, line := range b.a.Cfg.Precheck() {
@@ -149,7 +168,49 @@ func (b *Backend) diagReport() string {
 	_, hostsInFile, _, _ := hostsmgr.Read()
 	fmt.Fprintf(&s, "  hosts：%s（已托管标记：%v）\n", hostsPath, hostsInFile)
 	fmt.Fprintf(&s, "  hosts 托管开关：%v\n", b.a.Cfg.HostsCopy().Manage)
+
+	s.WriteString("\n" + whitelistText())
+	if b.a.DriverBlocked() {
+		s.WriteString("  ⚠ 本次运行的最近一次启动失败就是“驱动被拦”（见 nethub.log 里那行“内核驱动被安全软件拦下”）。\n")
+	}
 	return s.String()
+}
+
+// whitelistText 安全软件白名单清单：要放行哪两个文件、分别加到哪里。
+//
+// 独立成函数是因为它要同时进报告与单独文件，且是**现场装机最容易漏的一步**：
+// 漏了的话驱动会在开机那会儿被杀软拦掉，程序起不来，而错误码会把人带去查内存。
+func whitelistText() string {
+	return "── 安全软件白名单（装之前就该做这一步）──\n" +
+		"  主程序（防被当木马删）：nethub.exe → 杀软的信任区\n" +
+		"  驱动（防被内核层拦）：" + engine.DriverSysPath() + "\n" +
+		"      火绒 6.0：系统防护 → 漏洞驱动拦截 → 例外驱动\n" +
+		"      360 / 腾讯管家：驱动（内核）防护白名单\n" +
+		"      只加信任区不够 —— 火绒会把 WinDivert 判成 BYOVD_network_redirect（漏洞驱动）直接拒加载，\n" +
+		"      这时程序报的是 1450「系统资源不足，无法完成请求的服务」，不是真的缺资源。\n" +
+		"      加完要重启安全软件：例外/白名单是它启动时读进内存的，不重启不生效。\n"
+}
+
+// winDivertServiceLine 驱动服务的现状（一行）：状态 + 上次启动的错误码。
+//
+// 为什么要它：现场那个「报 1450 但内核池健康」的坑，第一手证据就在这个查询里（
+// WIN32_EXIT_CODE 会被 SCM 记下来）—— 诊断包里带上它，收件方不必再让客户跑命令。
+func winDivertServiceLine() string {
+	out, err := winrun.Command("sc", "query", "WinDivert").CombinedOutput()
+	if err != nil {
+		return "驱动服务 WinDivert：查不到（未安装？被安全软件拦了？）"
+	}
+	var parts []string
+	for _, l := range strings.Split(string(out), "\n") {
+		l = strings.TrimSpace(l)
+		if strings.HasPrefix(l, "STATE") || strings.HasPrefix(l, "WIN32_EXIT_CODE") {
+			parts = append(parts, l)
+		}
+	}
+	if len(parts) == 0 {
+		return "驱动服务 WinDivert：状态未知"
+	}
+	return "驱动服务 WinDivert：" + strings.Join(parts, "  ")
 }
 
 // redactConfig 把配置里的凭据抹掉：auth=xxx 与 scheme://user:pass@host 都处理。

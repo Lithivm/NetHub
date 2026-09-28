@@ -24,7 +24,12 @@ Go + **Wails v2**（WebView2 界面）+ **WinDivert**（内核驱动），**仅 
 - **日志分层且去重有数**：普通模式只写连接/启停/状态变化/错错；“详细日志”开关（默认关）
   才记每个直连目标、名字学习、探测过程。内核过滤器只打一行摘要（原文进详细日志与诊断包）；
   被去重的重复项必须补 `suppressed: count=N`。
-- **明确不做**：UDP 中继 · 多跳串联 · TUN/TAP · 域名/正则匹配 · 限速配额 · 反向端口转发 · 上游 mux。
+- **明确不做**：IPv6 · UDP 中继 · 多跳串联 · TUN/TAP · 域名/正则匹配 · 限速配额 · 反向端口转发 · 上游 mux。
+  IPv6 是**我们主动不收**（引擎只做 IPv4，且 DNS 层把 AAAA 答空防应用绕过）—— **不是 WinDivert 的限制**，
+  它的网络层同时管 v4/v6；哪天真要做就是重写拦截层，不是“打开一个开关”。
+- **系统配置红线（新增功能前先过一遍）**：**不得**要求“改路由表 / 抢系统代理 / 写注册表新键”。
+  现在碰系统的只有三处，别再添：WinDivert 驱动服务条目（内核驱动的唯一注册方式）·
+  hosts 文件（可选、可关、停就撤）· 计划任务（开机自启，用户自己开）。
 
 ## 构建与运行
 
@@ -32,10 +37,14 @@ Go + **Wails v2**（WebView2 界面）+ **WinDivert**（内核驱动），**仅 
 export PATH="/c/Program Files/Go/bin:$PATH"                 # git-bash
 go build -tags production -ldflags "-H=windowsgui -s -w" -o run/nethub.exe .
 go test ./internal/...
-pwsh -NoProfile -File ./local/check-ui.ps1                  # 改完前端必须跑（boot 不报错 + 没有未定义的函数）
+pwsh -NoProfile -File ./local/check-ui.ps1                  # 改完前端必须跑（boot 不报错 + 无未定义函数 + **结构断言**：标签成对 / tab↔页面一一对应 / main 下无孤儿）
 pwsh -NoProfile -File ./local/ui-controls-test.ps1          # 勾选/下拉真的调到了后端 + 卡片标题不被挤成两行
-pwsh -NoProfile -File ./local/restart.ps1                   # 优雅重启 + 复测内网目标
+pwsh -NoProfile -File ./local/restart.ps1                   # 快速优雅重启 + 复测内网目标
+pwsh -NoProfile -File ./local/accept.ps1                    # 验收门禁（重启→驱动→连通→热生效→还原）；**退出码 0/非0 可判，发版前必须跑**
+pwsh -NoProfile -File ./local/accept.ps1 -InjectFault        # 门禁自检：故意注入故障，证明它真会失败（防“永远绿灯的假门禁”）
 ./run/nethub.exe -check | -status | -apply <新配置> | -quit   # 控制面：验 / 看 / 切 / 停（不需管理员）
+pwsh -NoProfile -File ./local/deploy.ps1 -Zip <zip> -Autostart -Start -Accept   # 无人值守部署（解压→配置→自启→启动→验收；并把该加的白名单打出来）
+pwsh -NoProfile -File ./local/memwatch.ps1                  # 长跑采样（内存/句柄/名字表/假IP池）→ run/memwatch.csv
 ```
 
 `-status` 里的 `runtime` 块是**运行实例自己写的**（exe 同目录 `runtime.json`）：在不在跑、吃的

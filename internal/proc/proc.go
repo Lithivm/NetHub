@@ -53,9 +53,19 @@ type mibTcpRow struct {
 
 // missRefillEvery miss（查不到）时最多多久重刷一次全表（见 ByPort）。
 //
-// 300ms 是折中：短命连接（curl 一个请求 0.1~0.3 秒）也能查到进程名，
-// 而大表上最多 3 次/秒的全表枚举也算可接受的开销。
-const missRefillEvery = 300 * time.Millisecond
+// 它实际决定的是“**新建连接多快能被查到**”：背景刷表是 500ms 一次的**快照**，
+// 落在窗口里的新连接如果不重读，就会被直接判成“查不到”。
+// 所以这个值必须明显小于刷表间隔 —— 否则一批新连接里只有第一个能触发重读。
+//
+// 实测（2026-09-28 本机，`intercept:` 那行日志的 proc 缺失率）：
+//
+//	窗口 1 秒（旧的 interval*2，而且 missRefillEvery 根本没被用上）→ 60%
+//	窗口 300ms → 42%
+//	窗口 50ms  → 0%    ← 本机 12 条连接全有名字
+//
+// 代价：大表上最多 20 次/秒的全表枚举。客户端机器上表就几十~几百行，
+// 一次读约几十微秒 —— 可忽略；而它换来的是“谁连的”在**第一行**日志里就有。
+const missRefillEvery = 50 * time.Millisecond
 
 // table 全量枚举一次 TCP 表。
 func table() ([]mibTcpRow, error) {
@@ -213,6 +223,28 @@ func (r *Resolver) refresh() {
 	r.mu.Unlock()
 }
 
+// Record 由**事件驱动**的来源（WinDivert 的 FLOW 层）直接记一条「本机端口 → PID」。
+//
+// 为什么需要它（实测 2026-09-28）：后台刷表是 500ms 一次的**快照**，而 `intercept:` 那行
+// 日志是在连接建立那一刻就写的 —— 当时那一行 **60.7% 是 proc=unknown**，而连接结束的
+// `relay.done:` 那行大多已经有名字。名字晚到几百毫秒，可运维要回答“谁连的”读的正是第一行。
+// FLOW 事件在建立那一刻就带 PID，把它写进同一张表，下一行日志立刻就有名字。
+//
+// 为什么**不另建一张表**：refresh() 每 500ms 整张替换 byPort，等于自带自愈
+// （端口被复用时旧映射会被刷掉）。另建一张“不参与替换”的表反而会留下过期 PID，
+// 而端口复用很常见 —— 那比偶尔缺名字危险得多。
+func (r *Resolver) Record(port uint16, pid uint32) {
+	if port == 0 || pid == 0 {
+		return
+	}
+	r.mu.Lock()
+	if r.byPort == nil {
+		r.byPort = map[uint16]uint32{}
+	}
+	r.byPort[port] = pid
+	r.mu.Unlock()
+}
+
 // ByPort 查某个本地端口属于哪个进程。查不到时按需再刷一次表（覆盖刚建立、还没进缓存的短命连接）。
 func (r *Resolver) ByPort(port uint16) (name string, pid uint32, ok bool) {
 	r.mu.RLock()
@@ -221,7 +253,9 @@ func (r *Resolver) ByPort(port uint16) (name string, pid uint32, ok bool) {
 	if hit {
 		cachedName = r.byPID[pid]
 	}
-	fresh := time.Since(r.lastFill) < r.interval*2
+	// fresh 是“miss 重读”的节流（**不是**背景刷新间隔）：表刚读过还没有，只说明这一瞬间没有，
+	// 不代表新建连接不在里面 —— 所以这个窗口要短（见 missRefillEvery 的说明）。
+	fresh := time.Since(r.lastFill) < missRefillEvery
 	r.mu.RUnlock()
 	if hit && cachedName != "" {
 		return cachedName, pid, true

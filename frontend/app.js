@@ -523,6 +523,7 @@ async function refreshState() {
   }
   refreshState._warned = false;
   state = Object.assign(state, s);
+  renderNotices(s.notices);   // 告警条的内容由后端决定（见 notices.go）
 
   const on = !!s.running;
   const bad = !on && !!(s.error);
@@ -1349,33 +1350,60 @@ async function delRoute(i) {
 
 /* ═══════════════ Clash 共存检测 ═══════════════ */
 
-/* 常驻告警条：把"内网可能被 Clash 接管"这种问题从日志提到界面上。
-   它不自动消失 —— 只有检测结果变成 OK 才隐。这样即使人当时不在电脑前，回来也能看到。
-   右边的 × 可以关掉；关掉只对本次运行有效（按标题记，条件恢复后自动忘掉）。 */
+/* 常驻告警条：把"内网可能被 Clash 接管""内核驱动被安全软件拦了"这类红线从日志提到界面上。
+   它不自动消失 —— 只有条件恢复才隐。这样即使人当时不在电脑前，回来也能看到。
+   右边的 × 可以关掉；关掉只对本次运行有效（按 ID 记，条件恢复后自动忘掉）。
+
+   内容由**后端**决定（GetState.notices）：谁发现问题谁在那里登记一条，
+   前端只管"取优先级最高的那条显示、把它画出来"。
+   为什么不让前端自己判：加第一条时前端判过一次、加第二条又是一套，
+   再加第三条就得继续动这里的布局与优先级逻辑 —— 判据应该离数据近。 */
 const noticeDismissed = new Set();
-function noticeBar(kind, title, text, actionLabel, actionFn) {
+let noticeKey = '';
+
+// 告警条的「详情」：跳到那张卡所在的**页**并滚过去。
+// 按元素自己找页（`closest('.page')`）—— 以前写死跳"诊断页"，而那两张卡恰好都在诊断页；
+// 现在「有新版本」那条要跳到**设置页**的关于卡，写死就跳错了。
+function jumpCard(id) {
+  const c = document.getElementById(id);
+  if (!c) return;
+  const page = c.closest('.page');
+  if (page) showPage(page.id.replace(/^page-/, ''));
+  c.scrollIntoView({ block: 'center' });
+}
+
+/* 画一条告警：优先取 priority 最大的那条（一起喊会互相覆盖）。list 为空 → 隐藏。 */
+function renderNotices(list) {
   const bar = document.getElementById('noticeBar');
-  if (!kind) {
-    noticeDismissed.clear();   // 问题没了 → 忘掉之前关过的，下次再出还会提示
+  const items = (list || []).slice().sort((a, b) => (b.priority || 0) - (a.priority || 0));
+  const spec = items[0] || null;
+  // 轮询每秒都会调到这里：内容没变就别重建 DOM，否则会打断正在点的按钮
+  const key = spec ? spec.id + '|' + spec.kind + '|' + spec.title + '|' + (spec.text || '') : '';
+  if (key === noticeKey) return;
+  noticeKey = key;
+
+  if (!spec) {
+    noticeDismissed.clear();   // 问题都没了 → 忘掉之前关过的，下次再出还会提示
     bar.replaceChildren();
     bar.hidden = true;
     return;
   }
-  if (noticeDismissed.has(title)) { bar.hidden = true; return; }
+  if (noticeDismissed.has(spec.id)) { bar.replaceChildren(); bar.hidden = true; return; }
+
   bar.replaceChildren();
   bar.hidden = false;
-  bar.className = 'noticebar is-' + kind;
-  bar.appendChild(el('span', 'nb-title', title));
-  if (text) bar.appendChild(el('span', 'nb-text', text));
-  if (actionLabel && actionFn) bar.appendChild(btn(actionLabel, 'btn btn-xs', actionFn));
-  bar.appendChild(btn('详情', 'btn btn-xs', () => {
-    // 直接跳到「诊断」页的 Clash 共存卡，那里有逐条走向与修法
-    showPage('diag');
-    const c = document.getElementById('clashDetail');
-    if (c) c.scrollIntoView({ block: 'center' });
-  }));
+  bar.className = 'noticebar is-' + (spec.kind || 'warn');
+  bar.appendChild(el('span', 'nb-title', spec.title));
+  if (spec.text) bar.appendChild(el('span', 'nb-text', spec.text));
+  if (spec.copy) {
+    bar.appendChild(btn(spec.copyLabel || '复制', 'btn btn-xs', async () => {
+      try { await navigator.clipboard.writeText(spec.copy); toast('已复制', spec.copy, 'success'); }
+      catch (e) { toast('复制失败，请手动复制', spec.copy, 'warn'); }
+    }));
+  }
+  if (spec.card) bar.appendChild(btn('详情', 'btn btn-xs', () => jumpCard(spec.card)));
   const close = btn('×', 'nb-close', () => {
-    noticeDismissed.add(title);
+    noticeDismissed.add(spec.id);
     bar.replaceChildren();
     bar.hidden = true;
   });
@@ -1384,39 +1412,10 @@ function noticeBar(kind, title, text, actionLabel, actionFn) {
   bar.appendChild(close);
 }
 
-/* 内网被交给别的代理会出问题（DNS 外泄/封号），所以用它驱动常驻横幅。 */
-function updateClashBar(v) {
-  if (!v) { noticeBar(null); return; }
-  if (v.coverage && v.coverage.ok === false && (v.coverage.missed || []).length) {
-    const missed = v.coverage.missed;
-    noticeBar('error', '内网可能被其他代理接管',
-      missed.length + ' 个目标不在系统代理的绕过列表里：' + missed.slice(0, 4).join('; ') +
-        (missed.length > 4 ? ' 等' : '') +
-        '　—— 这几个不在系统代理的绕过列表里，按域名访问内网时可能先交给它（它用自己的 DNS 解析，内网域名有出内网的风险）',
-      '复制要加的网段', async () => {
-        const list = (v.bypassList || missed.join(';'));
-        try {
-          await navigator.clipboard.writeText(list);
-          toast('已复制', '粘到 Clash Verge → 设置 → 系统代理 → 绕过地址：' + list, 'success');
-        } catch (e) {
-          toast('复制失败，请手动复制', list, 'warn');
-        }
-      });
-    return;
-  }
-  noticeBar(null);
-}
-
-
-/* 开机与轮询用：只读注册表的覆盖结果（便宜），驱动常驻告警条。 */
-async function refreshClashBar() {
-  let c;
-  try { c = await call('ClashCoverage'); } catch (e) { return; }
-  updateClashBar({ coverage: c, bypassList: ((c && c.missed) || []).join(';') });
-}
+/* 告警条的内容一律来自后端 GetState.notices —— 这里不再自己判“是不是驱动被拦 / 内网被接管”。
+   （那两套判断曾经各写一份，见 notices.go 的注释。） */
 
 function renderClash(v) {
-  updateClashBar(v);
   const st = document.getElementById('clashState');
   const good = v.allCorrect && v.publicOk;
   st.textContent = (v.headline ? v.headline + '\n' : '') + (v.verdict || '');
@@ -1566,6 +1565,19 @@ const HELP = {
       '单位：前两个是秒，第三个是毫秒，最后一个是个数。改完点「保存并重启」生效。',
     ],
   },
+  udp: {
+    title: '为什么不做 UDP 中继、同行怎么做',
+    paras: [
+      '【一句话】不是"还没做"，是两头都堵：上游不肯转，我们这边也只能拦。',
+      '上手（上游）：实测 4 条上游的 SOCKS5 UDP ASSOCIATE 都回"成功"（reply_code=0、还会回一个绑定端口，说明它确实建了 UDP socket），但真发一个包过去，4/4 收不到回包。',
+      '其中一条回的绑定地址是上游自己内网里的 Docker 地址（172.17.0.2）—— 客户端根本路由不到，这是结构性不可达，不是"防火墙差一点"。',
+      '下手（我们）：我们只拦 TCP。本该走链的目标上的 UDP 443（QUIC）会被拦下 + 记一行 quic.block，让应用回落 TCP；单条规则可以勾「不拦 QUIC」放行。',
+      '【同行怎么做】Proxifier 用的是 Windows 官方网络框架（WFP），它对 UDP 也只有两种模式 —— 忽略（漏出去）与丢弃，**从不转发**。同类产品都只能做到这个程度。',
+      '只有 UDP 的业务（比如某些音视频/游戏类协议）谁都代理不了；真要接，得换成 TUN 类全局接管工具，或者上游支持能承载 UDP 的封装（如 MASQUE）——两者都会推翻我们"按目标分流、不抢系统"的设计。',
+      '所以这一页的探测不是"准备上 UDP"，而是留个判据：哪天上游真能中继了（✓ 可用），再回来讨论。',
+      '拦下时**别承诺"应用立刻回落"**：ICMP 端口不可达实测到不了应用，回落速度完全由客户端自己决定。能承诺的只有拦下。',
+    ],
+  },
   service: {
     title: 'headless 模式（Windows 服务）',
     paras: [
@@ -1573,6 +1585,17 @@ const HELP = {
       '配置与日志跟界面版完全共用（都在程序目录），所以两边看到的是同一份东西。',
       '安装 / 卸载需要管理员权限 —— 本程序本来就是以管理员跑的，点就行。',
       '开机自启建议二选一：计划任务（登录后静默启动，能看托盘）或本服务（无人登录也能跑）；两个都开反而会有两份。',
+    ],
+  },
+  whitelist: {
+    title: '为什么光加信任区不够、加完为什么要重启杀软',
+    paras: [
+      '主程序要进信任区（防被当木马删）；驱动要进「例外驱动」—— 两个不同的功能，得分别放行。',
+      '火绒 6.0 起多了一道「漏洞驱动拦截」（BYOVD，防别人家的易攻击驱动被拿来作恶），它有自己独立的例外表，不受信任区影响；WinDivert 就在那份名单里，所以会被拦。',
+      '拦的是内核装驱动那一步（火绒日志里发起方是 System），所以把 nethub.exe 加白名单无效，要放行的是 .sys 本身。',
+      '被拦时报的是 1450「系统资源不足」—— 字面像内存或权限问题，其实不是。',
+      '火绒日志 C:\\ProgramData\\Huorong\\Sysdiag\\log.db-wal 里搜 WinDivert64，能看到 modblock 与 BYOVD_network_redirect。',
+      '加完必须重启杀软（例外表是它启动时读进内存的）；验证用管理员命令行 sc start WinDivert，再重启一次电脑复测。',
     ],
   },
   clash: {
@@ -1769,7 +1792,17 @@ function wire() {
     document.getElementById('logBox').replaceChildren();
   };
   document.getElementById('btnOpenLog').onclick = () => call('OpenLogDir').catch(fail);
+  // 白名单卡：把驱动路径复制出去（火绒的「添加例外驱动」是个文件选择框，粘路径/按路径找都行）
+  document.getElementById('btnCopySysPath').onclick = async () => {
+    const p = state.driverPath || 'WinDivert64.sys';
+    try { await navigator.clipboard.writeText(p); toast('已复制', p, 'success'); }
+    catch (e) { toast('复制失败，请手动复制', p, 'warn'); }
+  };
+  document.getElementById('btnOpenProgDir').onclick = () => call('OpenProgramDir').catch(fail);
   // 详细日志（Normal / Verbose）：只影响之后写下的行，不碰过滤器、不重启
+  //
+  // 悬停提示与提示语只写"切换至 xx 模式"：那两处以前各塞了一整句日志分级说明——
+  // 用户在界面上要的是"点下去会发生什么"，不是一份分级说明书。
   async function loadLogVerbose() {
     const cb = document.getElementById('setLogVerbose');
     if (!cb) return;
@@ -1777,16 +1810,13 @@ function wire() {
       const s = await call('GetSettings');
       if (s) cb.checked = !!s.logVerbose;
     } catch (e) { /* 读不到就维持现状，不打断日志页 */ }
+    cb.title = cb.checked ? '切换至普通模式' : '切换至详细模式';
   }
   const cbVerbose = document.getElementById('setLogVerbose');
   if (cbVerbose) cbVerbose.onchange = async (ev) => {
     try {
       await call('SetLogVerbose', ev.target.checked);
-      toast(ev.target.checked ? '已打开详细日志' : '已回到精简日志',
-        ev.target.checked
-          ? '之后会多记：每个直连目标、学到的域名、探测过程等'
-          : '只写连接、启停、状态变化与错误',
-        'success');
+      toast(ev.target.checked ? '已切换至详细模式' : '已切换至普通模式', '', 'success');
       await loadLogVerbose();
     } catch (e) { fail(e); }
   };
@@ -1807,6 +1837,8 @@ function wire() {
   bind('btnHelpDial', 'dial');
   bind('btnHelpService', 'service');
   bind('btnHelpClash', 'clash');
+  bind('btnHelpUdp', 'udp');
+  bind('btnHelpWhitelist', 'whitelist');
   bind('btnHelpHosts', 'hosts');
   bind('btnHelpRule', 'rule');
 
@@ -2068,10 +2100,8 @@ async function boot() {
   applyTheme('light');
 
   // 状态轮询【先注册】：任何面板加载失败都不能让状态栏冻在启动前的快照上。
+  // 告警条也跟着它走（后端在 GetState 里算好），所以不再单开一条 60 秒的横幅轮询。
   setInterval(refreshState, 1500);
-  // Clash 绕过覆盖：开机就要挂常驻告警条，之后每分钟复核一次（只读注册表，很便宜）
-  refreshClashBar();
-  setInterval(refreshClashBar, 60000);
   // 连接列表只看当前页：不在这一页就不拉，省得白跑
   setInterval(() => {
     const p = document.getElementById('page-conn');
