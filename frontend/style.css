@@ -328,11 +328,14 @@ code, .mono { font-family: var(--font-mono); }
   box-shadow: 0 1px 3px rgba(0, 0, 0, .18);
   /* 位置走 transform（合成器上跑，不碰布局）；只有切到不等宽的「诊断」时宽度才会变 */
   transform: translateX(0);
-  transition: transform var(--dur-tab) var(--ease-soft), width var(--dur-tab) var(--ease-soft);
+  transition: transform var(--dur-tab) var(--ease-soft), width var(--dur-tab) var(--ease-soft),
+              opacity 120ms var(--ease-soft);
   will-change: transform;
   z-index: 0; pointer-events: none;
 }
 .tabs .tab-thumb.no-anim { transition: none; }
+/* 没有选中的 tab（在「设置」页）：胶囊收起来。留一条淡出，切回任一 tab 时再淡入。 */
+.tabs .tab-thumb.is-out { opacity: 0; }
 .tabs .tab { position: relative; z-index: 1; transition: background var(--ease), color 120ms var(--ease-soft); }
 /* 出去的标签立刻变灰，进来的等胶囊快到了再变白 —— 否则白字会先落在浅底上闪一下 */
 .tabs .tab.is-active { background: transparent; box-shadow: none; color: var(--on-primary);

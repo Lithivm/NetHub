@@ -140,7 +140,12 @@ function positionTabThumb(opts) {
   if (!nav) return;
   const thumb = nav.querySelector('.tab-thumb');
   const active = nav.querySelector('.tab.is-active');
-  if (!thumb || !active) return;
+  if (!thumb) return;
+  // 没有任何 tab 选中（在「设置」页 —— 那个齿轮是顶栏的 .tab-top，不在 #tabs 这一组里）：
+  // 胶囊必须收起来。**只 return 是不够的**：它会留在原处，而底下那个 tab 的 is-active
+  // 已经摘掉 → 灰字压在蓝胶囊上（用户反馈的“点了设置，运行日志四个字变灰”）。
+  if (!active) { thumb.classList.add('is-out'); return; }
+  thumb.classList.remove('is-out');
   const immediate = !!(opts && opts.immediate);
   if (immediate) {
     thumb.classList.add('no-anim');
