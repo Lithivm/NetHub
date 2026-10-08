@@ -637,6 +637,65 @@ code, .mono { font-family: var(--font-mono); }
 .seg .seg-btn.is-active:hover { color: var(--on-primary); }
 @media (prefers-reduced-motion: reduce) { .seg .seg-thumb, .seg .seg-btn { transition: none; } }
 
+/* ══ 接管状态卡（诊断页）——**仪表盘，不是日志** ══
+   这张卡的形态约束（用户明确提的："它不能看起来像是另类的日志"）：
+   · 只有当前值：在不在 / 几个 / 几百 —— 没有时间戳，没有追加行，不滚动
+   · 布尔用**状态点与胶囊**表达，不用 ✓/✗ 拼成文字流水
+   · 数值原地更新（刷新时只换内容，不重排、不跳高）
+   · 唯一的“一大块文字”是折叠里的过滤器原文，且明确标了它是原文 */
+.verdict {
+  display: flex; align-items: center; gap: var(--s2);
+  font-size: var(--fs); font-weight: 600; color: var(--body);
+}
+.verdict .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted-soft); flex: 0 0 auto; }
+.verdict .dot.ok { background: var(--success); }
+.verdict .dot.warn { background: var(--warning); }
+.verdict .dot.error { background: var(--error); }
+.verdict .vtext { color: var(--ink); }
+.verdict .vsub { font-weight: 400; font-size: var(--fs-sm); color: var(--muted); }
+
+/* “需要注意”：一条一行，色条 + 一句话（不写成日志行，也不带时间） */
+.warnbox { display: flex; flex-direction: column; gap: var(--s1); }
+.warnbox:empty { display: none; }
+.warnrow {
+  display: flex; align-items: baseline; gap: var(--s2);
+  padding: var(--s2) var(--s3); border-radius: var(--r-btn);
+  font-size: var(--fs-sm); background: var(--warning-soft); color: var(--warning);
+}
+.warnrow.is-error { background: var(--error-soft); color: var(--error); }
+.warnrow .wicon { flex: 0 0 auto; font-weight: 700; }
+
+/* 三面明细：label 左、值右，等宽数字对齐 */
+.faces { display: grid; gap: var(--s3); grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+.face { border: 1px solid var(--hairline-soft); border-radius: var(--r-card); padding: var(--s3); background: var(--card); }
+.face-head { display: flex; align-items: baseline; gap: var(--s2); font-weight: 600; color: var(--ink); }
+.face-head .fnote { font-weight: 400; font-size: var(--fs-xs); color: var(--muted); }
+.mrows { margin-top: var(--s2); display: flex; flex-direction: column; gap: 3px; }
+.mrow { display: flex; align-items: baseline; gap: var(--s2); font-size: var(--fs-sm); }
+.mrow .mlabel { flex: 0 0 92px; color: var(--muted); }
+.mrow .mval { font-family: var(--font-mono); color: var(--body); user-select: text; }
+.mrow .mval.is-bad { color: var(--error); font-weight: 600; }
+.mrow .mval.is-warn { color: var(--warning); }
+/* 句柄/开关：一颗一颗的小胶囊，亮 = 在 */
+.chip {
+  display: inline-block; padding: 1px var(--s2); margin-right: 4px;
+  border-radius: var(--r-pill); font-family: var(--font-mono); font-size: var(--fs-xs);
+  border: 1px solid var(--hairline); color: var(--muted-soft); background: var(--canvas-soft);
+}
+.chip.on { border-color: var(--success); color: var(--success); background: var(--success-soft); }
+
+/* 折叠的原文（唯一允许出现大块文字的地方） */
+.rawfold { margin-top: var(--s3); border-top: 1px solid var(--hairline-soft); padding-top: var(--s2); }
+.rawfold > summary { cursor: pointer; font-size: var(--fs-sm); color: var(--muted); user-select: none; }
+.rawfold > summary:hover { color: var(--body); }
+.rawbody { margin-top: var(--s2); }
+.rawbody pre {
+  margin: 0; padding: var(--s2); border-radius: var(--r-input); background: var(--canvas-soft);
+  font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--body);
+  white-space: pre-wrap; word-break: break-all; user-select: text;
+}
+.rawbody .rlabel { font-size: var(--fs-xs); color: var(--muted); margin: var(--s2) 0 2px; }
+
 .pathline { display: flex; gap: var(--s3); align-items: baseline; }
 .pathline code {
   font-size: var(--fs-xs); color: var(--body);

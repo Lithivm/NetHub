@@ -174,6 +174,26 @@
   <section class="page" id="page-diag">
     <div class="settings-scroll">
 
+      <!-- 接管状态：**不是日志**。只放当前值（在不在 / 几个 / 条数），用状态点与徽章表达；
+           没有时间戳、不追加行、不滚动——数值原地更新（进页刷 + 可见时 5s 轮询）。
+           上面一排是“需要注意”，没异常就一句话；下面三面是明细。 -->
+      <div class="card" id="cardRuntime">
+        <div class="card-head">
+          <h2>接管状态</h2>
+          <span class="hint">引擎自述的当前状态：内核面 / 名字面 / 连接面</span>
+          <div class="spacer"></div>
+          <span class="hint mono" id="rtUptime">—</span>
+          <button class="btn btn-sm" id="btnRtRefresh">刷新</button>
+        </div>
+        <div class="verdict" id="rtVerdict">正在读取…</div>
+        <div class="warnbox" id="rtWarn"></div>
+        <div class="faces" id="rtFaces"></div>
+        <details class="rawfold" id="rtRaw">
+          <summary>内核过滤器原文（按需读取，3 KB 一行）</summary>
+          <div class="rawbody" id="rtRawBody">展开后才会去后端取。</div>
+        </details>
+      </div>
+
       <!-- 装之前就该做的一步：装完才发现驱动被拦，从日志里挖半天（错误码还是误导人的“系统资源不足”）。
            所以既挂一行静态清单（随时能查），也在真的被拦时用顶部告警条把人带到这里。 -->
       <div class="card" id="cardWhitelist">

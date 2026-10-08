@@ -164,7 +164,7 @@ function showPage(name) {
   positionTabThumb();
   if (name === 'log') { scrollLogToEnd(); loadLogLevel(); }
   if (name === 'conn') { loadConns(); loadCountDirect(); loadQuicBlock(); }
-  if (name === 'diag') { precheckConfig(true); loadTargetHealth(); loadPatrol(); loadLastSelfTest(); }
+  if (name === 'diag') { precheckConfig(true); loadTargetHealth(); loadPatrol(); loadLastSelfTest(); loadRuntimeStatus(); }
 }
 
 /* ═══════════════ 规则智能：最具体优先 / 命中查询 ═══════════════ */
@@ -337,6 +337,142 @@ async function savePatrol() {
     toast(on.checked ? '已启用自动巡检' : '已关闭自动巡检',
       on.checked ? '间隔 ' + iv.value : '需要时点「立即巡检」', 'success');
   } catch (e) { fail(e); }
+}
+
+/* ═══════════════ 接管状态（诊断页的仪表盘）═══════════════
+
+   形态约束（用户明确要求：“它不能看起来像是另类的日志”）：
+   · 只放**当前值**（在不在 / 几个 / 几百），没有时间戳、不追加行、不滚动
+   · 布尔用胶囊与状态点表达，不拼 ✓/✗ 文字流水
+   · 每次刷新**原地换内容**（不重排、不跳高）；轮询只在诊断页可见时跑
+   · 唯一的大块文字是折叠里的过滤器原文，且标明了它是原文 */
+
+function rtChip(on, text) {
+  return el('span', 'chip' + (on ? ' on' : ''), text);
+}
+
+function rtRow(label, value, cls) {
+  const row = el('div', 'mrow');
+  row.appendChild(el('span', 'mlabel', label));
+  row.appendChild(el('span', 'mval' + (cls ? ' ' + cls : ''), value));
+  return row;
+}
+
+function rtFace(title, note, rows) {
+  const box = el('div', 'face');
+  const head = el('div', 'face-head');
+  head.appendChild(el('span', null, title));
+  head.appendChild(el('span', 'fnote', note));
+  box.appendChild(head);
+  const list = el('div', 'mrows');
+  rows.forEach(r => list.appendChild(r));
+  box.appendChild(list);
+  return box;
+}
+
+function rtList(m) {
+  const ks = Object.keys(m || {});
+  if (!ks.length) return '无';
+  return ks.sort().map(k => k + ' ' + m[k]).join(' · ');
+}
+
+function renderRuntime(st) {
+  const errs = (st.warnings || []).filter(w => w.severity === 'error').length;
+  const warns = (st.warnings || []).length - errs;
+  const kind = !st.running ? 'error' : (errs ? 'error' : (warns ? 'warn' : 'ok'));
+
+  // ① 结论条：一句话 + 一个状态点（不是一行日志）
+  const v = document.getElementById('rtVerdict');
+  const text = !st.running ? '引擎没在跑'
+    : (kind === 'ok' ? '接管正常' : (errs ? errs + ' 项要处理' : warns + ' 项值得看一眼'));
+  v.replaceChildren(
+    el('span', 'dot ' + kind),
+    el('span', 'vtext', text),
+    el('span', 'vsub', kind === 'ok' ? '内核 / 名字 / 连接三面都在' : '')
+  );
+  document.getElementById('rtUptime').textContent = st.uptime ? '已运行 ' + st.uptime : '—';
+
+  // ② 需要注意：一条一行（色条 + 一句话）
+  const wb = document.getElementById('rtWarn');
+  wb.replaceChildren();
+  (st.warnings || []).forEach(w => {
+    const row = el('div', 'warnrow' + (w.severity === 'error' ? ' is-error' : ''));
+    row.appendChild(el('span', 'wicon', w.severity === 'error' ? '!' : '·'));
+    row.appendChild(el('span', null, w.text));
+    wb.appendChild(row);
+  });
+
+  // ③ 三面明细
+  const k = st.kernel || {}, n = st.names || {}, c = st.conns || {}, r = st.rules || {};
+  const kernel = rtFace('内核面', '包有没有到我们手上', [
+    (() => {
+      const row = el('div', 'mrow');
+      row.appendChild(el('span', 'mlabel', '句柄'));
+      const val = el('span', 'mval');
+      [['main', k.main], ['dyn', k.dyn], ['dns', k.inject], ['socket', k.socket], ['reflect', k.reflect]]
+        .forEach(([name, on]) => val.appendChild(rtChip(on, name)));
+      row.appendChild(val);
+      return row;
+    })(),
+    rtRow('规则 / 区间', (r.total || 0) + ' 条规则 → ' + (k.ranges || 0) + ' 个区间' +
+      (k.bytes ? '（原文 ' + Math.round(k.bytes / 1024 * 10) / 10 + ' KB）' : ''), (k.ranges ? '' : 'is-bad')),
+    rtRow('还有谁在用驱动', (k.peers && k.peers.length) ? k.peers.join('、') : '只有我们', (k.peers && k.peers.length) ? 'is-warn' : ''),
+    rtRow('直连 / QUIC 阻断', (k.direct ? '直连统计开' : '直连统计关') + ' · ' + (k.quicBlock ? '拦 QUIC' : '不拦 QUIC')),
+  ]);
+
+  const newest = (n.newestSec === undefined || n.newestSec === null || n.newestSec < 0)
+    ? '还没学到过' : n.newestSec + 's 前';
+  const names = rtFace('名字面', '域名通配 / DNS 接管灵不灵', [
+    rtRow('名字表', (n.count || 0) + ' 个' + ((n.stale || n.failed) ? '（过期 ' + n.stale + ' · 失败 ' + n.failed + '）' : ''),
+      n.failed ? 'is-warn' : ''),
+    rtRow('最近学到', newest),
+    rtRow('通配规则 / 接管', (n.wildcards ? '有通配' : '没有通配') + ' · ' + (n.takeover ? 'DNS 接管开' : 'DNS 接管关')),
+    rtRow('假 IP 池', (n.fakeCap ? n.fakeUsed + ' / ' + n.fakeCap + '　' + (n.fakeRange || '') : '未启用')),
+  ]);
+
+  const seen = (c.procKnown || 0) + (c.procUnknown || 0);
+  const conns = rtFace('连接面', '谁在连、走了哪条链', [
+    rtRow('连接', (c.total || 0) + ' 累计 · ' + (c.active || 0) + ' 活跃'),
+    rtRow('每链', rtList(c.perChain)),
+    rtRow('进程名', seen ? (c.procKnown + '/' + seen + ' 能查到') : '还没有活连接',
+      (seen && c.procUnknown * 5 > seen) ? 'is-warn' : ''),
+    rtRow('进程表', (c.procPorts || 0) + ' 端口 · ' + (c.procPids || 0) + ' PID'),
+  ]);
+
+  document.getElementById('rtFaces').replaceChildren(kernel, names, conns);
+}
+
+async function loadRuntimeStatus() {
+  if (!document.getElementById('rtFaces')) return;
+  let st;
+  try { st = await call('GetRuntimeStatus'); }
+  catch (e) { document.getElementById('rtVerdict').textContent = '读不到状态：' + ((e && e.message) || e); return; }
+  renderRuntime(st || {});
+}
+
+// 折叠区：展开时才去取原文（3 KB 一行，不能跟着轮询走；展开过就不重复取）
+async function loadKernelDetail() {
+  const fold = document.getElementById('rtRaw');
+  const body = document.getElementById('rtRawBody');
+  if (!fold.open || fold.dataset.loaded) return;
+  body.textContent = '读取中…';
+  let d;
+  try { d = await call('GetKernelDetail'); }
+  catch (e) { body.textContent = '读取失败：' + ((e && e.message) || e); return; }
+  const add = (label, text) => {
+    body.appendChild(el('div', 'rlabel', label));
+    const pre = el('pre');
+    pre.textContent = text || '（无）';
+    body.appendChild(pre);
+  };
+  body.replaceChildren();
+  add('覆盖的地址区间（' + ((d.ranges || []).length) + ' 个）—— 这些之外的目标，包根本到不了我们手上',
+    (d.ranges || []).join('\n'));
+  if ((d.dynRanges || []).length) {
+    add('通配域名当前覆盖到的 IP（' + d.dynRanges.length + ' 个）', d.dynRanges.join('\n'));
+  }
+  add('主过滤器原文 —— “这个包到底有没有被内核送过来”，就这一行说了算', d.filter);
+  fold.dataset.loaded = '1';
 }
 
 /* ═══════════════ 配置体检 / 备份 ═══════════════ */
@@ -1940,7 +2076,16 @@ function wire() {
     try { await navigator.clipboard.writeText(txt); toast('已复制', '探测结果已复制到剪贴板', 'success'); }
     catch { toast('复制失败', '手动选中上面的文本复制即可', 'warn'); }
   };
-  document.getElementById("btnCopyPrecheck").onclick = copyPrecheck;
+  const btnRt = document.getElementById('btnRtRefresh');
+  if (btnRt) btnRt.onclick = () => loadRuntimeStatus();
+  const rtRaw = document.getElementById('rtRaw');
+  if (rtRaw) rtRaw.ontoggle = () => loadKernelDetail();
+  // 诊断页：接管状态（仪表盘）—— 只在页面可见时刷（与连接页同一套做法）
+  setInterval(() => {
+    const p = document.getElementById('page-diag');
+    if (p && p.classList.contains('is-active')) loadRuntimeStatus();
+  }, 5000);
+  document.getElementById('btnCopyPrecheck').onclick = copyPrecheck;
   document.getElementById('btnSvcInstall').onclick = async () => {
     if (!await confirmBox('安装为 Windows 服务',
         '装成服务后会随开机自动启动（无人登录也跑，无界面）。确定吗？', false, '安装')) return;

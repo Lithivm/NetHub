@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -97,5 +98,35 @@ func TestFeatureWiring(t *testing.T) {
 	// 服务状态（未安装）
 	if st := b.GetService(); st.State == "" {
 		t.Error("服务状态不该为空")
+	}
+
+	// 接管状态卡（诊断页）：引擎没在跑时也要能取，而且应当直接说“没在跑”，
+	// 不能满屏 0 让人以为“一切正常、只是没流量”。
+	rt := b.GetRuntimeStatus()
+	if rt.Running {
+		t.Error("测试环境里引擎不该是运行中")
+	}
+	if len(rt.Warnings) == 0 || rt.Warnings[0].Kind != "engine.stopped" {
+		t.Errorf("引擎没在跑时必须有一条 engine.stopped 提示，得到 %+v", rt.Warnings)
+	}
+	// 折叠区（按需取原文）也不能炸
+	if d := b.GetKernelDetail(); d.Filter != "" && d.Ranges == nil {
+		t.Errorf("覆盖区间清单不该是 nil：%+v", d)
+	}
+
+	// 前端是按这些 JSON 键取值的：标签写错 = 界面上那一格永远是空的，而编译期看不出来
+	buf, err := json.Marshal(rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{
+		`"running"`, `"uptime"`, `"kernel"`, `"ranges"`, `"peers"`, `"quicBlock"`,
+		`"names"`, `"newestSec"`, `"fakeCap"`, `"wildcards"`, `"takeover"`,
+		`"conns"`, `"perChain"`, `"procUnknown"`, `"procPorts"`,
+		`"rules"`, `"shadowed"`, `"warnings"`, `"severity"`,
+	} {
+		if !strings.Contains(string(buf), key) {
+			t.Errorf("接管状态的 JSON 里缺键 %s —— 前端那一格会是空的", key)
+		}
 	}
 }

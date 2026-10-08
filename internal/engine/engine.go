@@ -370,6 +370,8 @@ type Engine struct {
 	// mainFilter 当前主过滤器原文：重载时比对，没变就不折腾句柄（省一次开/关）。
 	mainStop   chan struct{}
 	mainFilter string
+	// mainRanges 主过滤器里的地址区间数（诊断页“接管状态”卡直显，不用重算）
+	mainRanges int
 	// dynHandle 第二只句柄：只装「通配域名当前覆盖到的 IP」。
 	// 通配域名没法主动解析，只能等观察到应用的 DNS 应答才知道 IP，
 	// 所以它必须可热替换（先开新的、再关旧的，中间不丢包）。
@@ -422,6 +424,8 @@ type Engine struct {
 	statTotal   uint64
 	statActive  int
 	statPerRule map[string]uint64
+	// startedAt 本次启动的时刻（诊断页“运行时长”用）。
+	startedAt time.Time
 	// statSummaryAt 上一次“5 分钟概览”时的累计连接数（算增量用）。
 	statSummaryAt uint64
 
@@ -691,7 +695,8 @@ func (e *Engine) Start() error {
 	}
 	e.mu.Lock()
 	stop := make(chan struct{})
-	e.ln, e.relay, e.handle, e.mainStop, e.mainFilter, e.run = ln, relay, h, stop, filter, true
+	e.ln, e.relay, e.handle, e.mainStop, e.mainFilter, e.mainRanges, e.run = ln, relay, h, stop, filter, nrange, true
+	e.startedAt = time.Now()
 	e.mu.Unlock()
 
 	e.bus.Info("engine.start: relay=%s rules=%d", relay, len(e.ruleSet().List()))
@@ -780,6 +785,14 @@ func (e *Engine) setFatal(err error) {
 	e.fatalMu.Lock()
 	e.fatal = err
 	e.fatalMu.Unlock()
+}
+
+// ReasonNotRunning 没在跑的原因（给诊断页直显，省得人猜是停了还是崩了）。
+func (e *Engine) ReasonNotRunning() string {
+	if err := e.Fatal(); err != nil {
+		return "（拦截已中断：" + err.Error() + "）"
+	}
+	return "（未启动？在界面上点“接管引擎”或看设置页的服务状态）"
 }
 
 // Fatal 拦截是否已意外中断；中断后界面不该再显示“运行中”。
@@ -934,7 +947,7 @@ func (e *Engine) ReloadRules(ns *rules.Set) error {
 	oldH, oldStop := e.handle, e.mainStop
 	stop := make(chan struct{})
 	e.rules.Store(ns)
-	e.handle, e.mainStop, e.mainFilter = nh, stop, newFilter
+	e.handle, e.mainStop, e.mainFilter, e.mainRanges = nh, stop, newFilter, nrange
 	e.wg.Add(1) // 在锁内 Add：Stop 要先拿 startMu，所以不会与 wg.Wait() 并发
 	e.mu.Unlock()
 
