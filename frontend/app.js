@@ -406,9 +406,10 @@ function renderRuntime(st) {
   const k = st.kernel || {}, n = st.names || {}, c = st.conns || {}, r = st.rules || {};
   const kernel = rtFace('内核面', '内核拦截与过滤器', [
     (() => {
-      const row = el('div', 'mrow');
+      // 这一行放 5 个胶囊：label 独占一行，胶囊在下面用满整个面宽（否则会被 label 挤到换行）
+      const row = el('div', 'mrow mrow-stack');
       row.appendChild(el('span', 'mlabel', '过滤器句柄'));
-      const val = el('span', 'mval');
+      const val = el('span', 'mval chips');
       [['main', k.main], ['dyn', k.dyn], ['dns', k.inject], ['socket', k.socket], ['reflect', k.reflect]]
         .forEach(([name, on]) => val.appendChild(rtChip(on, name)));
       row.appendChild(val);

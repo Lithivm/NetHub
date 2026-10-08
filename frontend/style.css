@@ -677,10 +677,16 @@ code, .mono { font-family: var(--font-mono); }
 .mrow .mval { font-family: var(--font-mono); color: var(--body); user-select: text; min-width: 0; }
 .mrow .mval.is-bad { color: var(--error); font-weight: 600; }
 .mrow .mval.is-warn { color: var(--warning); }
-/* 句柄/开关：一颗一颗的小胶囊，亮 = 在 */
+/* 句柄/开关：一颗一颗的小胶囊，亮 = 在
+   间距一律用 flex gap（不用 margin-right）—— ① 等距；② 换行时自动有行距，
+   不会出现“下一行的胶囊贴上上一行”那种看着像重叠的样子（2026-10-08 踩过）。 */
+.mval.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+/* 胶囊撑不下时（窄窗口）：label 独占一行，胶囊换到下一行用满宽度 */
+.mrow.mrow-stack { flex-direction: column; align-items: flex-start; gap: 3px; }
 .chip {
-  display: inline-block; padding: 1px var(--s2); margin-right: 4px;
+  display: inline-block; padding: 1px var(--s2);
   border-radius: var(--r-pill); font-family: var(--font-mono); font-size: var(--fs-xs);
+  line-height: 1.5;
   border: 1px solid var(--hairline); color: var(--muted-soft); background: var(--canvas-soft);
 }
 .chip.on { border-color: var(--success); color: var(--success); background: var(--success-soft); }
