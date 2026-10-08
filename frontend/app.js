@@ -162,7 +162,7 @@ function showPage(name) {
     t.classList.toggle('is-active', t.dataset.page === name));
   document.querySelectorAll('.page').forEach(p => p.classList.toggle('is-active', p.id === 'page-' + name));
   positionTabThumb();
-  if (name === 'log') { scrollLogToEnd(); loadLogVerbose(); }
+  if (name === 'log') { scrollLogToEnd(); loadLogLevel(); }
   if (name === 'conn') { loadConns(); loadCountDirect(); loadQuicBlock(); }
   if (name === 'diag') { precheckConfig(true); loadTargetHealth(); loadPatrol(); loadLastSelfTest(); }
 }
@@ -1546,7 +1546,7 @@ async function loadSettings() {
   // 只用界面上确实存在的字段（别再引用已被移除的 setRelay，
   // 那会抛 TypeError 把 boot() 整个搞挂，导致状态轮询都注册不上）
   setChecked('setHostsManage', s.hostsManage);
-  setChecked('setLogVerbose', s.logVerbose);
+  setLogLevel(s.logLevel || 'normal', true);
   setValue('setHostsEntries', (s.hostsEntries || []).join('\n'));
   loadAbout();
   setValue('setDialTimeout', s.dialTimeout || 5);
@@ -1554,6 +1554,53 @@ async function loadSettings() {
   setValue('setRaceAfter', s.raceAfter === 0 ? 0 : (s.raceAfter || 300));
   setValue('setWarm', s.warmSessions === 0 ? 0 : (s.warmSessions || 2));
   setValue('setAutoDelay', s.autostartDelay === 0 ? 0 : (s.autostartDelay || 20));
+}
+
+/* ══ 日志档位（三段滑块）══
+   档位定义照抄 Proxifier 的 Normal / Verbose / Debug（见 logbus.Level 的注释）：
+     normal  = 现场面：连接开/关、启停、状态翻转、错误
+     verbose = 判定面：+ 每条连接的规则判定、DNS 请求与应答、名字学习
+     debug   = 内部面：+ 引擎内部状态与装配（过滤器原文、名字表 / 假 IP 池、内核层）
+   只影响**之后**写下的行：不碰过滤器、不重启、也不动已在跑的连接。
+
+   ⚠ 这几个函数必须放在全局（不能像其他接线那样塞进 wire()）：showPage 要调 loadLogLevel。
+   以前 loadLogVerbose 定义在 wire() 里，而 showPage 在外面调它 —— 进日志页时
+   静默抛 ReferenceError（“Script error.”），复选框的初值只能靠启动时那一次 loadSettings。 */
+const LOG_LEVELS = ['normal', 'verbose', 'debug'];
+const LEVEL_BLURB = {
+  normal: '只记连接开/关、启停、状态翻转与错误',
+  verbose: '加上每条连接的规则判定、DNS 请求与应答、名字学习',
+  debug: '再加上引擎内部状态与装配（过滤器原文、名字表 / 假 IP 池、内核层）',
+};
+
+// 胶囊位置/宽度都由 JS 量（与顶部标签条同一套做法）—— 不写死下标，
+// 换字体或改文案时不会错位。页面隐藏时 offsetLeft 是 0，所以进日志页时要重量一次。
+function positionSegThumb(seg, immediate) {
+  const thumb = seg.querySelector('.seg-thumb');
+  const active = seg.querySelector('.seg-btn.is-active');
+  if (!thumb || !active) return;
+  if (immediate) { thumb.classList.add('no-anim'); void thumb.offsetWidth; }
+  thumb.style.transform = 'translateX(' + active.offsetLeft + 'px)';
+  thumb.style.width = active.offsetWidth + 'px';
+  if (immediate) requestAnimationFrame(() => thumb.classList.remove('no-anim'));
+}
+
+function setLogLevel(level, immediate) {
+  const seg = document.getElementById('segLogLevel');
+  if (!seg) return;
+  const want = LOG_LEVELS.indexOf(level) >= 0 ? level : 'normal';
+  seg.querySelectorAll('.seg-btn').forEach(b =>
+    b.classList.toggle('is-active', b.dataset.level === want));
+  positionSegThumb(seg, immediate);
+}
+
+async function loadLogLevel() {
+  const seg = document.getElementById('segLogLevel');
+  if (!seg) return;
+  try {
+    const s = await call('GetSettings');
+    if (s) setLogLevel(s.logLevel || 'normal', true);
+  } catch (e) { /* 读不到就维持现状，不打断日志页 */ }
 }
 
 // 长说明统一放这里；界面上的小字只留一句概括 + 一个“i”按钮。
@@ -1764,7 +1811,11 @@ function wire() {
 
   // 标签
   document.querySelectorAll('.tab').forEach(t => t.onclick = () => showPage(t.dataset.page));
-  window.addEventListener('resize', () => positionTabThumb({ immediate: true }));
+  window.addEventListener('resize', () => {
+    positionTabThumb({ immediate: true });
+    const seg = document.getElementById('segLogLevel');
+    if (seg) positionSegThumb(seg, true);
+  });
   positionTabThumb({ immediate: true });
   // 字体度量定下来后重新量一次（落位，不滑）：否则指示块可能停在旧宽度上
   if (document.fonts && document.fonts.ready) {
@@ -1804,27 +1855,23 @@ function wire() {
     catch (e) { toast('复制失败，请手动复制', p, 'warn'); }
   };
   document.getElementById('btnOpenProgDir').onclick = () => call('OpenProgramDir').catch(fail);
-  // 详细日志（Normal / Verbose）：只影响之后写下的行，不碰过滤器、不重启
-  //
-  // 悬停提示与提示语只写"切换至 xx 模式"：那两处以前各塞了一整句日志分级说明——
-  // 用户在界面上要的是"点下去会发生什么"，不是一份分级说明书。
-  async function loadLogVerbose() {
-    const cb = document.getElementById('setLogVerbose');
-    if (!cb) return;
-    try {
-      const s = await call('GetSettings');
-      if (s) cb.checked = !!s.logVerbose;
-    } catch (e) { /* 读不到就维持现状，不打断日志页 */ }
-    cb.title = cb.checked ? '切换至普通模式' : '切换至详细模式';
+  // 日志档位滑块（normal | verbose | debug）：只接线，函数在全局（见上面那段）。
+  // 点当前档不动（不重复落盘、也不弹提示）。
+  const segLog = document.getElementById('segLogLevel');
+  if (segLog) {
+    segLog.querySelectorAll('.seg-btn').forEach(btn => {
+      btn.onclick = async () => {
+        const lv = btn.dataset.level;
+        if (btn.classList.contains('is-active')) return;   // 点当前档：不重复落盘
+        try {
+          await call('SetLogLevel', lv);
+          setLogLevel(lv);
+          toast('日志档位：' + lv, LEVEL_BLURB[lv] || '', 'success');
+          await loadLogLevel();
+        } catch (e) { fail(e); }
+      };
+    });
   }
-  const cbVerbose = document.getElementById('setLogVerbose');
-  if (cbVerbose) cbVerbose.onchange = async (ev) => {
-    try {
-      await call('SetLogVerbose', ev.target.checked);
-      toast(ev.target.checked ? '已切换至详细模式' : '已切换至普通模式', '', 'success');
-      await loadLogVerbose();
-    } catch (e) { fail(e); }
-  };
   document.getElementById('btnSelfTest').onclick = () => {
     const out = document.getElementById('selfTestOut');
     if (out) out.textContent = '正在自检…（逐条链探真实内网主机）';

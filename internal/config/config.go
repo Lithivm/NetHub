@@ -304,12 +304,15 @@ type HostsCfg struct {
 type UICfg struct {
 	Theme string `yaml:"theme"` // light | dark
 
-	// LogVerbose “详细日志”（Proxifier 的 Normal / Verbose 那个开关，默认关）。
+	// LogLevel 日志档位：normal（默认）| verbose | debug。
 	//
-	// 关着的时候，每个直连目标、学到的名字、名字过期清单这类“重复且对现场结论无影响”
-	// 的行不写（见 logbus.Bus.Detail）—— 日志默认要能一口气读完；
-	// 要排“为什么这个目标没走隧道”这类问题时再打开。
-	LogVerbose bool `yaml:"log_verbose,omitempty"`
+	// 三档的语义、每档装什么，见 logbus.Level 的注释（照抄 Proxifier 的
+	// Normal / Verbose / Debug 定义）。写空 = normal。
+	//
+	// 旧字段（v0.5.x）：log_verbose bool。下面还留着读取兼容，读到 true
+	// 就在 normalize 里折成 verbose，写回时就不再出现。
+	LogLevel   string `yaml:"log_level,omitempty"`
+	LogVerbose bool   `yaml:"log_verbose,omitempty"` // 已弃用，只读
 }
 
 // defaultAutostartDelay 开机自启的默认登录后延迟。
@@ -433,6 +436,21 @@ func (c *Config) normalizeLocked() (bool, error) {
 			return changed, fmt.Errorf("第 %d 条规则: %v", i+1, err)
 		}
 		changed = changed || ch
+	}
+	// 日志档位：认不出的值落成 normal；旧的 log_verbose: true 折成 verbose 后清掉
+	// （空 = normal，不再多写一行进配置文件）。
+	if c.UI.LogLevel == "" && c.UI.LogVerbose {
+		c.UI.LogLevel = "verbose"
+	}
+	if c.UI.LogVerbose {
+		c.UI.LogVerbose = false
+		changed = true
+	}
+	if c.UI.LogLevel != "" {
+		if lv := logLevelOr(c.UI.LogLevel, false); lv != c.UI.LogLevel {
+			c.UI.LogLevel = lv
+			changed = true
+		}
 	}
 	if changed {
 		c.Chains, c.Routes = chains, routes
@@ -2312,18 +2330,34 @@ func (c *Config) Theme() string {
 	return c.UI.Theme
 }
 
-// LogVerbose 是否写详细日志（见 UICfg.LogVerbose）。
-func (c *Config) LogVerbose() bool {
+// LogLevel 日志档位的字面量（normal | verbose | debug）。
+func (c *Config) LogLevel() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.UI.LogVerbose
+	return logLevelOr(c.UI.LogLevel, c.UI.LogVerbose)
 }
 
-// SetLogVerbose 开关详细日志。
-func (c *Config) SetLogVerbose(on bool) {
+// SetLogLevel 定档。认不出的值一律落成 normal。
+func (c *Config) SetLogLevel(s string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.UI.LogVerbose = on
+	c.UI.LogLevel = logLevelOr(s, false)
+}
+
+// logLevelOr 归一化档位字面量，并把旧的 log_verbose: true 折成 verbose。
+func logLevelOr(s string, legacyVerbose bool) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "verbose":
+		return "verbose"
+	case "debug":
+		return "debug"
+	case "normal":
+		return "normal"
+	}
+	if legacyVerbose {
+		return "verbose" // 旧配置迁移：以前只有“详细开/关”两种，开着就是 verbose
+	}
+	return "normal"
 }
 
 // AutostartDelayDur 开机自启的登录后延迟（默认 20s；"0s" = 不延迟；上限 10 分钟）。

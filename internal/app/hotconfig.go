@@ -26,6 +26,7 @@ import (
 
 	"nethub/internal/config"
 	"nethub/internal/engine"
+	"nethub/internal/logbus"
 	"nethub/internal/rules"
 )
 
@@ -105,9 +106,15 @@ func (a *App) ApplyFromDisk() (ApplyResult, error) {
 		return ApplyResult{}, err
 	}
 	a.Cfg.ReplaceFrom(cfg) // 内存也换成新的一份（链/上游是实时读内存的，热重载只管规则）
-	// “详细日志”也得跟着走：它是配置里的一项，外部改文件（或 -apply）改到它时必须生效，
-	// 否则改了开关却什么都没发生（只能重启才能看到区别）。
-	a.Bus.SetVerbose(a.Cfg.LogVerbose())
+	// 日志档位也得跟着走：它是配置里的一项，外部改文件（或 -apply）改到它时必须生效，
+	// 否则改了档位却什么都没发生（只能重启才能看到区别）。
+	//
+	// 档位**变了才写一行**（切到 normal 也写）：v0.5.x 这里是静默的，
+	// 于是“从文件改开关”看起来像没生效 —— 那正是现场会踩的一个坑。
+	if lv := logbus.ParseLevel(a.Cfg.LogLevel()); lv != a.Bus.Level() {
+		a.Bus.SetLevel(lv)
+		a.Bus.Info("日志: 档位已切到 %s（配置文件改动热生效）", lv)
+	}
 	if err := a.Rules.Load(toRules(cfg.RoutesSnapshot())); err != nil {
 		return ApplyResult{}, err
 	}

@@ -694,7 +694,7 @@ func (e *Engine) Start() error {
 	fileText := filter // 给下面的 filterText 用（避免长行里再取一次）
 	e.bus.Info("filter.main: rules=%d ranges=%d tcp_clause=1 udp_quic=%v relay_port=%d bytes=%d",
 		len(e.ruleSet().List()), nrange, e.cfg.QuicBlockEnabled(), port, len(filter))
-	e.bus.Detail("filter.main: %s", filter)
+	e.bus.Debug("filter.main: %s", filter)
 	e.mu.Lock()
 	e.filterText = fileText // 给诊断包用（导出时不必再重算）
 	e.mu.Unlock()
@@ -711,18 +711,20 @@ func (e *Engine) Start() error {
 	e.mu.Unlock()
 
 	e.bus.Info("engine.start: relay=%s rules=%d", relay, len(e.ruleSet().List()))
+	// 规则表 / 链表的内容属于**装配**（debug 档）：它们是 config.yaml 里写了什么，
+	// 不是流量的判定。normal 档只留 engine.start 那一行 —— 否则每次启动先刷一屏。
 	for _, r := range e.ruleSet().List() {
 		switch r.Action {
 		case rules.ActionDirect:
-			e.bus.Info("route: %s action=direct", r.Label())
+			e.bus.Debug("route: %s action=direct", r.Label())
 		case rules.ActionBlock:
-			e.bus.Info("route: %s action=block", r.Label())
+			e.bus.Debug("route: %s action=block", r.Label())
 		default:
-			e.bus.Info("route: %s action=chain/%s", r.Label(), r.Chain)
+			e.bus.Debug("route: %s action=chain/%s", r.Label(), r.Chain)
 		}
 	}
 	for _, ch := range e.cfg.ChainsSnapshot() {
-		e.bus.Info("    链 %s：%d 个上游，策略 %s，探测 %s",
+		e.bus.Debug("    链 %s：%d 个上游，策略 %s，探测 %s",
 			ch.Name, len(ch.Upstreams()), ch.StrategyName(), ch.ProbeInterval())
 	}
 	if e.cfg.BuiltinDirectEnabled() {
@@ -1639,6 +1641,10 @@ func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}, kind loopKind)
 		// 两种都必须原样放回内核，绝不能当入站包改写（会把用户的包改坏）。
 		// 直连流量（仅当开了“统计直连流量”才会被拦到这里）：
 		// 回来的包也要数上，否则界面上永远只有出方向（A15）。
+		if isSyn(flags) {
+			// verbose 档：说清“不拦”不是因为包没到我们手上，而是**没有规则命中**
+			e.routeMatchLog(sport, dst, dport, procName, procPID, "没有规则命中 → 不拦（按系统路由直连）")
+		}
 		if st := e.flow(dport); st != nil && st.action == rules.ActionDirect {
 			st.touch()
 			st.packets.Add(1)
@@ -1673,7 +1679,7 @@ func (e *Engine) dnsLoop() {
 	if !e.trackSniff(h) {
 		return // 已经在停止：直接退出（defer 会关 h）
 	}
-	e.bus.Info("dns.sniff: started mode=read-only scope=answers+queries")
+	e.bus.Debug("dns.sniff: started mode=read-only scope=answers+queries")
 
 	buf := make([]byte, divert.MTUMax)
 	addr := new(divert.Address)
@@ -1719,6 +1725,10 @@ func (e *Engine) takeoverQuery(pkt []byte, addr *divert.Address) bool {
 	if !okq {
 		return false
 	}
+	// verbose 档：DNS **请求**（Proxifier 把 DNS requests 归 Verbose）。
+	// 只在这儿记：查询本来就是在这里被解析的（没开 DNS 接管时不解析，也就不记）。
+	// 只看得到自己发出去的查询 —— 走 DoH 的应用不经这里（那类靠 sni.sniff 学名字）。
+	e.bus.Detail("dns.query: name=%s type=%s from=%s:%d", q.Name, dnsTypeName(q.Type), info.src, info.sport)
 	// 黑匣子：这是“到底谁弄坏的”唯一的原始事实
 	if e.dnsBox != nil {
 		e.dnsBox.Writef("查询  %s:%d → %s:%d  id=%#04x %s 类型 %d",
@@ -1827,6 +1837,9 @@ func (e *Engine) learnDNS(pkt []byte) {
 		e.dnsLearn.Add(1)
 		if !sameStrSet(before, e.names.IPsFor(name)) {
 			changed = true
+			// verbose 档：DNS **应答**里学到的“名字 → IP”（Proxifier 把 DNS requests 归 Verbose）。
+			// 只在映射真的变了才写：同一个名字的重复应答不刷屏。
+			e.bus.Detail("dns.answer: name=%s ips=%s ttl=%s", name, strings.Join(ips, ","), ttl[name])
 		}
 	}
 	if changed {
@@ -1983,7 +1996,7 @@ func (e *Engine) rebuildDynFilter() {
 		}
 		oldH.Close()
 	}
-	e.bus.Detail("wildcard: filter.update ranges=%d filter=%s", len(rs), filter)
+	e.bus.Debug("wildcard: filter.update ranges=%d filter=%s", len(rs), filter)
 }
 
 // WildcardStat 一条通配规则当前的状态（界面/日志看“学到了几个 IP”）。
@@ -2134,7 +2147,7 @@ func (e *Engine) sniLoop() {
 	if !e.trackSniff(h) {
 		return // 已经在停止：直接退出（defer 会关 h）
 	}
-	e.bus.Info("sni.sniff: started mode=read-only ports=%d filter=%s", len(sniSniffPorts), filter)
+	e.bus.Debug("sni.sniff: started mode=read-only ports=%d filter=%s", len(sniSniffPorts), filter)
 
 	buf := make([]byte, divert.MTUMax)
 	addr := new(divert.Address)
@@ -2323,10 +2336,13 @@ func (e *Engine) noteTookOver(name string, qtype uint16) {
 	if ip == nil {
 		// 非 A 查询走这条：AAAA（防走 IPv6）或其它类型（防 SVCB/HTTPS 的 ipv4hint 漏地址）。
 		// 报**真实的 qtype**，不要写死 AAAA —— 否则现场看到这条会以为只可能是 AAAA。
-		e.bus.Info("dns.takeover: name=%s qtype=%s answer=NOERROR/empty", name, dnsTypeName(qtype))
+		//
+		// 放在 verbose 档：这是 DNS 请求与应答层面的细节（Proxifier 也是把 DNS requests
+		// 归 Verbose）；normal 档只留连接与错误。
+		e.bus.Detail("dns.takeover: name=%s qtype=%s answer=NOERROR/empty", name, dnsTypeName(qtype))
 		return
 	}
-	e.bus.Info("dns.takeover: name=%s fake_ip=%s ttl=%s", name, ip, dnsFakeTTL)
+	e.bus.Detail("dns.takeover: name=%s fake_ip=%s ttl=%s", name, ip, dnsFakeTTL)
 }
 
 // dnsTypeName DNS 查询类型的短名（只列我们日志里会碰到的几种）。
@@ -2387,7 +2403,7 @@ func (e *Engine) sweepFakeIP() {
 		delete(e.tookSeen, n)
 	}
 	e.mu.Unlock()
-	e.bus.Detail("fakeip.recycle: count=%d names=%v", len(gone), gone)
+	e.bus.Debug("fakeip.recycle: count=%d names=%v", len(gone), gone)
 }
 
 // udpPayload 从 IP 包里取出 UDP 负载，并返回地址/端口（DNS 接管要互换它们）。
@@ -2606,7 +2622,8 @@ func (e *Engine) dnsTakeoverSelfCheck() {
 		good++
 	}
 	if good > 0 {
-		e.bus.Info("dns.selftest: ok canaries=%v", dnsCanaries)
+		// 自检通过属于“一切都好”的自证行 → verbose 档（失败仍是 Error，两档都看得见）。
+		e.bus.Detail("dns.selftest: ok canaries=%v", dnsCanaries)
 		return
 	}
 	e.bus.Error("dns.selftest: failed bad=%d total=%d detail=%v", bad, len(dnsCanaries), detail)
@@ -2723,7 +2740,7 @@ func (e *Engine) flowProc(sport uint16) (string, uint32) {
 	if name == "" {
 		// 只在详细日志里说：查不出进程名到底是“表里没这个端口”还是“打不开这个进程”。
 		// 这两个在包路径上完全看不出区别（都表现为 proc=unknown）。
-		e.bus.Detail("proc.lookup: port=%d result=unknown pid=%d", sport, pid)
+		e.bus.Debug("proc.lookup: port=%d result=unknown pid=%d", sport, pid)
 	}
 	return name, pid
 }
@@ -2776,6 +2793,41 @@ func ruleSuffix(ruleNo int, ruleName string) string {
 	return fmt.Sprintf("（规则 %d %s）", ruleNo, ruleName)
 }
 
+// hitText “命中第 N 条规则「名字」”；ruleNo<=0 = 没有规则命中。
+func hitText(ruleNo int, ruleName string) string {
+	switch {
+	case ruleNo <= 0:
+		return "没有规则命中"
+	case ruleName == "":
+		return fmt.Sprintf("命中第 %d 条规则", ruleNo)
+	default:
+		return fmt.Sprintf("命中第 %d 条规则「%s」", ruleNo, ruleName)
+	}
+}
+
+// routeMatchLog 记一行“这条连接为什么这么走”（verbose 档）。
+//
+// 对齐 Proxifier 的规则处理消息（Verbose 档才输出）：
+//
+//	[02.01 11:18:37] iexplore.exe (2972) - proxifier.com:80 matching Default rule : using Failover proxy chain
+//
+// 为什么要它：normal 档只记“连接开/关”，而“这个目标为什么没走隧道 / 怎么走了这条链”
+// 以前在日志里根本无处可查（只能猜或去翻配置）。
+//
+// 去重按**五元组的源端口 + 目标**：一条连接一行（Proxifier 就是每条连接一行），
+// 而 SYN 重传（同源端口、同目标）在 1 分钟内塌成一行 —— 吞掉的条数由 Throttle 自己补出来。
+func (e *Engine) routeMatchLog(sport uint16, dst net.IP, dport uint16, procName string, pid uint32, verdict string) {
+	if !e.bus.Verbose() {
+		return
+	}
+	who := "proc=unknown"
+	if procName != "" {
+		who = fmt.Sprintf("proc=%s pid=%d", procName, pid)
+	}
+	e.bus.Throttle(fmt.Sprintf("route:%d:%s:%d", sport, dst, dport), time.Minute,
+		"route.match: %s target=%s:%d → %s", who, dst, dport, verdict)
+}
+
 // isSyn 只看 SYN（不带 ACK）—— 新连接的第一个包。
 func isSyn(flags byte) bool { return flags&0x02 != 0 && flags&0x10 == 0 }
 
@@ -2815,6 +2867,7 @@ func (e *Engine) rewriteOutbound(h *divert.Handle, pkt []byte, addr *divert.Addr
 		e.mu.Unlock()
 		if !existed {
 			ctx := connLogCtx(ruleNo, ruleName, procName, pid)
+			e.routeMatchLog(sport, dst, dport, procName, pid, hitText(ruleNo, ruleName)+" → 走链 "+chain)
 			// 目标是假 IP 时，日志里要看到**域名**（否则只能看到一个 198.19.x.x 莫明其妙）
 			if e.isFakeIP(dst) {
 				if n, ok := e.nameOf(dst); ok {
@@ -2899,6 +2952,15 @@ func (e *Engine) passThrough(h *divert.Handle, pkt []byte, addr *divert.Address,
 		} else {
 			e.noteAction("阻断", sport, dst, dport, "已丢弃"+ruleSuffix(ruleNo, ruleName))
 		}
+		verdict := hitText(ruleNo, ruleName) + " → 直连（不走代理）"
+		switch {
+		case detail:
+			// 内置直连（7680）：ruleNo 也是 0，但那不是“没有规则命中”
+			verdict = fmt.Sprintf("内置直连（dport=%d，Windows 更新传递优化）→ 直连（不走代理）", builtinDirectPort)
+		case act == rules.ActionBlock:
+			verdict = hitText(ruleNo, ruleName) + " → 阻断（丢包）"
+		}
+		e.routeMatchLog(sport, dst, dport, procName, pid, verdict)
 	}
 
 	if st := e.flow(sport); st != nil {
@@ -3564,7 +3626,7 @@ func (e *Engine) pruneNames() {
 	for _, h := range exp {
 		e.names.Remove(h)
 	}
-	e.bus.Detail("name.expire: count=%d names=%v", len(exp), exp)
+	e.bus.Debug("name.expire: count=%d names=%v", len(exp), exp)
 	e.applyHostIPs()
 	e.onWildcardsChanged()
 }

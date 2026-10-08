@@ -202,6 +202,17 @@ Win10 的原生标题栏本身就很"工程软件"，所以窗口设为 `Framele
 每行 = 时间（`--muted-soft`）+ 级别（固定宽 44px）+ 正文。
 **级别用整行底色表达**：`WARN` 用 `--warning-soft`，`ERROR` 用 `--error-soft`——比只染一个词更容易扫。
 
+**档位**：三档 `normal | verbose | debug`（照抄 Proxifier 的 Normal / Verbose / Debug，
+定义见 `logbus.Level`），默认 `normal`，配置在 `ui.log_level`。切换**只影响之后写的行**，
+不碰过滤器、不重启、不断已有连接。
+界面控件是日志页页头上的**三段滑块**（`.seg`，胶囊沿用顶栏标签条那套：位置/宽度都由
+`positionSegThumb` 量出来，不写死下标；`normal` 在左，越往右越细）。
+标题只写“点下去会发生什么”，不在悬停里塞分档说明书。
+
+> 档位函数（`setLogLevel` / `loadLogLevel` / `positionSegThumb`）必须放在**全局**：
+> `showPage` 要调它们，而 `wire()` 里的嵌套函数并不是全局的（早期版本因此静默
+> 抛 `ReferenceError`，进日志页时刷新不生效）。
+
 ### 按钮
 
 | 变体 | 底 | 字 | 边框 |

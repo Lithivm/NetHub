@@ -64,6 +64,13 @@ patrol:
 
 ui:
   theme: light              # light | dark
+  # 日志档位：normal（默认）| verbose | debug —— 运行日志页右上的滑块改的就是它。
+  # 三档的语义照抄 Proxifier：
+  #   normal  = 连接开/关、启停、状态翻转、错误（现场一眼能读完）
+  #   verbose = + 每条连接为什么这么走（route.match）、DNS 请求与应答
+  #   debug   = + 引擎内部状态与装配（名字表/假 IP 池、内核层、过滤器原文）
+  # 写空 = normal；旧的 log_verbose: true 会被当成 verbose。
+  log_level: normal
 
 tuning:
   # 只读嗅探 TLS SNI / HTTP Host（默认开）。

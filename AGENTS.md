@@ -21,9 +21,12 @@ Go + **Wails v2**（WebView2 界面）+ **WinDivert**（内核驱动），**仅 
   现在拦下 + 记一行 `quic.block`，让应用回落到 TCP（TCP 那条路仍归我们管）；单条规则可勾「不拦 QUIC」放行。
 - **停就撤、启再写**：停引擎/退出时把 hosts 段与 `runtime.json` 一起收走（引擎一停，hosts 段里
   那些名字就没人兑付）。被强杀撤不掉 → `-status` 报 `hosts.stale` 与一条 note，下次启动盖回去。
-- **日志分层且去重有数**：普通模式只写连接/启停/状态变化/错错；“详细日志”开关（默认关）
-  才记每个直连目标、名字学习、探测过程。内核过滤器只打一行摘要（原文进详细日志与诊断包）；
-  被去重的重复项必须补 `suppressed: count=N`。
+- **日志三档（照抄 Proxifier 的 Normal / Verbose / Debug）**：运行日志页的三段滑块
+  `normal | verbose | debug`（配置 `ui.log_level`，默认 normal）。normal 只写连接开/关、启停、
+  状态翻转、错误；verbose 加**判定面**（每条连接的 `route.match`、DNS 请求与应答）；
+  debug 加**内部面**（名字表/假 IP 池维护、内核层、规则表编译、过滤器原文）。
+  分档是**靠人自觉**的：新增日志行时必须先问“这一行回答的是‘发生了什么’还是‘为什么’”，
+  并有测试钉住（`internal/engine/loglevel_test.go`）。被去重的重复项必须补 `suppressed: count=N`。
 - **明确不做**：IPv6 · UDP 中继 · 多跳串联 · TUN/TAP · 域名/正则匹配 · 限速配额 · 反向端口转发 · 上游 mux。
   IPv6 是**我们主动不收**（引擎只做 IPv4，且 DNS 层把 AAAA 答空防应用绕过）—— **不是 WinDivert 的限制**，
   它的网络层同时管 v4/v6；哪天真要做就是重写拦截层，不是“打开一个开关”。

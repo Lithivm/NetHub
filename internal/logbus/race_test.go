@@ -89,20 +89,65 @@ func TestFlushThrottled(t *testing.T) {
 	}
 }
 
-// Detail：只有打开详细模式才输出（级别仍是 INFO，脚本按级别过滤不会漏）。
-func TestDetailOnlyWhenVerbose(t *testing.T) {
+// 三档：Detail 只在 verbose 以上写，Debug 只在 debug 写（级别仍是 INFO，
+// 脚本按级别过滤不会漏）。
+func TestLevels(t *testing.T) {
 	b := New(50)
-	b.Detail("noisy: n=%d", 1)
+	b.Detail("verbose-only: n=%d", 1)
+	b.Debug("debug-only: n=%d", 1)
 	if got := drain(b); got != "" {
-		t.Fatalf("默认不该输出 Detail: %q", got)
+		t.Fatalf("默认（normal）不该输出 Detail/Debug: %q", got)
 	}
-	b.SetVerbose(true)
-	if !b.Verbose() {
-		t.Fatal("SetVerbose(true) 之后应当是详细模式")
+	if b.Level() != LevelNormal || b.Verbose() || b.IsDebug() {
+		t.Fatalf("默认档位应当是 normal，得到 %v", b.Level())
 	}
-	b.Detail("noisy: n=%d", 2)
-	if got := drain(b); !strings.Contains(got, "noisy: n=2") {
-		t.Errorf("详细模式下应当输出: %q", got)
+
+	b.SetLevel(LevelVerbose)
+	if !b.Verbose() || b.IsDebug() {
+		t.Fatalf("verbose 档：Verbose=true IsDebug=false，得到 %v", b.Level())
+	}
+	b.Detail("verbose-only: n=%d", 2)
+	b.Debug("debug-only: n=%d", 2)
+	if got := drain(b); !strings.Contains(got, "verbose-only: n=2") || strings.Contains(got, "debug-only") {
+		t.Errorf("verbose 档应当只输出 Detail: %q", got)
+	}
+
+	b.SetLevel(LevelDebug)
+	if !b.Verbose() || !b.IsDebug() {
+		t.Fatalf("debug 档：两个都得为 true，得到 %v", b.Level())
+	}
+	b.Detail("verbose-only: n=%d", 3)
+	b.Debug("debug-only: n=%d", 3)
+	got := drain(b)
+	if !strings.Contains(got, "verbose-only: n=3") || !strings.Contains(got, "debug-only: n=3") {
+		t.Errorf("debug 档应当两个都输出: %q", got)
+	}
+}
+
+// 配置里的字面量 ↔ 档位：认不出的（含空、旧值）一律 normal ——
+// 宁可少写，不要因错一个字把日志刷爆。
+func TestParseLevel(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		want Level
+	}{
+		{"", LevelNormal}, {"normal", LevelNormal}, {"NORMAL", LevelNormal},
+		{" verbose ", LevelVerbose}, {"debug", LevelDebug}, {"Debug", LevelDebug},
+		{"true", LevelNormal}, {"off", LevelNormal},
+	} {
+		if got := ParseLevel(c.in); got != c.want {
+			t.Errorf("ParseLevel(%q) = %v，想要 %v", c.in, got, c.want)
+		}
+	}
+	for _, c := range []struct {
+		in   Level
+		want string
+	}{
+		{LevelNormal, "normal"}, {LevelVerbose, "verbose"}, {LevelDebug, "debug"},
+	} {
+		if got := c.in.String(); got != c.want {
+			t.Errorf("Level(%d).String() = %q，想要 %q", c.in, got, c.want)
+		}
 	}
 }
 

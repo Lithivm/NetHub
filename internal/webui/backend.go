@@ -255,8 +255,9 @@ type SettingsView struct {
 	HostsManage  bool     `json:"hostsManage"`
 	HostsEntries []string `json:"hostsEntries"`
 	Theme        string   `json:"theme"`
-	// LogVerbose 详细日志（排障用，默认关）
-	LogVerbose bool `json:"logVerbose"`
+	// LogLevel 日志档位：normal（默认）| verbose | debug。
+	// 三档各装什么见 logbus.Level 的注释（照抄 Proxifier）。
+	LogLevel string `json:"logLevel"`
 	// 上游拨号（秒）。0 表示前端没传 → 保持原值，不当成“设成 0”。
 	DialTimeout int `json:"dialTimeout,omitempty"`
 	DialBudget  int `json:"dialBudget,omitempty"`
@@ -1053,7 +1054,7 @@ func (b *Backend) GetSettings() SettingsView {
 		HostsManage:    hosts.Manage,
 		HostsEntries:   entries,
 		Theme:          b.a.Cfg.Theme(),
-		LogVerbose:     b.a.Cfg.LogVerbose(),
+		LogLevel:       b.a.Cfg.LogLevel(),
 		DialTimeout:    int(b.a.Cfg.DialTimeoutDur() / time.Second),
 		DialBudget:     int(b.a.Cfg.DialBudgetDur() / time.Second),
 		RaceAfter:      intPtr(int(b.a.Cfg.RaceAfterDur() / time.Millisecond)),
@@ -1962,25 +1963,41 @@ func (b *Backend) SetCountDirect(on bool) error {
 	return nil
 }
 
-// SetLogVerbose 开关“详细日志”（Proxifier 的 Normal / Verbose）。
+// SetLogLevel 切日志档位（normal | verbose | debug）。
 //
-// 即时生效、只影响**之后**的行（日志总线上的一个开关，不碰过滤器也不重启）：
-// 关着 = 只写现场需要看的（连接、启停、状态变化、错误）；
-// 打开 = 额外的细节（每个直连目标、学到的名字、名字过期清单、探测过程……）。
-func (b *Backend) SetLogVerbose(on bool) error {
-	b.a.Cfg.SetLogVerbose(on)
+// 即时生效、只影响**之后**写的行（日志总线上的一个档位，不碰过滤器也不重启）：
+//
+//	normal  = 现场面：连接开/关、启停、链与目标状态翻转、错误
+//	verbose = + 判定面：每条连接为什么这么走、DNS 请求与应答、名字学习
+//	debug   = + 内部面：名字表/假 IP 池维护、内核层开关、过滤器原文
+//
+// 档位没变就不重复写行（界面上点回当前档位时不该多一行噪声）。
+func (b *Backend) SetLogLevel(level string) error {
+	lv := logbus.ParseLevel(level)
+	b.a.Cfg.SetLogLevel(lv.String())
 	res, err := b.a.SaveConfig()
 	if err != nil {
 		return err
 	}
-	b.a.Bus.SetVerbose(on) // 先落盘再切，保证“界面看到的 = 日志的”
-	b.afterSave(res, "详细日志开关")
-	if on {
-		b.a.Bus.Info("日志: 详细模式已打开（会多出每个直连目标、名字学习、探测过程等行）")
-	} else {
-		b.a.Bus.Info("日志: 已回到精简模式")
+	changed := lv != b.a.Bus.Level()
+	b.a.Bus.SetLevel(lv) // 先落盘再切，保证“界面看到的 = 日志的”
+	b.afterSave(res, "日志档位")
+	if changed {
+		b.a.Bus.Info("日志: 档位已切到 %s%s", lv, logLevelBlurb(lv))
 	}
 	return nil
+}
+
+// logLevelBlurb 给档位配一句“这一档多出什么”（Proxifier 的菜单说明那类）。
+func logLevelBlurb(lv logbus.Level) string {
+	switch lv {
+	case logbus.LevelVerbose:
+		return " —— 会多出每条连接的规则判定、DNS 请求与应答"
+	case logbus.LevelDebug:
+		return " —— 会多出引擎内部状态与装配细节（过滤器原文、名字表/假 IP 池、内核层）"
+	default:
+		return " —— 只写现场要看的（连接开/关、启停、状态翻转、错误）"
+	}
 }
 
 // QuicBlockView QUIC 阻断开关（「连接」页上的一个勾）。

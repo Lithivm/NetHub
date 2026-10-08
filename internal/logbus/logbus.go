@@ -33,10 +33,55 @@ type Bus struct {
 	maxBytes int64 // 单文件上限，超过就轮转
 	keep     int   // 保留几个历史文件（nethub.log.1 … .keep）
 
-	// verbose “详细日志”开关（见 SetVerbose / Detail）
-	verbose bool
+	// level 日志档位（见 Level / SetLevel）
+	level Level
 	// throttled 去重+计数表：key → 状态（见 Throttle）
 	throttled map[string]*throttleState
+}
+
+// Level 日志档位。三档，语义照抄 Proxifier 的 Normal / Verbose / Debug：
+//
+//	normal —— errors and connection-related messages (open/close)。
+//	           现场面：不看界面光读日志，就知道现在流量什么状况。
+//	           行率与业务量成正比（一连接两行 + 低频汇总），没有任何“一切都好”的自证行。
+//	verbose —— all messages, including rule processing, DNS requests, and others。
+//	           判定面：回答“这一条为什么这么走”（规则命中、DNS 请求与应答、名字学习）。
+//	debug —— all messages and debug messages; generates an extensive number of messages。
+//	           内部面：引擎内部状态与装配（名字表/假 IP 池维护、内核层开关、过滤器原文）。
+//
+// 为什么不照抄它那四档里的 Error Only：NetHub 的行本身带级别（INFO/WARN/ERROR），
+// “只看错误”是界面上的一次过滤，不需要占一个档位。
+type Level int
+
+const (
+	LevelNormal Level = iota
+	LevelVerbose
+	LevelDebug
+)
+
+// String 配置里存的就是这个字面量（ui.log_level）。
+func (l Level) String() string {
+	switch l {
+	case LevelVerbose:
+		return "verbose"
+	case LevelDebug:
+		return "debug"
+	default:
+		return "normal"
+	}
+}
+
+// ParseLevel 把配置里的字面量转成档位。认不出的（含空字符串、旧配置）都算 normal ——
+// 日志档位宁可少写，不要因为写错一个字就把日志刷爆。
+func ParseLevel(s string) Level {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "verbose":
+		return LevelVerbose
+	case "debug":
+		return LevelDebug
+	default:
+		return LevelNormal
+	}
 }
 
 // throttleState 一个被去重的 key 的状态（见 Throttle / FlushThrottled）。
@@ -198,31 +243,46 @@ func (b *Bus) Info(format string, a ...any)  { b.log("INFO", format, a...) }
 func (b *Bus) Warn(format string, a ...any)  { b.log("WARN", format, a...) }
 func (b *Bus) Error(format string, a ...any) { b.log("ERROR", format, a...) }
 
-// SetVerbose 开关“详细日志”（Proxifier 的 Normal / Verbose 那个开关）。
+// SetLevel 定档（界面上的三档滑块与配置文件都走这里）。
 //
-// 为什么要单独一个开关而不是再加一个级别名：现场只用得上最粗的三档
-// （gost 6 档、sing-box 7 档、mihomo 5 档，多出来的档次没人看），
-// 而“详细”回答的是另一个问题：“要不要把每个包/每条连接的细节也写下来”。
-func (b *Bus) SetVerbose(on bool) {
+// 只影响**之后**写下的行：已经在档位之下的行不会补出来，也不碰过滤器、不重启。
+func (b *Bus) SetLevel(l Level) {
 	b.mu.Lock()
-	b.verbose = on
+	b.level = l
 	b.mu.Unlock()
 }
 
-// Verbose 当前是不是详细模式。
-func (b *Bus) Verbose() bool {
+// Level 当前档位。
+func (b *Bus) Level() Level {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return b.verbose
+	return b.level
 }
 
-// Detail 记一条“只在详细模式下才出现”的日志（级别仍是 INFO）。
+// Verbose 现在到没到 verbose 档（判定面）。
+func (b *Bus) Verbose() bool { return b.Level() >= LevelVerbose }
+
+// IsDebug 现在到没到 debug 档（内部面）。
+func (b *Bus) IsDebug() bool { return b.Level() >= LevelDebug }
+
+// Detail 记一条 verbose 档以上才写的日志（级别仍是 INFO，脚本按级别过滤不会漏）。
 //
-// 用法：高频、重复、对现场结论没影响的行（每个直连目标一行、学到的名字、
-// 每 5 分钟的名字过期清单……）改成 Detail —— 默认日志才读得下去，
-// 要排障时在设置里打开“详细日志”就能重新看到它们。
+// 放这里的是**判定过程**：这条连接命中了哪条规则、为什么没走隧道、某个名字
+// 是从哪学来的、DNS 请求与应答。判据一句话：“这一行能不能回答『为什么』”。
 func (b *Bus) Detail(format string, a ...any) {
 	if !b.Verbose() {
+		return
+	}
+	b.log("INFO", format, a...)
+}
+
+// Debug 记一条 debug 档才写的日志（级别仍是 INFO）。
+//
+// 放这里的是**引擎内部状态与装配**：名字表/假 IP 池的维护明细、内核层的开关与
+// 过滤器原文、进程表查询失败…… 判据：“这一行是引擎自己的事，不是流量的判定”。
+// 行数可能很多（Proxifier 对 Debug 的原话：extensive number of messages）。
+func (b *Bus) Debug(format string, a ...any) {
+	if !b.IsDebug() {
 		return
 	}
 	b.log("INFO", format, a...)

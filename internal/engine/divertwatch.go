@@ -87,7 +87,7 @@ func (e *Engine) startDivertNameFeed() {
 	h, err := divert.Open("true", divert.LayerSocket, divert.PriorityDefault,
 		divert.FlagSniff|divert.FlagRecvOnly)
 	if err != nil {
-		e.bus.Detail("socketwatch: 打不开 SOCKET 层（%v）—— 进程名继续走 500ms 刷表那条路", err)
+		e.bus.Debug("socketwatch: 打不开 SOCKET 层（%v）—— 进程名继续走 500ms 刷表那条路", err)
 		return
 	}
 	e.mu.Lock()
@@ -100,7 +100,7 @@ func (e *Engine) startDivertNameFeed() {
 		n := 0
 		for {
 			if _, err := h.Recv(buf[:], &addr); err != nil {
-				e.bus.Detail("socketwatch: 结束（本轮记了 %d 条 connect）", n)
+				e.bus.Debug("socketwatch: 结束（本轮记了 %d 条 connect）", n)
 				return
 			}
 			if addr.Event() != divert.EventSocketConnect {
@@ -114,7 +114,7 @@ func (e *Engine) startDivertNameFeed() {
 			n++
 		}
 	}()
-	e.bus.Detail("socketwatch: 已开 SOCKET 层（进程名改为事件驱动；刷表那条仍作兜底）")
+	e.bus.Debug("socketwatch: 已开 SOCKET 层（进程名改为事件驱动；刷表那条仍作兜底）")
 }
 
 // startDivertReflect 开 REFLECT 层，盯"谁在用 WinDivert"。
@@ -126,7 +126,7 @@ func (e *Engine) startDivertReflect() {
 	h, err := divert.Open("true", divert.LayerReflect, divert.PriorityDefault,
 		divert.FlagSniff|divert.FlagRecvOnly)
 	if err != nil {
-		e.bus.Detail("reflectwatch: 打不开 REFLECT 层（%v）—— 少了\"谁在拦我的包\"这条线索", err)
+		e.bus.Debug("reflectwatch: 打不开 REFLECT 层（%v）—— 少了\"谁在拦我的包\"这条线索", err)
 		return
 	}
 	e.mu.Lock()
@@ -188,7 +188,7 @@ func (e *Engine) startDivertReflect() {
 func (e *Engine) reportDivertPeers() {
 	peers := e.DivertPeers()
 	if len(peers) == 0 {
-		e.bus.Detail("reflectwatch: 本机只有本进程在用 WinDivert 过滤器")
+		e.bus.Debug("reflectwatch: 本机只有本进程在用 WinDivert 过滤器")
 		return
 	}
 	e.bus.Warn("reflectwatch: 本机还有 %d 个进程在用 WinDivert 过滤器：%v", len(peers), peers)
