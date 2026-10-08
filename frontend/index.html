@@ -180,18 +180,22 @@
       <div class="card" id="cardRuntime">
         <div class="card-head">
           <h2>接管状态</h2>
-          <span class="hint">引擎自述的当前状态：内核面 / 名字面 / 连接面</span>
+          <span class="hint">内核面 / 名字面 / 连接面 的当前状态（进页刷新；可见时每 5 秒更新）</span>
           <div class="spacer"></div>
           <span class="hint mono" id="rtUptime">—</span>
           <button class="btn btn-sm" id="btnRtRefresh">刷新</button>
         </div>
-        <div class="verdict" id="rtVerdict">正在读取…</div>
-        <div class="warnbox" id="rtWarn"></div>
-        <div class="faces" id="rtFaces"></div>
-        <details class="rawfold" id="rtRaw">
-          <summary>内核过滤器原文（按需读取，3 KB 一行）</summary>
-          <div class="rawbody" id="rtRawBody">展开后才会去后端取。</div>
-        </details>
+        <!-- 内容一律放进 card-body：卡片自己不设内边距（padding 在 .card-body 上），
+             直接当子元素会被 overflow:hidden 贴着边切掉（展开按钮就被切过）。 -->
+        <div class="card-body form">
+          <div class="verdict" id="rtVerdict">正在读取…</div>
+          <div class="warnbox" id="rtWarn"></div>
+          <div class="faces" id="rtFaces"></div>
+          <details class="rawfold" id="rtRaw">
+            <summary>内核过滤器原文（展开时读取）</summary>
+            <div class="rawbody" id="rtRawBody">展开后读取。</div>
+          </details>
+        </div>
       </div>
 
       <!-- 装之前就该做的一步：装完才发现驱动被拦，从日志里挖半天（错误码还是误导人的“系统资源不足”）。

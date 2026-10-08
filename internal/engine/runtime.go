@@ -250,7 +250,7 @@ func shadowedRules(cfg *config.Config) []string {
 func statusWarnings(st RuntimeStatus, chains ChainSummary) []StatusWarning {
 	if !st.Running {
 		return []StatusWarning{{Kind: "engine.stopped", Severity: "error",
-			Text: "引擎没在跑，接管面全是关的" + st.Reason}}
+			Text: "引擎未运行，内核拦截与 DNS 接管均未生效。" + st.Reason}}
 	}
 	var out []StatusWarning
 	add := func(kind, sev, text string) {
@@ -260,58 +260,59 @@ func statusWarnings(st RuntimeStatus, chains ChainSummary) []StatusWarning {
 	// 内核面：包到不了我们手上 = 最严重
 	if st.Rules.Total > 0 && st.Kernel.Ranges == 0 {
 		add("kernel.no-range", "error",
-			"内核过滤器一个地址区间都没有 —— 现在接不住任何流量（规则是不是全改成直连/停用了？）")
+			"内核过滤器没有地址区间，当前不会拦截任何流量。请确认规则是否已全部改为直连或停用")
 	}
 	if len(st.Kernel.Peers) > 0 {
 		add("kernel.peers", "warn",
-			"本机还有别的进程在用 WinDivert："+strings.Join(st.Kernel.Peers, "、")+
-				" —— 它们可能抢走本该由我们处理的包")
+			"检测到其他进程也在使用 WinDivert："+strings.Join(st.Kernel.Peers, "、")+
+				"。数据包可能被其他程序优先处理")
 	}
 	if !st.Kernel.Main {
-		add("kernel.no-main", "error", "主过滤器句柄不在（内核拦截没起来）")
+		add("kernel.no-main", "error", "主过滤器句柄不可用，内核拦截未生效")
 	}
 
 	// 链条
 	if len(chains.Down) > 0 {
-		add("chain.down", "error", "链不可用："+strings.Join(chains.Down, "、"))
+		add("chain.down", "error", "链路不可用："+strings.Join(chains.Down, "、"))
 	}
 	// 刚启动那几十秒“还没探过”是正常态，别报
 	if len(chains.Untested) > 0 && st.UptimeSec > 90 {
-		add("chain.untested", "warn", "链还没探过："+strings.Join(chains.Untested, "、"))
+		add("chain.untested", "warn", "链路尚未探测："+strings.Join(chains.Untested, "、"))
 	}
 
 	// 规则：被前面盖住的目标永远不会生效（静默失效，现场最难发现）
 	if n := len(st.Rules.Shadowed); n > 0 {
 		add("rules.shadowed", "warn",
-			fmt.Sprintf("%d 条规则有目标被前面的规则完全覆盖（永远不会生效，去「路由规则」页看标红的那些）：%s",
+			fmt.Sprintf("%d 条规则存在被前置规则完全覆盖的目标，这些目标不会生效（见「路由规则」页）：%s",
 				n, strings.Join(firstN(st.Rules.Shadowed, 2), "、")))
 	}
 
 	// 名字面
 	if st.Names.Wildcards && !st.Names.Takeover {
 		add("names.no-takeover", "warn",
-			"规则里有通配域名，但 DNS 接管没开 —— 首次访问（真 IP 还没被观察到）可能漏出去")
+			"存在通配域名规则，但 DNS 接管未开启；首次访问（真实 IP 尚未被观测到）可能不经隧道")
 	}
 	if st.Names.Wildcards && st.Names.Count == 0 && st.UptimeSec > 90 {
 		add("names.empty", "warn",
-			"规则里有通配域名，但名字表是空的 —— 通配域名匹配不到任何 IP（应用可能用了 DoH/自带解析器）")
+			"存在通配域名规则，但名字表为空：通配域名当前无法匹配到任何 IP（应用可能使用 DoH 或自带解析器）")
 	}
 	if st.Names.Failed > 0 {
-		add("names.failed", "warn", fmt.Sprintf("%d 个名字解析失败（它们不会被通配规则匹配到）", st.Names.Failed))
+		add("names.failed", "warn",
+			fmt.Sprintf("%d 个域名解析失败，它们不会被通配规则匹配", st.Names.Failed))
 	}
 	if st.Names.Count >= 10 && st.Names.Stale*2 > st.Names.Count {
 		add("names.stale", "warn",
-			fmt.Sprintf("名字表过期过半（%d/%d）—— 通配域名正在变哑", st.Names.Stale, st.Names.Count))
+			fmt.Sprintf("名字表过期比例过半（%d/%d），通配域名的匹配能力下降", st.Names.Stale, st.Names.Count))
 	}
 	if st.Names.FakeCap > 0 && st.Names.FakeUsed*10 > st.Names.FakeCap*9 {
 		add("names.pool-full", "warn",
-			fmt.Sprintf("假 IP 池快满了（%d/%d）—— 满了之后新名字不再被接管", st.Names.FakeUsed, st.Names.FakeCap))
+			fmt.Sprintf("假 IP 池即将占满（%d/%d）：占满后新域名不再被接管", st.Names.FakeUsed, st.Names.FakeCap))
 	}
 
 	// 连接面：进程名解析率（v0.5.0 把它从 60% unknown 修到 0，这是防回归）
 	if seen := st.Conns.ProcKnown + st.Conns.ProcUnknow; seen >= 5 && st.Conns.ProcUnknow*5 > seen {
 		add("proc.unknown", "warn",
-			fmt.Sprintf("进程名查不出的连接偏多（%d/%d）—— 表里没这个端口，或打不开该进程",
+			fmt.Sprintf("无法解析进程名的连接比例偏高（%d/%d）：端口未在表中，或该进程不可访问",
 				st.Conns.ProcUnknow, seen))
 	}
 

@@ -655,25 +655,26 @@ code, .mono { font-family: var(--font-mono); }
 .verdict .vsub { font-weight: 400; font-size: var(--fs-sm); color: var(--muted); }
 
 /* “需要注意”：一条一行，色条 + 一句话（不写成日志行，也不带时间） */
-.warnbox { display: flex; flex-direction: column; gap: var(--s1); }
+.warnbox { display: flex; flex-direction: column; gap: var(--s2); }
 .warnbox:empty { display: none; }
 .warnrow {
   display: flex; align-items: baseline; gap: var(--s2);
   padding: var(--s2) var(--s3); border-radius: var(--r-btn);
-  font-size: var(--fs-sm); background: var(--warning-soft); color: var(--warning);
+  font-size: var(--fs-sm); line-height: 1.5;
+  background: var(--warning-soft); color: var(--warning);
 }
 .warnrow.is-error { background: var(--error-soft); color: var(--error); }
 .warnrow .wicon { flex: 0 0 auto; font-weight: 700; }
 
 /* 三面明细：label 左、值右，等宽数字对齐 */
-.faces { display: grid; gap: var(--s3); grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
-.face { border: 1px solid var(--hairline-soft); border-radius: var(--r-card); padding: var(--s3); background: var(--card); }
+.faces { display: grid; gap: var(--s3); grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.face { border: 1px solid var(--hairline-soft); border-radius: var(--r-card); padding: var(--s3) var(--s4); background: var(--card); }
 .face-head { display: flex; align-items: baseline; gap: var(--s2); font-weight: 600; color: var(--ink); }
 .face-head .fnote { font-weight: 400; font-size: var(--fs-xs); color: var(--muted); }
-.mrows { margin-top: var(--s2); display: flex; flex-direction: column; gap: 3px; }
+.mrows { margin-top: var(--s2); display: flex; flex-direction: column; gap: 4px; }
 .mrow { display: flex; align-items: baseline; gap: var(--s2); font-size: var(--fs-sm); }
-.mrow .mlabel { flex: 0 0 92px; color: var(--muted); }
-.mrow .mval { font-family: var(--font-mono); color: var(--body); user-select: text; }
+.mrow .mlabel { flex: 0 0 auto; min-width: 96px; color: var(--muted); }
+.mrow .mval { font-family: var(--font-mono); color: var(--body); user-select: text; min-width: 0; }
 .mrow .mval.is-bad { color: var(--error); font-weight: 600; }
 .mrow .mval.is-warn { color: var(--warning); }
 /* 句柄/开关：一颗一颗的小胶囊，亮 = 在 */
@@ -684,10 +685,12 @@ code, .mono { font-family: var(--font-mono); }
 }
 .chip.on { border-color: var(--success); color: var(--success); background: var(--success-soft); }
 
-/* 折叠的原文（唯一允许出现大块文字的地方） */
-.rawfold { margin-top: var(--s3); border-top: 1px solid var(--hairline-soft); padding-top: var(--s2); }
-.rawfold > summary { cursor: pointer; font-size: var(--fs-sm); color: var(--muted); user-select: none; }
-.rawfold > summary:hover { color: var(--body); }
+/* 折叠的原文（唯一允许出现大块文字的地方）
+   注意：卡片本身 padding 为 0（内边距在 .card-body 上），所以这里不能直接贴在 .card 下 ——
+   贴上去会被 overflow:hidden 沿着卡边切掉（展开按钮被切过）。 */
+.rawfold { border-top: 1px solid var(--hairline-soft); padding-top: var(--s2); }
+.rawfold > summary { cursor: pointer; font-size: var(--fs-sm); color: var(--body); user-select: none; padding: var(--s1) 0; }
+.rawfold > summary:hover { color: var(--primary); }
 .rawbody { margin-top: var(--s2); }
 .rawbody pre {
   margin: 0; padding: var(--s2); border-radius: var(--r-input); background: var(--canvas-soft);

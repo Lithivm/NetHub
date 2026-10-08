@@ -381,16 +381,16 @@ function renderRuntime(st) {
   const warns = (st.warnings || []).length - errs;
   const kind = !st.running ? 'error' : (errs ? 'error' : (warns ? 'warn' : 'ok'));
 
-  // ① 结论条：一句话 + 一个状态点（不是一行日志）
+  // ① 结论：一句话 + 一个状态点（报告口径，不写成口语）
   const v = document.getElementById('rtVerdict');
-  const text = !st.running ? '引擎没在跑'
-    : (kind === 'ok' ? '接管正常' : (errs ? errs + ' 项要处理' : warns + ' 项值得看一眼'));
+  const text = !st.running ? '引擎未运行'
+    : (kind === 'ok' ? '正常' : (errs ? errs + ' 项需处理' : warns + ' 项提示'));
   v.replaceChildren(
     el('span', 'dot ' + kind),
     el('span', 'vtext', text),
-    el('span', 'vsub', kind === 'ok' ? '内核 / 名字 / 连接三面都在' : '')
+    el('span', 'vsub', kind === 'ok' ? '内核拦截 · 域名接管 · 连接与进程名 均无异常' : '')
   );
-  document.getElementById('rtUptime').textContent = st.uptime ? '已运行 ' + st.uptime : '—';
+  document.getElementById('rtUptime').textContent = st.uptime ? '运行时长 ' + st.uptime : '—';
 
   // ② 需要注意：一条一行（色条 + 一句话）
   const wb = document.getElementById('rtWarn');
@@ -404,37 +404,38 @@ function renderRuntime(st) {
 
   // ③ 三面明细
   const k = st.kernel || {}, n = st.names || {}, c = st.conns || {}, r = st.rules || {};
-  const kernel = rtFace('内核面', '包有没有到我们手上', [
+  const kernel = rtFace('内核面', '内核拦截与过滤器', [
     (() => {
       const row = el('div', 'mrow');
-      row.appendChild(el('span', 'mlabel', '句柄'));
+      row.appendChild(el('span', 'mlabel', '过滤器句柄'));
       const val = el('span', 'mval');
       [['main', k.main], ['dyn', k.dyn], ['dns', k.inject], ['socket', k.socket], ['reflect', k.reflect]]
         .forEach(([name, on]) => val.appendChild(rtChip(on, name)));
       row.appendChild(val);
       return row;
     })(),
-    rtRow('规则 / 区间', (r.total || 0) + ' 条规则 → ' + (k.ranges || 0) + ' 个区间' +
+    rtRow('规则与区间', (r.total || 0) + ' 条规则 → ' + (k.ranges || 0) + ' 个区间' +
       (k.bytes ? '（原文 ' + Math.round(k.bytes / 1024 * 10) / 10 + ' KB）' : ''), (k.ranges ? '' : 'is-bad')),
-    rtRow('还有谁在用驱动', (k.peers && k.peers.length) ? k.peers.join('、') : '只有我们', (k.peers && k.peers.length) ? 'is-warn' : ''),
-    rtRow('直连 / QUIC 阻断', (k.direct ? '直连统计开' : '直连统计关') + ' · ' + (k.quicBlock ? '拦 QUIC' : '不拦 QUIC')),
+    rtRow('WinDivert 占用', (k.peers && k.peers.length) ? k.peers.join('、') : '仅本进程',
+      (k.peers && k.peers.length) ? 'is-warn' : ''),
+    rtRow('直连统计 / QUIC', (k.direct ? '直连统计开' : '直连统计关') + ' · ' + (k.quicBlock ? 'QUIC 阻断开' : 'QUIC 阻断关')),
   ]);
 
   const newest = (n.newestSec === undefined || n.newestSec === null || n.newestSec < 0)
-    ? '还没学到过' : n.newestSec + 's 前';
-  const names = rtFace('名字面', '域名通配 / DNS 接管灵不灵', [
+    ? '尚未观测到' : n.newestSec + 's 前';
+  const names = rtFace('名字面', '域名通配与 DNS 接管', [
     rtRow('名字表', (n.count || 0) + ' 个' + ((n.stale || n.failed) ? '（过期 ' + n.stale + ' · 失败 ' + n.failed + '）' : ''),
       n.failed ? 'is-warn' : ''),
-    rtRow('最近学到', newest),
-    rtRow('通配规则 / 接管', (n.wildcards ? '有通配' : '没有通配') + ' · ' + (n.takeover ? 'DNS 接管开' : 'DNS 接管关')),
+    rtRow('最近观测', newest),
+    rtRow('通配与接管', (n.wildcards ? '有通配规则' : '无通配规则') + ' · ' + (n.takeover ? 'DNS 接管开' : 'DNS 接管关')),
     rtRow('假 IP 池', (n.fakeCap ? n.fakeUsed + ' / ' + n.fakeCap + '　' + (n.fakeRange || '') : '未启用')),
   ]);
 
   const seen = (c.procKnown || 0) + (c.procUnknown || 0);
-  const conns = rtFace('连接面', '谁在连、走了哪条链', [
-    rtRow('连接', (c.total || 0) + ' 累计 · ' + (c.active || 0) + ' 活跃'),
-    rtRow('每链', rtList(c.perChain)),
-    rtRow('进程名', seen ? (c.procKnown + '/' + seen + ' 能查到') : '还没有活连接',
+  const conns = rtFace('连接面', '连接与进程名', [
+    rtRow('连接数', (c.total || 0) + ' 累计 · ' + (c.active || 0) + ' 活跃'),
+    rtRow('按链分布', rtList(c.perChain)),
+    rtRow('进程名解析', seen ? (c.procKnown + ' / ' + seen + ' 已解析') : '无活动连接',
       (seen && c.procUnknown * 5 > seen) ? 'is-warn' : ''),
     rtRow('进程表', (c.procPorts || 0) + ' 端口 · ' + (c.procPids || 0) + ' PID'),
   ]);
@@ -466,12 +467,12 @@ async function loadKernelDetail() {
     body.appendChild(pre);
   };
   body.replaceChildren();
-  add('覆盖的地址区间（' + ((d.ranges || []).length) + ' 个）—— 这些之外的目标，包根本到不了我们手上',
+  add('覆盖的地址区间（' + ((d.ranges || []).length) + ' 个）：此范围之外的目标不会被拦截',
     (d.ranges || []).join('\n'));
   if ((d.dynRanges || []).length) {
-    add('通配域名当前覆盖到的 IP（' + d.dynRanges.length + ' 个）', d.dynRanges.join('\n'));
+    add('通配域名当前覆盖的 IP（' + d.dynRanges.length + ' 个）', d.dynRanges.join('\n'));
   }
-  add('主过滤器原文 —— “这个包到底有没有被内核送过来”，就这一行说了算', d.filter);
+  add('主过滤器原文（内核实际拦截条件）', d.filter);
   fold.dataset.loaded = '1';
 }
 

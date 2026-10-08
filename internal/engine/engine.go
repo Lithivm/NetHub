@@ -792,7 +792,7 @@ func (e *Engine) ReasonNotRunning() string {
 	if err := e.Fatal(); err != nil {
 		return "（拦截已中断：" + err.Error() + "）"
 	}
-	return "（未启动？在界面上点“接管引擎”或看设置页的服务状态）"
+	return "（当前进程未接管；可在顶栏「接管引擎」或设置页的服务状态查看）"
 }
 
 // Fatal 拦截是否已意外中断；中断后界面不该再显示“运行中”。
