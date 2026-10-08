@@ -195,6 +195,18 @@ func (k NotifyKind) String() string {
 	}
 }
 
+// SetLogLevel 切日志档位；**切到 debug 时立刻转储一份当前状态**（见 Engine.DumpState）。
+//
+// 为什么要包这一层：debug 档的内容（过滤器原文、名字表、假 IP 池、内核层句柄）平时只在启动时写，
+// 不转储就等于“切到 debug 档什么也看不到，只能重启重现”—— 而重启会断掉现场正在跑的业务连接。
+// 界面切档与外部改文件（热重载）都从这里走，不会一边做一边忘。
+func (a *App) SetLogLevel(lv logbus.Level) {
+	a.Bus.SetLevel(lv)
+	if lv >= logbus.LevelDebug {
+		a.Engine.DumpState("切到 debug 档")
+	}
+}
+
 // Running 返回是否已启动。
 //
 // 注意它**不包含**“拦截是否还活着”：引擎被报 Fatal（句柄失效、驱动被拦）时

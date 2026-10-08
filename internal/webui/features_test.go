@@ -98,14 +98,4 @@ func TestFeatureWiring(t *testing.T) {
 	if st := b.GetService(); st.State == "" {
 		t.Error("服务状态不该为空")
 	}
-
-	// 诊断包：能打出来、且不含凭据
-	p, err := b.ExportDiagnostics()
-	if err != nil {
-		t.Fatalf("导出诊断包失败: %v", err)
-	}
-	if !strings.HasSuffix(p, ".zip") {
-		t.Errorf("诊断包路径不对: %s", p)
-	}
-	_ = cfg
 }

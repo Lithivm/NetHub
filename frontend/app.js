@@ -339,7 +339,7 @@ async function savePatrol() {
   } catch (e) { fail(e); }
 }
 
-/* ═══════════════ 配置体检 / 备份 / 诊断包 ═══════════════ */
+/* ═══════════════ 配置体检 / 备份 ═══════════════ */
 
 /* 复制体检结果：方便贴到聊天/工单里（比让人去截图快，也比打包一个 zip 轻）。 */
 async function copyPrecheck() {
@@ -372,13 +372,6 @@ async function precheckConfig(quiet) {
   if (!quiet && bad) {
     toast('体检发现问题', bad + ' 项错误，见上方报告', 'error');
   }
-}
-
-async function exportDiagnostics() {
-  try {
-    const p = await call('ExportDiagnostics');
-    if (p) toast('已导出诊断包', p + '　　凭据已抹掉，可直接发出去', 'success');
-  } catch (e) { fail(e); }
 }
 
 async function loadBackups() {
@@ -1865,9 +1858,8 @@ function wire() {
         if (btn.classList.contains('is-active')) return;   // 点当前档：不重复落盘
         try {
           await call('SetLogLevel', lv);
-          setLogLevel(lv);
+          setLogLevel(lv);        // 滑动动画走这一下（immediate 省略 = 与大 tab 一起滑）
           toast('日志档位：' + lv, LEVEL_BLURB[lv] || '', 'success');
-          await loadLogLevel();
         } catch (e) { fail(e); }
       };
     });
@@ -1925,7 +1917,7 @@ function wire() {
   // 诊断页：巡检设置
   document.getElementById('btnPatrolSave').onclick = savePatrol;
 
-  // 设置页：体检 / 诊断包 / Windows 服务
+  // 设置页：体检 / Windows 服务
   document.getElementById('btnPrecheck').onclick = () => precheckConfig(false);
   // UDP 能力探测（档 1b）：只在点的时候跑（每条链一次探测，最多 4 秒）
   const btnUdpProbe = document.getElementById('btnUdpProbe');
@@ -1948,7 +1940,6 @@ function wire() {
     try { await navigator.clipboard.writeText(txt); toast('已复制', '探测结果已复制到剪贴板', 'success'); }
     catch { toast('复制失败', '手动选中上面的文本复制即可', 'warn'); }
   };
-  document.getElementById("btnDiag").onclick = exportDiagnostics;
   document.getElementById("btnCopyPrecheck").onclick = copyPrecheck;
   document.getElementById('btnSvcInstall').onclick = async () => {
     if (!await confirmBox('安装为 Windows 服务',

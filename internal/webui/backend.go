@@ -1980,7 +1980,7 @@ func (b *Backend) SetLogLevel(level string) error {
 		return err
 	}
 	changed := lv != b.a.Bus.Level()
-	b.a.Bus.SetLevel(lv) // 先落盘再切，保证“界面看到的 = 日志的”
+	b.a.SetLogLevel(lv) // 先落盘再切，保证“界面看到的 = 日志的”；切到 debug 会顺带转储一份当前状态
 	b.afterSave(res, "日志档位")
 	if changed {
 		b.a.Bus.Info("日志: 档位已切到 %s%s", lv, logLevelBlurb(lv))

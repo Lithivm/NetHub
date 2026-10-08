@@ -7,7 +7,7 @@ Go + **Wails v2**（WebView2 界面）+ **WinDivert**（内核驱动），**仅 
 用户是运维/实施人员（不是开发者），写人话、别堆术语。
 后端 `internal/`：`app`（编排 Start/Stop/Restart）· `config`（读写/校验/体检/重叠）· `rules`（匹配）·
 `engine`（relay / 包循环 / 连接表 / 探测 / 预热池 / 抓包）· `upstream` + `socks`（上游客户端）·
-`webui`（界面 API / 托盘 / 诊断包）· `secret`（DPAPI 保险箱）· `winsvc`（Windows 服务）。
+`webui`（界面 API / 托盘）· `secret`（DPAPI 保险箱）· `winsvc`（Windows 服务）。
 
 ## 设计初衷：替代现场的「Proxifier + 两个 gost .bat」
 
@@ -24,7 +24,9 @@ Go + **Wails v2**（WebView2 界面）+ **WinDivert**（内核驱动），**仅 
 - **日志三档（照抄 Proxifier 的 Normal / Verbose / Debug）**：运行日志页的三段滑块
   `normal | verbose | debug`（配置 `ui.log_level`，默认 normal）。normal 只写连接开/关、启停、
   状态翻转、错误；verbose 加**判定面**（每条连接的 `route.match`、DNS 请求与应答）；
-  debug 加**内部面**（名字表/假 IP 池维护、内核层、规则表编译、过滤器原文）。
+  debug 加**内部面**（名字表/假 IP 池维护、内核层、规则表编译、过滤器原文）；
+  **切到 debug 时立刻转储一份当前内部状态**（`Engine.DumpState`）—— 那些内容本来只在启动时写，
+  不转储就等于“只有重启才看得到”。诊断包那个功能已删（2026-10-08）：要交现场材料就发 nethub.log。
   分档是**靠人自觉**的：新增日志行时必须先问“这一行回答的是‘发生了什么’还是‘为什么’”，
   并有测试钉住（`internal/engine/loglevel_test.go`）。被去重的重复项必须补 `suppressed: count=N`。
 - **明确不做**：IPv6 · UDP 中继 · 多跳串联 · TUN/TAP · 域名/正则匹配 · 限速配额 · 反向端口转发 · 上游 mux。

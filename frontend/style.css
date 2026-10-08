@@ -308,7 +308,10 @@ code, .mono { font-family: var(--font-mono); }
   padding: 3px;
   background: var(--canvas-soft);
   border: 1px solid var(--hairline);
-  border-radius: calc(var(--r-chip) + 3px);
+  /* 圆角必须与内层胶囊**同心**：外 = 内 + 1px 边框 + 3px 内边距。
+     写小了（旧值只加了 3）会在两端的选中项那个角上漏出一条背景缝 —— 看着就像
+     “内外圆角不统一”。改这两个值时要一起改（以及下面 .seg 的同名值）。 */
+  border-radius: calc(var(--r-chip) + 4px);
 }
 /* 顶部栏里的「设置」：外观与旁边的 .btn 完全一致（它就是 .btn），
    只额外兼容 .tab 的选中态（在设置页时高亮成主色，否则看不出当前在哪一页） */
@@ -323,7 +326,9 @@ code, .mono { font-family: var(--font-mono); }
 .tab-top.is-active:hover { background: var(--primary-soft); color: var(--primary); }
 .tabs { position: relative; }
 .tabs .tab-thumb {
-  position: absolute; top: 0; left: 0; height: 100%; width: 0;
+  /* 上下也按 padding 内缩：top:0/height:100% 量的是**内边距盒**，会比按钮高出 6px、
+     顶进 padding 区，四个角就不再同心（两端最明显）。 */
+  position: absolute; top: 3px; left: 0; height: calc(100% - 6px); width: 0;
   background: var(--primary); border-radius: var(--r-chip);
   box-shadow: 0 1px 3px rgba(0, 0, 0, .18);
   /* 位置走 transform（合成器上跑，不碰布局）；只有切到不等宽的「诊断」时宽度才会变 */
@@ -336,8 +341,7 @@ code, .mono { font-family: var(--font-mono); }
 .tabs .tab-thumb.no-anim { transition: none; }
 /* 没有选中的 tab（在「设置」页）：胶囊收起来。留一条淡出，切回任一 tab 时再淡入。 */
 .tabs .tab-thumb.is-out { opacity: 0; }
-.tabs .tab { position: relative; z-index: 1; transition: background var(--ease), color 120ms var(--ease-soft); }
-/* 出去的标签立刻变灰，进来的等胶囊快到了再变白 —— 否则白字会先落在浅底上闪一下 */
+.tabs .tab { position: relative; z-index: 1; transition: background var(--ease), color 120ms var(--ease-soft); }/* 出去的标签立刻变灰，进来的等胶囊快到了再变白 —— 否则白字会先落在浅底上闪一下 */
 .tabs .tab.is-active { background: transparent; box-shadow: none; color: var(--on-primary);
   transition: color 140ms var(--ease-soft) 80ms; }
 .tabs .tab.is-active:hover { background: transparent; color: var(--on-primary); }
@@ -595,8 +599,8 @@ code, .mono { font-family: var(--font-mono); }
 .check em { font-weight: 400; color: var(--muted); }
 
 /* 日志档位：三段滑块（normal | verbose | debug）。
-   外观与顶栏标签条同款胶囊 —— 位置/宽度都由 JS 量出来（见 positionSegThumb），
-   这里只负责给胶囊一个能滑动的地基。 */
+   外观与动画都跟顶栏标签条**同一套**（见 .tabs .tab-thumb）：位置/宽度由 JS 量（positionSegThumb），
+   胶囊滑动 240ms `--ease-soft`，出去的档位立刻变灰、进来的等胶囊快到了再变白。 */
 .seg {
   position: relative;
   display: inline-flex;
@@ -604,7 +608,8 @@ code, .mono { font-family: var(--font-mono); }
   padding: 3px;
   background: var(--canvas-soft);
   border: 1px solid var(--hairline);
-  border-radius: calc(var(--r-chip) + 3px);
+  /* 与 .tabs 同一个公式：外 = 内 + 1px 边框 + 3px 内边距（不同心就会在两端漏缝） */
+  border-radius: calc(var(--r-chip) + 4px);
 }
 .seg .seg-thumb {
   position: absolute; top: 3px; left: 0; height: calc(100% - 6px); width: 0;
@@ -618,11 +623,13 @@ code, .mono { font-family: var(--font-mono); }
 .seg .seg-thumb.no-anim { transition: none; }
 .seg .seg-btn {
   position: relative; z-index: 1;
+  display: inline-flex; align-items: center;
   border: 0; background: transparent; cursor: pointer;
   padding: 5px var(--s3); border-radius: var(--r-chip);
   font-family: var(--font-mono); font-size: var(--fs-sm); font-weight: 600; line-height: 1;
   color: var(--muted);
-  transition: color 140ms var(--ease-soft);
+  /* 出去的立即变灰 —— 与大 tab 同款时序（进来那条看下面 .is-active） */
+  transition: color 120ms var(--ease-soft);
 }
 .seg .seg-btn:hover { color: var(--body); }
 /* 出去的档位立刻变灰，进来的等胶囊快到了再变白 —— 否则白字会先落在浅底上闪一下 */

@@ -345,16 +345,6 @@ func (e *Engine) fillMissingProcs() {
 	}
 }
 
-// MainFilterText 最近装配的内核过滤器原文（诊断包用）。
-//
-// 为什么不直接写进日志：它是三 KB 一行的条件串（现场读不下去），
-// 但“包到底有没有被内核送过来”这个问题只有它能回答，所以导出诊断包时一定要带上。
-func (e *Engine) MainFilterText() string {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	return e.filterText
-}
-
 // ChainCounts 每条链累计接管了多少条连接。
 func (e *Engine) ChainCounts() map[string]uint64 {
 	e.mu.RLock()
@@ -380,8 +370,6 @@ type Engine struct {
 	// mainFilter 当前主过滤器原文：重载时比对，没变就不折腾句柄（省一次开/关）。
 	mainStop   chan struct{}
 	mainFilter string
-	// filterText 最近一次装配的内核过滤器原文（只给诊断包看，不写日志）。
-	filterText string
 	// dynHandle 第二只句柄：只装「通配域名当前覆盖到的 IP」。
 	// 通配域名没法主动解析，只能等观察到应用的 DNS 应答才知道 IP，
 	// 所以它必须可热替换（先开新的、再关旧的，中间不丢包）。
@@ -685,19 +673,15 @@ func (e *Engine) Start() error {
 	if fakeRange != nil {
 		e.bus.Info("DNS 接管：假 IP 段 %s 已并入过滤器", fakeRange)
 	}
-	// 汇总写一行，**完整原文只在详细日志里**。
+	// 汇总写一行，**完整原文只在 debug 档里**（见 DumpState —— 切档时也会补一份，
+	// 不再只有启动那一下能看到）。
 	//
 	// 为什么不能直接打全文（实测：3KB 一行的“天书”占满了运行日志页，现场根本读不下去）：
 	// 普通模式下需要知道的是“内核收了哪些网段/多少个区间/包不包 QUIC”，
 	// 排查“某个包到没到我们手上”时才需要完整条件 —— 所以拆两层：
-	// 普通模式给数据，详细模式（以及诊断包里的 `内核过滤器.txt`）给原文。
-	fileText := filter // 给下面的 filterText 用（避免长行里再取一次）
+	// normal 给数据，debug 给原文。
 	e.bus.Info("filter.main: rules=%d ranges=%d tcp_clause=1 udp_quic=%v relay_port=%d bytes=%d",
 		len(e.ruleSet().List()), nrange, e.cfg.QuicBlockEnabled(), port, len(filter))
-	e.bus.Debug("filter.main: %s", filter)
-	e.mu.Lock()
-	e.filterText = fileText // 给诊断包用（导出时不必再重算）
-	e.mu.Unlock()
 
 	// 3) 打开 WinDivert（含首次安装驱动的重试）
 	h, err := openDivert(e.bus, filter)
@@ -711,22 +695,8 @@ func (e *Engine) Start() error {
 	e.mu.Unlock()
 
 	e.bus.Info("engine.start: relay=%s rules=%d", relay, len(e.ruleSet().List()))
-	// 规则表 / 链表的内容属于**装配**（debug 档）：它们是 config.yaml 里写了什么，
-	// 不是流量的判定。normal 档只留 engine.start 那一行 —— 否则每次启动先刷一屏。
-	for _, r := range e.ruleSet().List() {
-		switch r.Action {
-		case rules.ActionDirect:
-			e.bus.Debug("route: %s action=direct", r.Label())
-		case rules.ActionBlock:
-			e.bus.Debug("route: %s action=block", r.Label())
-		default:
-			e.bus.Debug("route: %s action=chain/%s", r.Label(), r.Chain)
-		}
-	}
-	for _, ch := range e.cfg.ChainsSnapshot() {
-		e.bus.Debug("    链 %s：%d 个上游，策略 %s，探测 %s",
-			ch.Name, len(ch.Upstreams()), ch.StrategyName(), ch.ProbeInterval())
-	}
+	// 规则表 / 链表 / 过滤器原文这些**装配信息**现在由 DumpState 统一写（debug 档）：
+	// 启动时调一次，切档时再调一次 —— 两处共用一份实现，不会再“只有重启才看得到”。
 	if e.cfg.BuiltinDirectEnabled() {
 		e.bus.Info("builtin.direct: tcp dport=%d 直连（Windows 更新传递优化；关掉：tuning.builtin_direct_disabled: true）",
 			builtinDirectPort)
@@ -799,6 +769,9 @@ func (e *Engine) Start() error {
 			}
 		}
 	}
+	// 装配完成 → debug 档立刻补一份当前状态（规则表/链表/过滤器原文/名字表/假 IP 池/内核层）。
+	// 放在最后：这时句柄、动态过滤器、DNS 接管都已就位，转储才是完整的。
+	e.DumpState("启动")
 	return nil
 }
 

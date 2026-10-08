@@ -112,7 +112,7 @@ func (a *App) ApplyFromDisk() (ApplyResult, error) {
 	// 档位**变了才写一行**（切到 normal 也写）：v0.5.x 这里是静默的，
 	// 于是“从文件改开关”看起来像没生效 —— 那正是现场会踩的一个坑。
 	if lv := logbus.ParseLevel(a.Cfg.LogLevel()); lv != a.Bus.Level() {
-		a.Bus.SetLevel(lv)
+		a.SetLogLevel(lv)
 		a.Bus.Info("日志: 档位已切到 %s（配置文件改动热生效）", lv)
 	}
 	if err := a.Rules.Load(toRules(cfg.RoutesSnapshot())); err != nil {
