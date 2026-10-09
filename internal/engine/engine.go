@@ -170,13 +170,24 @@ func (e *Engine) finish(st *connState) {
 
 // ConnView 一条连接的快照（给界面用）。
 type ConnView struct {
-	Target  string `json:"target"`
-	Action  string `json:"action"`
-	Chain   string `json:"chain"`
-	Proc    string `json:"proc"` // 发起这条连接的进程名（空 = 未知）
-	PID     uint32 `json:"pid"`
-	Started string `json:"started"`
-	Dur     string `json:"dur"`
+	Target string `json:"target"`
+	Action string `json:"action"`
+	Chain  string `json:"chain"`
+	// Sport 本地（源）端口：**一条连接的唯一标识**。
+	//
+	// 为什么必须给出来：同一个进程往同一个目标可以有很多条连接（浏览器对同一 origin
+	// 就允许 6 条并发），界面上它们长得一模一样 —— 只有本地端口能把它们分开，
+	// 也才能对着 netstat 核对。
+	Sport    uint16 `json:"sport"`
+	Proc     string `json:"proc"` // 发起这条连接的进程名（空 = 未知）
+	PID      uint32 `json:"pid"`
+	RuleNo   int    `json:"ruleNo"`   // 命中的第几条规则（0 = 没命中）
+	RuleName string `json:"ruleName"` // 规则名
+	Started  string `json:"started"`
+	Dur      string `json:"dur"`
+	// AgeSec 已存活秒数：界面把同目标的并发连接合并成一行时，靠它取“最长的那条”
+	// （纯字符串的 Dur 比不了大小）。
+	AgeSec  int    `json:"ageSec"`
 	Up      uint64 `json:"up"`
 	Down    uint64 `json:"down"`
 	Packets uint64 `json:"packets"`
@@ -251,18 +262,22 @@ func (e *Engine) Conns(limit int, withProc bool) []ConnView {
 			}
 		}
 		out = append(out, ConnView{
-			Target:  fmt.Sprintf("%s:%d", st.displayTarget(), st.dport),
-			Action:  st.action.String(),
-			Chain:   st.chain,
-			Proc:    name,
-			PID:     pid,
-			Started: st.start.Format("15:04:05"),
-			Dur:     humanDur(end.Sub(st.start)),
-			Up:      st.up.Load(),
-			Down:    st.down.Load(),
-			Packets: st.packets.Load(),
-			State:   state,
-			Error:   st.err(),
+			Target:   fmt.Sprintf("%s:%d", st.displayTarget(), st.dport),
+			Action:   st.action.String(),
+			Chain:    st.chain,
+			Sport:    st.appPort,
+			Proc:     name,
+			PID:      pid,
+			RuleNo:   st.ruleNo,
+			RuleName: st.ruleName,
+			Started:  st.start.Format("15:04:05"),
+			Dur:      humanDur(end.Sub(st.start)),
+			AgeSec:   int(end.Sub(st.start).Seconds()),
+			Up:       st.up.Load(),
+			Down:     st.down.Load(),
+			Packets:  st.packets.Load(),
+			State:    state,
+			Error:    st.err(),
 		})
 	}
 	return out

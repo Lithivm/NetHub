@@ -608,9 +608,23 @@ async function loadConns() {
     return;
   }
 
-  conns.forEach((c, i) => {
-    const row = el('div', 'trow conn-grid');
-    row.appendChild(el('div', 'cell dim', String(i + 1)));
+  const groups = connGroups(conns);
+  // 展开态只保留这轮还在的组（条目过期/消失后别一直留在 Set 里）
+  const liveKeys = new Set(groups.map(g => g.key));
+  for (const k of [...expandedConns]) {
+    if (!liveKeys.has(k)) expandedConns.delete(k);
+  }
+  groups.forEach((g, i) => {
+    const open = expandedConns.has(g.key);
+    const row = el('div', 'trow conn-grid conn-row' + (open ? ' is-open' : ''));
+    row.title = g.items.length > 1
+      ? '同一目标有 ' + g.items.length + ' 条连接（点这行看每一条）'
+      : '点这行看这条连接的细节';
+    row.onclick = () => {
+      if (open) expandedConns.delete(g.key); else expandedConns.add(g.key);
+      loadConns();
+    };
+    row.appendChild(el('div', 'cell dim', (open ? '▾ ' : '▸ ') + (i + 1)));
     // 进程列：谁发起的。查不到时显示“未知”——不做伪装（受保护进程/系统服务查不到）。
     //
     // 这里**不要**写成 `pc.classList.add(c.proc ? '' : 'dim')`：
@@ -618,40 +632,114 @@ async function loadConns() {
     // 当行循环直接中断 —— 整张表就只剩表头（2026-09-21 bcf7e21 引入的坑，
     // 2026-10-08 用户报“看不到具体连接项”才查出来；v0.5.0 把进程名从 60% 修到 0 之后
     // 几乎每条都命中这个分支，于是从“偶尔少几行”变成“基本只剩表头”）。
-    const pc = el('div', 'cell' + (c.proc ? '' : ' dim'), c.proc || '未知');
-    if (c.proc) {
-      pc.title = c.proc + (c.pid ? '  (PID ' + c.pid + ')' : '') +
-        '\n点击可查完整路径';
+    const pc = el('div', 'cell' + (g.proc ? '' : ' dim'), g.proc || '未知');
+    if (g.proc) {
+      pc.title = g.proc + (g.pid ? '  (PID ' + g.pid + ')' : '') + '\n点击可查完整路径';
       pc.style.cursor = 'pointer';
-      pc.onclick = async () => {
+      pc.onclick = async (ev) => {
+        ev.stopPropagation();   // 别连带把行也展开了
         try {
-          const p = await call('ProcPath', c.pid);
-          toast(c.proc, p || '（拿不到完整路径，可能是受保护进程）');
+          const p = await call('ProcPath', g.pid);
+          toast(g.proc, p || '（拿不到完整路径，可能是受保护进程）');
         } catch (e) { toast('查进程失败', String((e && e.message) || e), 'error'); }
       };
-    } else if (c.pid) {
-      pc.title = 'PID ' + c.pid + '，但拿不到进程名';
+    } else if (g.pid) {
+      pc.title = 'PID ' + g.pid + '，但拿不到进程名';
     }
     row.appendChild(pc);
-    row.appendChild(el('div', 'cell mono', c.target || ''));
-    row.appendChild(el('div', 'cell' + (c.action === '阻断' ? ' dim' : ''), c.action || ''));
-    row.appendChild(el('div', 'cell dim', c.chain || '—'));
-    row.appendChild(el('div', 'cell dim', c.dur || ''));
+    row.appendChild(el('div', 'cell mono', (g.target || '') +
+      (g.items.length > 1 ? '  ×' + g.items.length : '')));
+    row.appendChild(el('div', 'cell' + (g.action === '阻断' ? ' dim' : ''), g.action || ''));
+    row.appendChild(el('div', 'cell dim', g.chain || '—'));
+    // 时长取这一组里最长的那条（其余几条几乎同时在几秒内开的）
+    row.appendChild(el('div', 'cell dim', g.oldest ? g.oldest.dur : ''));
 
-    const up = el('div', 'cell mono', '↑ ' + fmtBytes(c.up));
-    const down = el('div', 'cell mono', '↓ ' + fmtBytes(c.down));
-    if (c.action === '直连') {
+    const up = el('div', 'cell mono', '↑ ' + fmtBytes(g.up));
+    const down = el('div', 'cell mono', '↓ ' + fmtBytes(g.down));
+    if (g.action === '直连') {
       up.title = '直连的流量只统计出方向（回来的包不经内核过滤器）';
       down.title = '直连不统计入方向';
     }
     row.appendChild(up);
     row.appendChild(down);
 
-    const st = el('div', 'cell' + (c.state === '进行中' ? ' strong' : ' dim'), c.state || '');
-    if (c.error) st.title = c.error;
+    const state = connGroupState(g);
+    const st = el('div', 'cell' + (g.active ? ' strong' : ' dim'), state);
+    const errs = g.items.filter(c => c.error);
+    if (errs.length) st.title = errs.map(c => c.error).join('\n');
     row.appendChild(st);
     t.appendChild(row);
+    if (open) t.appendChild(connDetailRow(g));
   });
+}
+
+/* ═══════════ 连接列表：同目标合并 + 点开看每条 ═══════════
+
+   为什么合并：这页叫「连接」不是「进程」—— 一个 magic-api 页面就会对同一目标
+   开 6 条 TCP（浏览器对同一 origin 的并发上限就是 6），逐条铺开看着像“这么多重复行”，
+   反而看不出“这是一次页面加载”。合并键取 目标 + 动作 + 链 + 进程 + PID：
+   这五样都一样的连接，人眼本来就分不开。
+
+   展开态存在 expandedConns（组键的 Set）：这张表每 1.5 秒重渲染一次，
+   所以必须按组键记住，重绘后把展开的那些补回来。 */
+const expandedConns = new Set();
+
+function connGroupKey(c) {
+  return [c.target, c.action, c.chain, c.proc || '', c.pid || 0].join('|');
+}
+
+function connGroups(list) {
+  const m = new Map();
+  for (const c of list) {
+    const k = connGroupKey(c);
+    let g = m.get(k);
+    if (!g) {
+      g = { key: k, target: c.target, action: c.action, chain: c.chain,
+            proc: c.proc, pid: c.pid, items: [] };
+      m.set(k, g);
+    }
+    g.items.push(c);
+  }
+  for (const g of m.values()) {
+    g.up = g.items.reduce((s, c) => s + (c.up || 0), 0);
+    g.down = g.items.reduce((s, c) => s + (c.down || 0), 0);
+    g.packets = g.items.reduce((s, c) => s + (c.packets || 0), 0);
+    g.oldest = g.items.reduce((a, b) => ((b.ageSec || 0) > (a.ageSec || 0) ? b : a));
+    g.active = g.items.filter(c => c.state === '进行中').length;
+  }
+  // 按“最需要看”的优先级报一个状态
+  return [...m.values()];
+}
+
+function connGroupState(g) {
+  if (g.active) return g.active === g.items.length ? '进行中' : '进行中 ' + g.active;
+  for (const want of ['未送达中转', '失败', '已阻断', '已结束']) {
+    const n = g.items.filter(c => c.state === want).length;
+    if (n) return n === g.items.length ? want : want + ' ' + n;
+  }
+  return g.items[0].state || '';
+}
+
+// connDetailRow 展开后的明细：一行一条连接，带**本地端口**（区分同目标的并行连接）。
+function connDetailRow(g) {
+  const row = el('div', 'trow conn-detail');
+  const cell = el('div', 'cell');
+  const items = g.items.slice().sort((a, b) => (b.ageSec || 0) - (a.ageSec || 0));
+  items.forEach(c => {
+    const line = el('div', 'cline');
+    line.appendChild(el('span', 'cmain', '本地端口 ' + (c.sport || '—') +
+      ' · 开始 ' + (c.started || '—') + ' · ' + (c.dur || '') +
+      ' · ↑ ' + fmtBytes(c.up) + ' ↓ ' + fmtBytes(c.down) +
+      ' · ' + (c.packets || 0) + ' 包 · ' + (c.state || '')));
+    if (c.ruleNo) {
+      line.appendChild(el('span', 'csub', '第 ' + c.ruleNo + ' 条' +
+        (c.ruleName ? '「' + c.ruleName + '」' : '')));
+    }
+    cell.appendChild(line);
+    if (c.error) cell.appendChild(el('div', 'cerr', c.error));
+  });
+  row.appendChild(cell);
+  return row;
 }
 
 /* ═══════════════ 状态刷新 ═══════════════ */

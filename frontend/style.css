@@ -518,6 +518,24 @@ code, .mono { font-family: var(--font-mono); }
 .sim-badge.none { background: var(--card-strong); color: var(--muted); }
 .rule-grid  { grid-template-columns: 34px 46px 200px minmax(220px, 1.5fr) 130px 104px; }
 .conn-grid  { grid-template-columns: 40px 132px minmax(160px, 1.2fr) 62px 92px 74px 84px 84px 92px; }
+/* 连接列表：整行可点开（展开明细），明细行跨整行 */
+.conn-row { cursor: pointer; }
+.conn-row.is-open { background: var(--primary-soft); }
+.conn-detail { display: block; }
+.conn-detail .cell {
+  white-space: normal; overflow: visible; text-overflow: clip;
+  padding: var(--s2) var(--s3) var(--s3) 40px; display: block;
+}
+.conn-detail .cline {
+  display: flex; align-items: baseline; gap: var(--s2);
+  font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--body);
+  padding: 1px 0; user-select: text;
+}
+.conn-detail .cline .csub { color: var(--muted); }
+.conn-detail .cerr {
+  font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--error);
+  padding-left: var(--s3); user-select: text;
+}
 /* 上游健康的小圆点（只探测到代理这一段） */
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; vertical-align: middle; background: var(--muted-soft); }
 .dot.ok  { background: var(--success); }
