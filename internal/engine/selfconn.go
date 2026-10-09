@@ -40,6 +40,13 @@ func (e *Engine) UnmarkSelfPort(port uint16) {
 	e.mu.Unlock()
 }
 
+// SelfPortCount 当前登记为“自己人”的本地端口数（供 debug 转储说明用）。
+func (e *Engine) SelfPortCount() int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return len(e.selfPorts)
+}
+
 // DialSelf 本进程去连一个**可能被我们自己接管**的地址（自检、共存检测等探针用）。
 //
 // 与 net.DialTimeout 的差别只有一处：在 connect 之前把本地端口登记为“自己人”，

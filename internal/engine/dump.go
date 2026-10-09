@@ -104,6 +104,10 @@ func (e *Engine) DumpState(reason string) {
 	}
 
 	e.bus.Debug("dump.conns: total=%d active=%d perChain=%s", total, active, chainCountsText(perRule))
+	// 顺带说一句自己人的探针：否则看转储的人会问“刚才那次链路自检怎么不在连接数里”
+	if n := e.SelfPortCount(); n > 0 {
+		e.bus.Debug("dump.self: 本进程探针登记了 %d 个本地端口（不计入上面的连接数，也不进界面列表）", n)
+	}
 	if e.proc != nil {
 		ports, pids := e.proc.Stats()
 		e.bus.Debug("dump.proc: 进程表 ports=%d pids=%d", ports, pids)
