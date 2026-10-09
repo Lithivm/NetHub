@@ -424,7 +424,7 @@ function renderRuntime(st) {
 
   const newest = (n.newestSec === undefined || n.newestSec === null || n.newestSec < 0)
     ? '尚未观测到' : n.newestSec + 's 前';
-  const names = rtFace('名字面', '域名通配与 DNS 接管', [
+  const names = rtFace('域名面', '域名通配与 DNS 接管', [
     rtRow('名字表', (n.count || 0) + ' 个' + ((n.stale || n.failed) ? '（过期 ' + n.stale + ' · 失败 ' + n.failed + '）' : ''),
       n.failed ? 'is-warn' : ''),
     rtRow('最近观测', newest),
@@ -473,7 +473,7 @@ async function loadKernelDetail() {
   if ((d.dynRanges || []).length) {
     add('通配域名当前覆盖的 IP（' + d.dynRanges.length + ' 个）', d.dynRanges.join('\n'));
   }
-  add('主过滤器原文（内核实际拦截条件）', d.filter);
+  add('内核实际拦截条件', d.filter);
   fold.dataset.loaded = '1';
 }
 
@@ -1739,7 +1739,7 @@ const HELP = {
   runtime: {
     title: '接管状态：各项指标的含义与判定口径',
     paras: [
-      '三个分面 —— 内核面：内核拦截是否生效（数据包能否到达本程序）；名字面：域名通配与 DNS 接管；连接面：连接与进程名解析。',
+      '三个分面 —— 内核面：内核拦截是否生效（数据包能否到达本程序）；域名面：域名通配与 DNS 接管（名字表 / 假 IP 池）；连接面：连接与进程名解析。',
       '过滤器句柄 · main = 主过滤器（按规则的网段与端口拦截）；dyn = 通配域名的动态过滤器（只装当前观测到的 IP）；dns = DNS 接管的注入句柄（filter=false，仅用于下发假 IP 应答）；socket = SOCKET 层（事件驱动获取进程名）；reflect = REFLECT 层（列出本机其它 WinDivert 使用者）。',
       '规则与区间 —— N 条规则编译为 M 个地址区间，区间是内核过滤器的匹配粒度；同网段的多条规则会被合并，因此区间数通常少于规则数。括号内为过滤器原文长度。',
       'WinDivert 占用 —— 检测到本机还有哪些进程在使用 WinDivert。除本进程之外还有其它进程时，数据包可能被对方优先处理，这是“改写未达中转”的常见原因。',
