@@ -545,6 +545,9 @@ code, .mono { font-family: var(--font-mono); }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; vertical-align: middle; background: var(--muted-soft); }
 .dot.ok  { background: var(--success); }
 .dot.bad { background: var(--error); }
+/* 探测中：同色系里用警示色（不是绿也不是红）—— 它表达的是“还没有结论”，
+   用绿/红都会提前给一个结论（而结论还没出来）。 */
+.dot.probing { background: var(--warning); }
 /* headless 模式的安装状态行：红 ✗ / 绿 ✓ */
 .svc-state { display: flex; align-items: center; font-size: var(--fs-sm); font-weight: 600; }
 .svc-ok  { color: var(--success); }

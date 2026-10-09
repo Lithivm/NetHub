@@ -592,12 +592,20 @@ func (b *Backend) GetVerdict() engine.Verdict {
 	return engine.ChainVerdict(running, chains, targets)
 }
 
-// ProbeChains 立即把所有上游探一遍（界面上的“立即探测”）。
+// ProbeChains 立即把所有上游探一遍（界面上的"立即探测"）。
+//
+// 为什么在返回前先把整轮标上：探测是异步的，界面点完立刻就回来查 ——
+// goroutine 那时可能还没开始跑。不同步标上，“点了没反应”就还会发生
+// （用户报的困惑：到底该等还是该点？）。
 func (b *Backend) ProbeChains() error {
 	if b.a.Engine == nil {
 		return fmt.Errorf("引擎未初始化")
 	}
-	go b.a.Engine.ProbeAll()
+	b.a.Engine.StartProbeRound()
+	go func() {
+		defer b.a.Engine.EndProbeRound()
+		b.a.Engine.ProbeAll()
+	}()
 	return nil
 }
 

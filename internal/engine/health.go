@@ -54,10 +54,14 @@ type UpHealthView struct {
 
 // ChainHealthView 给界面看的一条链的健康快照。
 type ChainHealthView struct {
-	Name      string         `json:"name"`
-	Strategy  string         `json:"strategy"`
-	Probe     string         `json:"probe"`
+	Name     string `json:"name"`
+	Strategy string `json:"strategy"`
+	Probe    string `json:"probe"`
+	// Upstreams 这条链的上游快照。
 	Upstreams []UpHealthView `json:"upstreams"`
+	// Probing：这条链的探测**正在跑**（整轮在跑时也算，见 ChainHealth 的注释）。
+	// 界面拿它把“探测中”与“待探测”分开：两者在没有观测时长得一模一样。
+	Probing bool `json:"probing"`
 }
 
 // healthOf 取某条链的健康表（下标与 Upstreams() 对齐）。
@@ -277,6 +281,8 @@ func fnv32a(s string) uint32 {
 // 真实事故里 sjy 的口令被上游间歇性拒掉，界面一直绿着，靠外部工具才查出来。
 // 公网探针（223.5.5.5:443）不涉及客户内网的任何服务器，所以“不打扰内网”这条仍然成立。
 func (e *Engine) probeChain(ch config.Chain) {
+	e.markProbing(ch.Name, true)
+	defer e.markProbing(ch.Name, false)
 	e.healthOf(ch) // 先确保健康表存在（markUp 依赖它）
 	for i, raw := range e.cfg.UpstreamsResolved(ch) {
 		u, err := upstream.Parse(raw)
@@ -314,7 +320,16 @@ func (e *Engine) probeChain(ch config.Chain) {
 	}
 }
 
+// probingNow 这条链现在有没有探测在飞。
+func (e *Engine) probingNow(chain string) bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.probing[chain] > 0
+}
+
 // ProbeAll 立刻把所有链的所有上游探一遍（界面上的"立即探测"）。
+//
+// 是否直接调用：界面走 ProbeAllAsync（先同步标上“探测中”），定时探测走 healthLoop。
 func (e *Engine) ProbeAll() {
 	for _, ch := range e.cfg.ChainsSnapshot() {
 		e.probeChain(ch)
@@ -333,6 +348,7 @@ func (e *Engine) healthLoop() {
 	// 用户会以为没生效（实际只是还在等第一个 tick）。
 	for _, ch := range e.cfg.ChainsSnapshot() {
 		if ch.ProbeInterval() == 0 {
+			// probe: off 的链不自动探（界面会显示“探测已关”，不会一直卡在“探测中”）。
 			continue
 		}
 		last[ch.Name] = time.Now()
@@ -358,6 +374,44 @@ func (e *Engine) healthLoop() {
 	}
 }
 
+// ── 探测状态（界面要看得见“正在探”）───────────────────────────────
+
+// markProbing 一条链的探测开始/结束（计数，可重入：定时探测与手动探测会叠）。
+func (e *Engine) markProbing(chain string, on bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.probing == nil {
+		e.probing = map[string]int{}
+	}
+	if on {
+		e.probing[chain]++
+		return
+	}
+	if e.probing[chain] > 1 {
+		e.probing[chain]--
+		return
+	}
+	delete(e.probing, chain)
+}
+
+// StartProbeRound / EndProbeRound 手动探测的整轮起止。
+//
+// 为什么需要它（而不只依赖 probeChain 里的计数）：`go ProbeAll()` 是异步的 ——
+// 界面点完按钮立刻就回来查，那时 goroutine 可能还没开始跑，于是“点了没反应”。
+// 所以后端在**返回前**同步把整轮标上，界面下一次轮询必看到“探测中”。
+func (e *Engine) StartProbeRound() { e.probeRound.Add(1) }
+func (e *Engine) EndProbeRound()   { e.probeRound.Add(-1) }
+
+// ProbingChains 正在探测（或排队）的链数。
+func (e *Engine) ProbingChains() (n int) {
+	if e.probeRound.Load() > 0 {
+		return len(e.cfg.ChainsSnapshot())
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return len(e.probing)
+}
+
 // ChainHealth 所有链的健康快照（界面用）。
 func (e *Engine) ChainHealth() []ChainHealthView {
 	out := make([]ChainHealthView, 0, len(e.cfg.ChainsSnapshot()))
@@ -366,6 +420,9 @@ func (e *Engine) ChainHealth() []ChainHealthView {
 			Name:     ch.Name,
 			Strategy: ch.StrategyName(),
 			Probe:    ch.ProbeInterval().String(),
+			// 一条链在探，或**整轮在跑**（一轮按链顺序做，后面的链算“排队中”）——
+			// 界面只需要回答“现在是不是在探”，不必区分这两者。
+			Probing: e.probingNow(ch.Name) || e.probeRound.Load() > 0,
 		}
 		hs := e.healthOf(ch)
 		ups := e.cfg.UpstreamsResolved(ch)

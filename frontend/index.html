@@ -89,9 +89,12 @@
       <div class="card-head">
         <h2>隧道链路</h2>
         <div class="spacer"></div>
+        <!-- 探测状态（自己在跑的时候要看得见）：以前只能从"待探测"变成"12 ms"这两张面孔里
+             猜它是不是在探，于是用户会困惑"到底该等还是该点一下"。 -->
+        <span class="hint" id="chainProbeState"></span>
         <span class="hint" id="warmInfo"></span>
         <button class="btn btn-sm btn-primary" id="btnChainAdd">添加链路</button>
-        <button class="btn btn-sm" id="btnChainProbe">立即探测</button>
+        <button class="btn btn-sm" id="btnChainProbe" title="连一次上游：TCP + TLS + 认证 + 试连（不碰业务目标）。启动时自动一轮，之后每 30 秒一轮">立即探测</button>
         <button class="btn btn-sm" id="btnChainImport">从 gost .bat 导入</button>
       </div>
       <div class="table" id="chainTable"></div>

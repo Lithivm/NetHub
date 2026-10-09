@@ -947,33 +947,84 @@ async function loadChains() {
   });
 }
 
-/* 每条上游一个小圆点：绿=可用、红=不可用、灰=还没探过；悬停看细节。 */
+/* 链路健康：拿快照 + 把“正在探”这个状态同步给按钮与卡片头。
+
+   “正在探”不是耗时装饰，它是**动作的回执**：点了「立即探测」之后必须看得见
+   “探测中…”，否则点完看着没反应、过一会儿自己好了 —— 用户就会以为这个按钮没用。 */
 async function loadChainHealth() {
   try {
     const hs = await call('GetChainHealth');
     chainHealth = {};
     (hs || []).forEach(h => { chainHealth[h.name] = h; });
+    setChainProbing((hs || []).some(h => h.probing));
   } catch (e) { /* 探测信息拿不到不影响主流程 */ }
 }
 
+let chainProbing = false;
+// 刚点完探测的“跟看窗口”：后端已经把整轮标上了，但轮询有间隔 ——
+// 在这几秒里不许把按钮收回“立即探测”，否则就是“点了没反应”。
+let chainProbeHoldUntil = 0;
+
+function setChainProbing(on) {
+  if (!on && Date.now() < chainProbeHoldUntil) on = true;
+  chainProbing = on;
+  const btn = document.getElementById('btnChainProbe');
+  if (btn) {
+    btn.disabled = on;
+    btn.textContent = on ? '探测中…' : '立即探测';
+  }
+  const hint = document.getElementById('chainProbeState');
+  if (hint) {
+    hint.textContent = on ? '正在探测上游（自动完成，不必再点）' : '';
+    hint.title = '探测 = 连一次上游做 TCP + TLS + 认证 + 试连，通常 1~2 秒。\n' +
+      '启动时自动一轮，之后每条链按自己的间隔（默认 30 秒）自动一轮。';
+  }
+}
+
+/* 每条上游一个小圆点：绿=可用、红=不可用、琥珀=正在探、灰=没探过；悬停看细节。
+
+   **“没探过”与“正在探”必须分开显示**（2026-10-09 用户反馈）：
+   以前两者都是灰点 + “待探测”，于是切进这一页看到“待探测”、过 1~2 秒自己变成
+   “12 ms” —— 那 1~2 秒里到底该自己点一下还是它自己在跑，从界面上看不出来。 */
 function healthCell(h) {
   const c = el('div', 'cell');
   if (!h || !h.upstreams || !h.upstreams.length) {
     c.textContent = '—';
     return c;
   }
-  let ok = 0;
+  let ok = 0, known = 0;
   h.upstreams.forEach(u => {
-    const dot = el('span', 'dot ' + (u.known ? (u.ok ? 'ok' : 'bad') : ''));
+    // 没有观测、但正在探 → 琥珀点（与“探测中…”文案同一个话）
+    const cls = u.known ? (u.ok ? 'ok' : 'bad') : (h.probing ? 'probing' : '');
+    const dot = el('span', 'dot ' + cls);
     dot.title = u.url + (u.latency ? '　' + u.latency : '') + (u.error ? '　' + u.error : '');
     c.appendChild(dot);
+    if (u.known) known++;
     if (u.known && u.ok) ok++;
   });
-  const summary = h.upstreams.length > 1
-    ? ok + '/' + h.upstreams.length
-    : (h.upstreams[0].latency || (h.upstreams[0].known ? '不通' : '待探测'));
+
+  // 已经有观测时**不抢掉旧值**：探测每 30 秒一轮，抢掉就是每 30 秒闪一下
+  // （“在刷新”这件事挂在悬停提示里，不占主位）。
+  let summary;
+  if (known === 0) {
+    summary = h.probing ? '探测中…' : (h.probe === '0s' ? '探测已关' : '待探测');
+  } else if (h.upstreams.length > 1) {
+    summary = ok + '/' + h.upstreams.length;
+  } else {
+    summary = h.upstreams[0].latency || (h.upstreams[0].known ? '不通' : '待探测');
+  }
   c.appendChild(el('span', 'dim', summary));
-  c.title = '策略 ' + h.strategy + '　探测间隔 ' + h.probe;
+
+  if (known === 0 && h.probing) {
+    c.title = '正在探测这条链的上游：TCP + TLS + 认证 + 试连一次，通常 1~2 秒。\n' +
+      '探测是自动的（启动时一轮、之后每 30 秒一轮），不必手点。';
+  } else if (known === 0 && h.probe === '0s') {
+    c.title = '这条链关掉了自动探测（探测间隔 off）。\n' +
+      '要现在探一次：点上面的「立即探测」。';
+  } else {
+    c.title = '策略 ' + h.strategy + '　探测间隔 ' + h.probe +
+      (h.probing ? '\n正在刷新观测（后台探测中，自动完成）' : '');
+  }
   return c;
 }
 
@@ -2322,10 +2373,12 @@ function wire() {
   // 链路页
   document.getElementById('btnChainAdd').onclick = () => chainForm(null);
   document.getElementById('btnChainProbe').onclick = async () => {
-    try { await call('ProbeChains'); toast('正在探测上游', '只测到代理这一段，不碰业务目标', 'info'); }
-    catch (e) { fail(e); }
-    setTimeout(loadChains, 1500);
-    setTimeout(loadVerdict, 1800);   // 结论跟着探测结果重算
+    try { await call('ProbeChains'); } catch (e) { fail(e); return; }
+    // 立刻进入“探测中”：不等下一次轮询（后端在返回前已经同步标好整轮）
+    chainProbeHoldUntil = Date.now() + 3000;
+    setChainProbing(true);
+    await loadChains();
+    loadVerdict();   // 结论跟着探测结果重算（探测结束后会被 5 秒轮询再刷一次）
   };
   document.getElementById('btnChainImport').onclick = importBats;
 
@@ -2547,6 +2600,14 @@ async function boot() {
     const p = document.getElementById('page-chain');
     if (p && p.classList.contains('is-active')) loadChains();
   }, 5000);
+  // 探测期间加密跟随：切进来看到“探测中…”后，1~2 秒内就该看到结果，
+  // 而不是等最多 5 秒 —— 那正是“切过来过 1-2s 才发现探测好了”的由来。
+  // 只在“确实有链在探”时跑（平时一个多余请求都不发）。
+  setInterval(() => {
+    if (!chainProbing) return;
+    const p = document.getElementById('page-chain');
+    if (p && p.classList.contains('is-active')) loadChains();
+  }, 800);
 
   await refreshState();
   applyTheme(state.theme);
