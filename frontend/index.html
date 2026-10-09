@@ -103,7 +103,7 @@
     <div class="card card-fill">
       <div class="card-head">
         <h2>路由规则</h2>
-        <button class="info-btn" id="btnHelpRule" title="域名与通配域名是怎么匹配上的">i</button>
+        <button class="info-btn" id="btnHelpRule" title="域名与通配域名的匹配规则">i</button>
         <span class="hint">自上而下匹配，命中即停；一条规则可含多个目标。改动<b>即时保存并立即生效</b>（已在跑的连接不断）</span>
         <div class="spacer"></div>
         <button class="btn btn-sm" id="btnRuleSort" title="前缀长的（/32 比 /24 具体）排前面，带端口条件的更靠前；本机自身 / 环回（127.0.0.0/8）类规则放最后——它是兜底，不跟内网网段抢位置；停用的规则原地不动">按优先级排序</button>
@@ -184,6 +184,7 @@
           <div class="spacer"></div>
           <span class="hint mono" id="rtUptime">—</span>
           <button class="btn btn-sm" id="btnRtRefresh">刷新</button>
+          <button class="info-btn" id="btnHelpRuntime" title="各项指标的含义与判定口径">i</button>
         </div>
         <!-- 内容一律放进 card-body：卡片自己不设内边距（padding 在 .card-body 上），
              直接当子元素会被 overflow:hidden 贴着边切掉（展开按钮就被切过）。 -->
@@ -207,7 +208,7 @@
           <div class="spacer"></div>
           <button class="btn btn-sm" id="btnCopySysPath">复制驱动路径</button>
           <button class="btn btn-sm" id="btnOpenProgDir">打开程序目录</button>
-          <button class="info-btn" id="btnHelpWhitelist" title="为什么只加信任区不够、加完为什么要重启杀软">i</button>
+          <button class="info-btn" id="btnHelpWhitelist" title="信任区与「例外驱动」的区别、需重启的原因">i</button>
         </div>
         <div class="card-body form">
           <div class="wl-table">
@@ -240,7 +241,7 @@
           <span class="hint">看内网数据会走哪、走得对不对（只读，不改任何设置）</span>
           <div class="spacer"></div>
           <button class="btn btn-sm" id="btnClashCheck">重新检测</button>
-          <button class="info-btn" id="btnHelpClash" title="它依据什么判断、怎么修">i</button>
+          <button class="info-btn" id="btnHelpClash" title="判定依据与修复方式">i</button>
         </div>
         <div class="card-body form">
           <div class="clash-state" id="clashState">尚未检测。点右上角「重新检测」。</div>
@@ -297,7 +298,7 @@
           <div class="spacer"></div>
           <button class="btn btn-sm" id="btnUdpCopy">复制结果</button>
           <button class="btn btn-sm btn-primary" id="btnUdpProbe">开始探测</button>
-          <button class="info-btn" id="btnHelpUdp" title="为什么不做 UDP、同行怎么做">i</button>
+          <button class="info-btn" id="btnHelpUdp" title="为何未实现 UDP 中继、同行现状">i</button>
         </div>
         <div class="card-body form">
           <pre class="explain-out" id="udpProbeOut">点「开始探测」：逐条链问一次上游能不能中继 UDP（只发一次公网 DNS 查询，不碰客户内网）。
@@ -351,7 +352,7 @@
         <div class="card-head">
           <h2>系统 hosts 接管</h2>
           <div class="spacer"></div>
-          <button class="info-btn" id="btnHelpHosts" title="我们会动 hosts 的哪一部分、什么时候会改回去">i</button>
+          <button class="info-btn" id="btnHelpHosts" title="写入范围与恢复机制">i</button>
         </div>
         <div class="card-body form">
           <label class="check">
@@ -376,7 +377,7 @@
           <span class="hint">一条上游不响应时，等多久换下一条</span>
           <div class="spacer"></div>
           <button class="btn btn-sm" id="btnDialReset">重置</button>
-          <button class="info-btn" id="btnHelpDial" title="每个数字都是什么意思">i</button>
+          <button class="info-btn" id="btnHelpDial" title="各字段含义与默认值依据">i</button>
         </div>
         <div class="card-body form">
           <div class="dial-grid">
@@ -394,7 +395,7 @@
           <span class="hint">把引擎装成 Windows 服务：<b>无人登录也会跑</b>（对齐 Proxifier 的 Service Mode）</span>
           <div class="spacer"></div>
           <span class="hint" id="svcInfo">—</span>
-          <button class="info-btn" id="btnHelpService" title="服务的细节">i</button>
+          <button class="info-btn" id="btnHelpService" title="服务模式说明">i</button>
         </div>
         <div class="card-body form">
           <div class="hint">以 LocalSystem 跑、没有界面；配置与日志与界面版共用。<b>「i」</b>里有细节。</div>
