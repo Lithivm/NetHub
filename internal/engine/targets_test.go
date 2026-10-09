@@ -3,6 +3,7 @@ package engine
 import (
 	"net"
 	"testing"
+	"time"
 
 	"nethub/internal/config"
 	"nethub/internal/dnsmap"
@@ -77,5 +78,51 @@ func TestResolveHostTargetsUnresolved(t *testing.T) {
 	st := e.HostResolves()
 	if len(st) != 1 || !st[0].Failed {
 		t.Errorf("失败状态应记下来: %+v", st)
+	}
+}
+
+// 巡检状态：点了「立即巡检」要立刻看得出“正在巡”，巡完（无论成败）必须清掉。
+//
+// 清不掉比不显示更糟：界面会永远停在“巡检中”，用户一直等一个不会来的结果
+// （与探测那边同一个道理，见 probe_state_test.go）。
+func TestTargetProbeState(t *testing.T) {
+	e := newTestEngine()
+	e.cfg = &config.Config{}
+
+	if e.TargetsProbing() {
+		t.Fatal("刚建好的引擎不该在巡检")
+	}
+	if n := e.ProbeTargetsAsync(); n != 0 {
+		t.Fatalf("没有最近访问过的目标时，这一轮应巡 0 个，实际 %d", n)
+	}
+	// 备的是一次**空轮**（没有目标）：计数也应当先标上再清掉
+	if !e.TargetsProbing() {
+		t.Error("按钮点下去的那一刻就该是“正在巡检”（否则界面点完没反应）")
+	}
+	if e.TargetProbeCount() != 0 {
+		t.Errorf("这一轮目标数 = %d，期望 0", e.TargetProbeCount())
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for e.TargetsProbing() {
+		if time.Now().After(deadline) {
+			t.Fatal("巡检结束后状态没清掉 —— 界面会永远显示“巡检中”")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// 同步入口（自动巡检走它）也要有同样的状态语义
+	e.beginTargetRound(3)
+	if !e.TargetsProbing() || e.TargetProbeCount() != 3 {
+		t.Errorf("整轮标记没生效：probing=%v count=%d", e.TargetsProbing(), e.TargetProbeCount())
+	}
+	// 计数可重入：自动轮与手动轮会叠在一起
+	e.beginTargetRound(3)
+	e.endTargetRound()
+	if !e.TargetsProbing() {
+		t.Error("两轮叠加时，结束一轮不该认为巡完了")
+	}
+	e.endTargetRound()
+	if e.TargetsProbing() {
+		t.Error("两轮都结束后应清掉")
 	}
 }

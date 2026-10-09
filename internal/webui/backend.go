@@ -998,11 +998,24 @@ func (b *Backend) RestoreBackup(name string) error {
 }
 
 // GetTargetHealth 业务目标巡检快照。
-func (b *Backend) GetTargetHealth() []engine.TargetHealthView {
+// TargetProbeView 巡检页的一次性快照：列表 + “正在巡检”（与 ConnList 同一个理由：
+// 一次拉完，别让界面分两次问；更重要的是**把“正在巡检”这个状态带出来** —— 空表时
+// “正在巡检”与“还没有可巡检的目标”长得一模一样，而前者说“再等一秒”，后者说“去干别的”。
+type TargetProbeView struct {
+	Probing bool                      `json:"probing"`
+	Count   int                       `json:"count"`
+	Targets []engine.TargetHealthView `json:"targets"`
+}
+
+func (b *Backend) GetTargetHealth() TargetProbeView {
 	if b.a.Engine == nil {
-		return nil
+		return TargetProbeView{}
 	}
-	return b.a.Engine.TargetHealth()
+	return TargetProbeView{
+		Probing: b.a.Engine.TargetsProbing(),
+		Count:   b.a.Engine.TargetProbeCount(),
+		Targets: b.a.Engine.TargetHealth(),
+	}
 }
 
 // ProbeTargetsNow 立刻巡检一遍最近用过的业务目标。
@@ -1010,7 +1023,11 @@ func (b *Backend) ProbeTargetsNow() error {
 	if b.a.Engine == nil {
 		return fmt.Errorf("引擎未初始化")
 	}
-	go b.a.Engine.ProbeTargets()
+	// 手动轮在日志里留一行：巡检会向上游与业务发起真实连接，
+	// 事后看到一串 target.* 日志时要能对上是“谁点的”。
+	// 返回值就是这一轮要巡几个（先看完再写日志：写在前面的会是上一轮的数）。
+	n := b.a.Engine.ProbeTargetsAsync()
+	b.a.Bus.Info("patrol.now: by=ui targets=%d", n)
 	return nil
 }
 

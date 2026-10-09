@@ -537,19 +537,32 @@ async function loadBackups() {
   box.appendChild(row);
 }
 
-/* ═══════════════ 业务目标巡检 ═══════════════ */
+/* ═══════════════ 业务目标巡检 ═══════════════
+
+   “正在巡检”与“还没有可巡检的目标”在空表上长得一模一样 —— 而前者说“再等一秒”，
+   后者说“去干别的”。所以这一格也跟链路页一样：状态要看得见，动作要有回执。 */
+
+let targetProbing = false;
+// 刚点完巡检的“跟看窗口”（同链路页）：一轮可能瞬间就跑完（目标不可达直接失败），
+// 没有这个窗口的话按钮会“闪一下就回去”，看起来仍像没点成功。
+let targetProbeHoldUntil = 0;
 
 async function loadTargetHealth() {
-  let list = [];
-  try { list = await call('GetTargetHealth'); } catch (e) { return; }
   const t = document.getElementById('targetTable');
   if (!t) return;
+  let d = { probing: false, count: 0, targets: [] };
+  try { d = (await call('GetTargetHealth')) || d; } catch (e) { return; }
+  const list = d.targets || [];
+  setTargetProbing(!!d.probing, d.count || 0);
+
   t.replaceChildren();
   const head = el('div', 'trow thead target-grid');
   ['目标', '链', '状态', '延迟', '检查时间'].forEach(h => head.appendChild(el('div', 'cell', h)));
   t.appendChild(head);
-  if (!list || !list.length) {
-    t.appendChild(emptyState(ICON_TARGET, '还没有可以巡检的目标', '等有内网连接之后，或点「立即巡检」。', null, null));
+  if (!list.length) {
+    t.appendChild(d.probing
+      ? emptyState(ICON_TARGET, '正在巡检…', '经隧道连一次这些目标（不发数据），结果马上出来。', null, null)
+      : emptyState(ICON_TARGET, '还没有可以巡检的目标', '等有内网连接之后，或点「立即巡检」。', null, null));
     return;
   }
   list.forEach(x => {
@@ -563,6 +576,26 @@ async function loadTargetHealth() {
     row.appendChild(c);
     t.appendChild(row);
   });
+}
+
+/* 巡检状态 → 按钮与卡片头。与链路页同一套表达（见 DESIGN 的“三态 + 动作回执”）。
+   已经有结果时不抢掉旧结果：巡检是周期性的，抢掉就是每轮闪一下 ——
+   “正在刷”挂在卡片头那一句里，不占表格的位置。 */
+function setTargetProbing(on, count) {
+  if (!on && Date.now() < targetProbeHoldUntil) on = true;
+  targetProbing = on;
+  const btn = document.getElementById('btnProbeTargets');
+  if (btn) {
+    btn.disabled = on;
+    btn.textContent = on ? '巡检中…' : '立即巡检';
+  }
+  const hint = document.getElementById('targetProbeState');
+  if (hint) {
+    const label = count ? '正在巡检 ' + count + ' 个业务目标' : '正在巡检业务目标';
+    hint.textContent = on ? label + '（自动完成，不必再点）' : '';
+    hint.title = '巡检 = 经隧道向这些目标连一次（只建连、不发数据、立刻断开），回答“今天这套业务通不通”。\n' +
+      '勾了「自动巡检」时按间隔自己跑；也可以随时点「立即巡检」。';
+  }
 }
 
 /* ═══════════════ 连接列表 ═══════════════ */
@@ -2313,8 +2346,15 @@ function wire() {
   // 诊断页：接管状态（仪表盘）—— 只在页面可见时刷（与连接页同一套做法）
   setInterval(() => {
     const p = document.getElementById('page-diag');
-    if (p && p.classList.contains('is-active')) { loadRuntimeStatus(); loadVerdict(); }
+    if (p && p.classList.contains('is-active')) { loadRuntimeStatus(); loadVerdict(); loadTargetHealth(); }
   }, 5000);
+  // 巡检期间加密跟随（同链路页）：巡检比探测更慢（每个目标经隧道连一次，超时 5 秒），
+  // “点了没反应”的窗口更长 —— 只在确实在巡检时跑。
+  setInterval(() => {
+    if (!targetProbing) return;
+    const p = document.getElementById('page-diag');
+    if (p && p.classList.contains('is-active')) loadTargetHealth();
+  }, 800);
   document.getElementById('btnCopyPrecheck').onclick = copyPrecheck;
   document.getElementById('btnSvcInstall').onclick = async () => {
     if (!await confirmBox('安装为 Windows 服务',
@@ -2362,12 +2402,14 @@ function wire() {
     await loadService();
   };
 
-  // 连接页：业务目标巡检
+  // 连接页 / 诊断页：业务目标巡检
   document.getElementById('btnProbeTargets').onclick = async () => {
-    try { await call('ProbeTargetsNow'); toast('正在巡检业务目标', '经隧道连一次、不发数据', 'info'); }
-    catch (e) { fail(e); }
-    setTimeout(loadTargetHealth, 3000);
-    setTimeout(loadVerdict, 3500);   // 结论跟着巡检结果重算
+    try { await call('ProbeTargetsNow'); } catch (e) { fail(e); return; }
+    // 立刻进入“巡检中”：后端在返回前已经同步标好这一轮（并算好了要巡几个）
+    targetProbeHoldUntil = Date.now() + 3000;
+    setTargetProbing(true, 0);
+    await loadTargetHealth();
+    loadVerdict();   // 结论跟着巡检结果重算
   };
 
   // 链路页

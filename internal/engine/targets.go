@@ -85,10 +85,49 @@ func (e *Engine) recentTargets(limit int) []targetRef {
 
 // ProbeTargets 巡检最近访问过的业务目标。只建连、不发数据、立刻断开。
 func (e *Engine) ProbeTargets() {
-	for _, ref := range e.recentTargets(e.cfg.PatrolCount()) {
+	refs := e.recentTargets(e.cfg.PatrolCount())
+	e.beginTargetRound(int32(len(refs)))
+	defer e.endTargetRound()
+	e.probeRefs(refs)
+}
+
+// ProbeTargetsAsync 界面点「立即巡检」的入口：**先同步标上“正在巡检”**，再丢到后台跑。
+//
+// 为什么不能直接 `go ProbeTargets()`：界面点完立刻就回来查，那时 goroutine 可能还没开始跑 ——
+// 表现就是“点了没反应，过一会儿自己好了”（2026-10-09 用户报的正是这个）。
+// 顺便同步把**这一轮要巡几个**算出来：界面能显示“正在巡检 3 个业务目标”，比一个转圈有信息量。
+func (e *Engine) ProbeTargetsAsync() int {
+	refs := e.recentTargets(e.cfg.PatrolCount())
+	e.beginTargetRound(int32(len(refs)))
+	go func() {
+		defer e.endTargetRound()
+		e.probeRefs(refs)
+	}()
+	return len(refs)
+}
+
+func (e *Engine) probeRefs(refs []targetRef) {
+	for _, ref := range refs {
 		e.probeOneTarget(ref)
 	}
 }
+
+// beginTargetRound / endTargetRound：巡检状态（轮数计数，自动轮与手动轮会叠）。
+func (e *Engine) beginTargetRound(n int32) {
+	e.targetCount.Store(n)
+	e.targetRounds.Add(1)
+}
+
+func (e *Engine) endTargetRound() {
+	e.targetRounds.Add(-1)
+}
+
+// TargetsProbing 现在有没有巡检在跑（界面据此显示“巡检中”，
+// 并把“正在巡检”与“还没有可巡检的目标”分开 —— 两者在空表上长得一模一样）。
+func (e *Engine) TargetsProbing() bool { return e.targetRounds.Load() > 0 }
+
+// TargetProbeCount 本轮要巡几个目标（没在巡检时为 0）。
+func (e *Engine) TargetProbeCount() int { return int(e.targetCount.Load()) }
 
 func (e *Engine) probeOneTarget(ref targetRef) {
 	ch, ok := e.cfg.ChainByName(ref.chain)

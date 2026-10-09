@@ -529,6 +529,11 @@ type Engine struct {
 	// 计数而不是布尔：定时探测与手动探测会叠在同一条链上（探测按链顺序做，一轮可能几十秒）。
 	probing    map[string]int
 	probeRound atomic.Int32
+
+	// targetRounds / targetCount：业务目标巡检的状态（同上：界面必须看得出“正在巡检”）。
+	// 巡检比探测更慢（每个目标都要经隧道连一次，超时 5 秒），所以“点了没反应”的窗口更长。
+	targetRounds atomic.Int32
+	targetCount  atomic.Int32
 	// startedAt 本次启动的时刻（诊断页“运行时长”用）。
 	startedAt time.Time
 	// statSummaryAt 上一次“5 分钟概览”时的累计连接数（算增量用）。

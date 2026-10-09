@@ -276,7 +276,8 @@
           <h2>业务目标巡检</h2>
           <span class="hint">只探「最近真的访问过」的内网目标：经隧道连一次、不发数据</span>
           <div class="spacer"></div>
-          <button class="btn btn-sm" id="btnProbeTargets">立即巡检</button>
+          <span class="hint" id="targetProbeState"></span>
+          <button class="btn btn-sm" id="btnProbeTargets" title="经隧道向这些目标连一次（只建连、不发数据、立刻断开）；勾了「自动巡检」时也会按间隔自己跑">立即巡检</button>
         </div>
         <div class="card-body form">
           <div class="input-row">
