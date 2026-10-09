@@ -606,8 +606,13 @@ async function loadConns() {
     const row = el('div', 'trow conn-grid');
     row.appendChild(el('div', 'cell dim', String(i + 1)));
     // 进程列：谁发起的。查不到时显示“未知”——不做伪装（受保护进程/系统服务查不到）。
-    const pc = el('div', 'cell', c.proc || '未知');
-    pc.classList.add(c.proc ? '' : 'dim');
+    //
+    // 这里**不要**写成 `pc.classList.add(c.proc ? '' : 'dim')`：
+    // classList.add('') 会抛 "The token provided must not be empty"，
+    // 当行循环直接中断 —— 整张表就只剩表头（2026-09-21 bcf7e21 引入的坑，
+    // 2026-10-08 用户报“看不到具体连接项”才查出来；v0.5.0 把进程名从 60% 修到 0 之后
+    // 几乎每条都命中这个分支，于是从“偶尔少几行”变成“基本只剩表头”）。
+    const pc = el('div', 'cell' + (c.proc ? '' : ' dim'), c.proc || '未知');
     if (c.proc) {
       pc.title = c.proc + (c.pid ? '  (PID ' + c.pid + ')' : '') +
         '\n点击可查完整路径';
