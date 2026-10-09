@@ -53,8 +53,9 @@ Go + **Wails v2**（WebView2 界面）+ **WinDivert**（内核驱动），**仅 
 
 ```bash
 export PATH="/c/Program Files/Go/bin:$PATH"                 # git-bash
+gofmt -l . | grep -v '^local/'                              # 空即合规；**别只扫 internal/**（仓库根 main.go 也改）
+go vet ./... && go test ./internal/...
 go build -tags production -ldflags "-H=windowsgui -s -w" -o run/nethub.exe .
-go test ./internal/...
 pwsh -NoProfile -File ./local/check-ui.ps1                  # 改完前端必须跑（boot 不报错 + 无未定义函数 + **结构断言**：标签成对 / tab↔页面一一对应 / main 下无孤儿）
 pwsh -NoProfile -File ./local/ui-controls-test.ps1          # 勾选/下拉真的调到了后端 + 卡片标题不被挤成两行
 pwsh -NoProfile -File ./local/restart.ps1                   # 快速优雅重启 + 复测内网目标
