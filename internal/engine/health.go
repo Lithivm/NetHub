@@ -30,6 +30,14 @@ type upHealth struct {
 	// suspect 业务拨号连续失败的次数（**不是**探测结论，见 noteUpstreamSuspect）。
 	// 成功一次（拨通或探测通过）就清零。
 	suspect int
+
+	// authRejected 这次不可用的原因是**凭据被上游拒绝**（不是连不上/超时）。
+	//
+	// 为什么要单独记一笔：这两件事的处置完全不同（一个改口令、一个查网络），
+	// 而"口令错了"在界面上的表现以前是绿的（旧版只做 TCP+TLS 握手），现场
+	// 只能用别的工具才看得出来。这里把它留到观测结果里，结论那一层就能分开说。
+	// 只在 ok=false 时有意义（成功了必然是认证过了）。
+	authRejected bool
 }
 
 // UpHealthView 给界面看的上游健康快照。
@@ -40,6 +48,8 @@ type UpHealthView struct {
 	Error   string `json:"error"`   //
 	Checked string `json:"checked"` // HH:MM:SS，没探过就是空
 	Known   bool   `json:"known"`   // 是否已有观测结果
+	// AuthRejected：不可用的原因是凭据被拒（而不是连不上）—— 见 upHealth.authRejected。
+	AuthRejected bool `json:"authRejected"`
 }
 
 // ChainHealthView 给界面看的一条链的健康快照。
@@ -113,7 +123,7 @@ const healthFlipStreak = 2
 //
 // 单次结果不直接改状态（第一次探测除外，它必须有结论）：
 // 偶发抖动只会把 streak 清零，不会把界面刷成红色，也不会往日志里塞一行 upstream.down。
-func (e *Engine) markUp(chain string, idx int, ok bool, latency time.Duration, errText string) (flipped bool, raw string) {
+func (e *Engine) markUp(chain string, idx int, ok bool, latency time.Duration, errText string, authRejected bool) (flipped bool, raw string) {
 	e.mu.Lock()
 	ups := e.health[chain]
 	if idx < 0 || idx >= len(ups) || ups[idx] == nil {
@@ -137,9 +147,11 @@ func (e *Engine) markUp(chain string, idx int, ok bool, latency time.Duration, e
 	case first || h.ok == ok:
 		flipped, h.ok = first, ok
 		h.latency, h.err = latency, errText
+		h.authRejected = authRejected && !ok
 	case (ok && h.okStreak >= healthFlipStreak) || (!ok && h.failStreak >= healthFlipStreak):
 		flipped, h.ok = true, ok
 		h.latency, h.err = latency, errText
+		h.authRejected = authRejected && !ok
 	default:
 		// 想翻但还没连续够次数：维持旧状态，也不动明细（否则界面会出现“绿点亮着 + 红字错误”）
 	}
@@ -269,7 +281,7 @@ func (e *Engine) probeChain(ch config.Chain) {
 	for i, raw := range e.cfg.UpstreamsResolved(ch) {
 		u, err := upstream.Parse(raw)
 		if err != nil {
-			e.markUp(ch.Name, i, false, 0, err.Error())
+			e.markUp(ch.Name, i, false, 0, err.Error(), false)
 			continue
 		}
 		r := u.ProbeAuth(6 * time.Second)
@@ -278,7 +290,7 @@ func (e *Engine) probeChain(ch config.Chain) {
 			msg = r.Err.Error()
 		}
 		wasDown := e.downFor(ch.Name, i)
-		if flipped, upRaw := e.markUp(ch.Name, i, r.AuthOK, r.Latency, msg); flipped {
+		if flipped, upRaw := e.markUp(ch.Name, i, r.AuthOK, r.Latency, msg, r.AuthRejected); flipped {
 			if r.AuthOK {
 				// 恢复只写日志（链路会不时抖一下，弹窗太吵）
 				down := ""
@@ -372,6 +384,7 @@ func (e *Engine) ChainHealth() []ChainHealthView {
 				uv.OK = h.ok
 				uv.Error = h.err
 				uv.Checked = h.checked.Format("15:04:05")
+				uv.AuthRejected = h.authRejected
 				if h.ok {
 					uv.Latency = fmt.Sprintf("%d ms", h.latency.Milliseconds())
 				}

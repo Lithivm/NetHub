@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net"
 	"time"
+
+	"nethub/internal/socks"
 )
 
 // Probe 探一下这条上游还活着吗：TCP 连通 +（需要时）完成 TLS 握手，返回耗时。
@@ -43,6 +45,10 @@ type ProbeAuthResult struct {
 	AuthOK  bool          // TCP+TLS+SOCKS 协商 + 认证都过了
 	Public  bool          // 还能 CONNECT 出去（出口能不能出公网）
 	Err     error         // AuthOK=false 时的原因（认证被拒/超时/证书…）
+	// AuthRejected：“认证失败”与“连不上”**在结构上分开**（不靠比对错误文案）。
+	// 为什么要分：处置完全不同 —— 一个是改口令、一个是查网络。诊断页的结论
+	// （engine.ChainVerdict）把这一档单拿出来说。
+	AuthRejected bool
 }
 
 // 公网探针地址：不依赖客户内网的任何东西，只用来确认"出口能转发"。
@@ -57,7 +63,9 @@ func (u *Upstream) ProbeAuth(timeout time.Duration) ProbeAuthResult {
 	start := time.Now()
 	conn, err := u.Prepare(timeout)
 	if err != nil {
-		return ProbeAuthResult{Err: err}
+		// 凭据被拒也发生在 Prepare 里（SOCKS 的方法协商/认证）：用 errors.Is 认身份，
+		// 不去猜错误文案（文案会随实现改，猜出来的结论迟早会错）。
+		return ProbeAuthResult{Err: err, AuthRejected: errors.Is(err, socks.ErrAuthRejected)}
 	}
 	defer conn.Close()
 	res := ProbeAuthResult{Latency: time.Since(start), AuthOK: true}
@@ -69,7 +77,7 @@ func (u *Upstream) ProbeAuth(timeout time.Duration) ProbeAuthResult {
 		// 认证被拒是真的坏（旧版把这里一律当“只是出不了公网”，口令错了也报可用）
 		var ae *ProxyAuthError
 		if errors.As(err, &ae) {
-			return ProbeAuthResult{Latency: time.Since(start), AuthOK: false, Err: err}
+			return ProbeAuthResult{Latency: time.Since(start), AuthOK: false, Err: err, AuthRejected: true}
 		}
 		// 认证已过，只是出口出不了公网 —— 很多客户出口就是这样，不算故障
 		return res

@@ -576,6 +576,22 @@ func (b *Backend) GetChainHealth() []engine.ChainHealthView {
 	return b.a.Engine.ChainHealth()
 }
 
+// GetVerdict 一句话结论：现在这套链路到底能不能用（诊断页「链路自检」卡顶部那句）。
+//
+// 它把两件事合成一句：上游探活（我们到上游那一段）与业务目标实测（经这条链到得了内网吗）。
+// 判据在 engine.ChainVerdict —— 纯函数，有表驱动测试钉住。
+// 这里只负责把"引擎在不在跑"与两份观测凑齐。
+func (b *Backend) GetVerdict() engine.Verdict {
+	running, _ := b.a.Status()
+	var chains []engine.ChainHealthView
+	var targets []engine.TargetHealthView
+	if b.a.Engine != nil {
+		chains = b.a.Engine.ChainHealth()
+		targets = b.a.Engine.TargetHealth()
+	}
+	return engine.ChainVerdict(running, chains, targets)
+}
+
 // ProbeChains 立即把所有上游探一遍（界面上的“立即探测”）。
 func (b *Backend) ProbeChains() error {
 	if b.a.Engine == nil {

@@ -10,12 +10,20 @@ package socks
 import (
 	"crypto/tls"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"strings"
 	"time"
 )
+
+// ErrAuthRejected 上游明确拒绝了凭据（RFC1929 应答非 0，或服务端不接受匿名而我们没配凭据）。
+//
+// 为什么要单独一个错：这与"连不上/超时"在处置上是两件事（一个是改口令、一个是查网络），
+// 诊断页的结论必须能分开说（否则现场会去查一天的防火墙）—— 靠比对错误文案来分是假的，
+// 所以这里给它一个能被 errors.Is 认出来的身份。
+var ErrAuthRejected = errors.New("socks 认证被拒")
 
 const (
 	methodNoAuth   = 0x00
@@ -161,7 +169,7 @@ func negotiate(conn net.Conn, c Creds) error {
 		}
 	default:
 		if rep[1] == 0xff {
-			return fmt.Errorf("socks 服务端不接受我们提供的方法（需要认证？凭据没配？）")
+			return fmt.Errorf("%w（服务端不接受匿名，我们也没配凭据）", ErrAuthRejected)
 		}
 		return fmt.Errorf("socks 服务端选择了不支持的方法: 0x%02x", rep[1])
 	}
@@ -228,7 +236,7 @@ func authUserPass(conn net.Conn, c Creds) error {
 	}
 	if rep[1] != 0x00 {
 		// 不把凭据打进错误里
-		return fmt.Errorf("socks 认证被拒（用户名或口令不对）")
+		return fmt.Errorf("%w（用户名或口令不对）", ErrAuthRejected)
 	}
 	if rep[0] != 0x01 {
 		return fmt.Errorf("socks 认证应答版本不对: %d", rep[0])

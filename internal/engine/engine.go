@@ -1189,7 +1189,9 @@ func (e *Engine) tryUpstream(ch config.Chain, raw string, idx int, dst net.IP, d
 	timeout time.Duration) (net.Conn, error, string) {
 	up, err := upstream.Parse(raw)
 	if err != nil {
-		e.markUp(ch.Name, idx, false, 0, err.Error())
+		// 被动失败分不出"凭据被拒"与"连不上"（这里的 err 已经是包装过的文案）：
+		// 不猜，统一记 false —— 真凭据被拒时探测（30s 一轮）会把它认出来。
+		e.markUp(ch.Name, idx, false, 0, err.Error(), false)
 		return nil, err, fmt.Sprintf("上游 %d: %v", idx+1, err)
 	}
 	t0 := time.Now()
@@ -1197,7 +1199,7 @@ func (e *Engine) tryUpstream(ch config.Chain, raw string, idx int, dst net.IP, d
 	lat := time.Since(t0)
 	if err == nil {
 		// 真拨通了：这是比探测更硬的证据，可以直接把状态正过来（也顺带消掉假警报）
-		e.markUp(ch.Name, idx, true, lat, "")
+		e.markUp(ch.Name, idx, true, lat, "", false)
 		return c, nil, ""
 	}
 	// 失败：只升级“疑似”，等下一次探测确认。否则一条坏业务目标

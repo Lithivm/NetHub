@@ -107,13 +107,13 @@ func TestProbeChainRecords(t *testing.T) {
 
 	// 同一状态重复上报不算"翻转"（只在变化时告警）；坏→好要**连续两次**才算
 	// （防抖：现网上游每 30s 抖一下很常见，单次结果直接改状态会把日志和界面刷成一片红）
-	if flipped, _ := e.markUp("c", 0, false, 0, "仍然不通"); flipped {
+	if flipped, _ := e.markUp("c", 0, false, 0, "仍然不通", false); flipped {
 		t.Error("同一状态重复上报不该算翻转")
 	}
-	if flipped, _ := e.markUp("c", 0, true, time.Millisecond, ""); flipped {
+	if flipped, _ := e.markUp("c", 0, true, time.Millisecond, "", false); flipped {
 		t.Error("单次成功不该马上翻转（要连续两次同向才改状态）")
 	}
-	if flipped, _ := e.markUp("c", 0, true, time.Millisecond, ""); !flipped {
+	if flipped, _ := e.markUp("c", 0, true, time.Millisecond, "", false); !flipped {
 		t.Error("连续两次成功應算翻转（状态从坏到好）")
 	}
 	if d := e.downFor("c", 0); d != 0 {
@@ -125,12 +125,12 @@ func TestProbeChainRecords(t *testing.T) {
 	e2.bus = logbus.New(50)
 	ch2 := config.Chain{Name: "d", Forwards: []string{"socks5://127.0.0.1:1"}}
 	e2.cfg.Chains = []config.Chain{ch2}
-	e2.markUp("d", 0, false, 0, "首次探测失败") // 第一次必须有结论
+	e2.markUp("d", 0, false, 0, "首次探测失败", false) // 第一次必须有结论
 	for i := 0; i < 6; i++ {
-		if flipped, _ := e2.markUp("d", 0, true, time.Millisecond, ""); flipped {
+		if flipped, _ := e2.markUp("d", 0, true, time.Millisecond, "", false); flipped {
 			t.Fatalf("抖动第 %d 次不该翻转", i)
 		}
-		if flipped, _ := e2.markUp("d", 0, false, 0, "又抖了一下"); flipped {
+		if flipped, _ := e2.markUp("d", 0, false, 0, "又抖了一下", false); flipped {
 			t.Fatalf("抖动第 %d 次不该翻转（状态本来就是坏）", i)
 		}
 	}

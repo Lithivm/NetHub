@@ -164,7 +164,7 @@ function showPage(name) {
   positionTabThumb();
   if (name === 'log') { scrollLogToEnd(); loadLogLevel(); }
   if (name === 'conn') { loadConns(); loadCountDirect(); loadQuicBlock(); }
-  if (name === 'diag') { precheckConfig(true); loadTargetHealth(); loadPatrol(); loadLastSelfTest(); loadRuntimeStatus(); }
+  if (name === 'diag') { precheckConfig(true); loadTargetHealth(); loadPatrol(); loadLastSelfTest(); loadRuntimeStatus(); loadVerdict(); }
 }
 
 /* ═══════════════ 规则智能：最具体优先 / 命中查询 ═══════════════ */
@@ -2181,8 +2181,9 @@ function wire() {
   const btnSelfTestCopy = document.getElementById('btnSelfTestCopy');
   if (btnSelfTestCopy) btnSelfTestCopy.onclick = async () => {
     const out = document.getElementById('selfTestOut');
-    if (!out || !out.dataset.report) return;
-    try { await navigator.clipboard.writeText(out.dataset.report); toast('已复制', '自检结果已复制到剪贴板', 'success'); }
+    const txt = reportWithVerdict((out && out.dataset.report) || '');
+    if (!txt) return;
+    try { await navigator.clipboard.writeText(txt); toast('已复制', '结论 + 自检结果已复制到剪贴板', 'success'); }
     catch { toast('复制失败', '请手动选中复制', 'warn'); }
   };
   const bind = (id, key) => { const b = document.getElementById(id); if (b) b.onclick = () => showHelp(key); };
@@ -2261,7 +2262,7 @@ function wire() {
   // 诊断页：接管状态（仪表盘）—— 只在页面可见时刷（与连接页同一套做法）
   setInterval(() => {
     const p = document.getElementById('page-diag');
-    if (p && p.classList.contains('is-active')) loadRuntimeStatus();
+    if (p && p.classList.contains('is-active')) { loadRuntimeStatus(); loadVerdict(); }
   }, 5000);
   document.getElementById('btnCopyPrecheck').onclick = copyPrecheck;
   document.getElementById('btnSvcInstall').onclick = async () => {
@@ -2315,6 +2316,7 @@ function wire() {
     try { await call('ProbeTargetsNow'); toast('正在巡检业务目标', '经隧道连一次、不发数据', 'info'); }
     catch (e) { fail(e); }
     setTimeout(loadTargetHealth, 3000);
+    setTimeout(loadVerdict, 3500);   // 结论跟着巡检结果重算
   };
 
   // 链路页
@@ -2323,6 +2325,7 @@ function wire() {
     try { await call('ProbeChains'); toast('正在探测上游', '只测到代理这一段，不碰业务目标', 'info'); }
     catch (e) { fail(e); }
     setTimeout(loadChains, 1500);
+    setTimeout(loadVerdict, 1800);   // 结论跟着探测结果重算
   };
   document.getElementById('btnChainImport').onclick = importBats;
 
@@ -2441,6 +2444,72 @@ function renderSelfTest(r) {
   }
   out.textContent = lines.join('\n');
   out.dataset.report = lines.join('\n');
+  // 自检本身会改上游/目标的观测 → 结论要跟着重算（不能停在上一次的快照上）
+  loadVerdict();
+}
+
+/* ═══════════ 链路结论（诊断页「链路自检」卡顶部那一句话） ═══════════
+
+   为什么要这一层：逐条链的圆点回答的是“哪个上游通”，回答不了现场真正要问的
+   “今天这套业务能不能用”。而且“上游通”被当成“内网通”是这里最典型的误判 ——
+   所以两件事必须**分开说**（上游通而内网不通时，责任在上游那一侧的内网，不在本机）。
+
+   判据不在前端：后端 engine.ChainVerdict（纯函数，表驱动测试钉住）——
+   “打开诊断页看到红/黄/绿意味着什么”不能靠记。 */
+let lastVerdict = null;
+
+async function loadVerdict() {
+  const v = document.getElementById('stVerdict');
+  if (!v || !document.getElementById('stAdvice')) return;
+  let d;
+  try { d = await call('GetVerdict'); }
+  catch (e) {
+    v.replaceChildren(el('span', 'dot'), el('span', 'vtext', '读不到结论：' + ((e && e.message) || e)));
+    return;
+  }
+  lastVerdict = d || null;
+  const kind = (d && d.level) || 'warn';
+  v.replaceChildren(
+    el('span', 'dot ' + kind),
+    el('span', 'vtext', (d && d.head) || '—'),
+    el('span', 'vsub', (d && d.sub) || '')
+  );
+
+  // 该做什么（一条一行）。红了就给红条，黄了给黄条 —— 与接管状态卡同一套表达。
+  const ab = document.getElementById('stAdvice');
+  ab.replaceChildren();
+  ((d && d.advice) || []).forEach(a => {
+    const row = el('div', 'warnrow' + (kind === 'error' ? ' is-error' : ''));
+    row.appendChild(el('span', 'wicon', kind === 'error' ? '!' : '·'));
+    row.appendChild(el('span', null, a));
+    ab.appendChild(row);
+  });
+
+  // 逐条链一句话：结论短，明细要能看见，但它是**当前值**不是流水 —— 折叠着，要看才点。
+  const fold = document.getElementById('stDetail');
+  const detail = (d && d.detail) || [];
+  fold.hidden = !detail.length;
+  if (detail.length) {
+    document.getElementById('stDetailSum').textContent = '逐条结论（' + detail.length + ' 条）';
+    const body = document.getElementById('stDetailBody');
+    body.replaceChildren();
+    detail.forEach(t => body.appendChild(el('div', 'rlabel', t)));
+  }
+}
+
+/* 复制出去的东西要**以结论开头**：现场是把这段整段粘给同事/agent 的，
+   一串逐条链的结果没有第一句结论，读的人得自己总结 —— 而那正是最容易读错的一步。 */
+function reportWithVerdict(report) {
+  const v = lastVerdict;
+  const lines = [];
+  if (v && v.head) {
+    lines.push('【结论】' + v.head + (v.sub ? '（' + v.sub + '）' : ''));
+    (v.detail || []).forEach(d => lines.push('  ' + d));
+    (v.advice || []).forEach(a => lines.push('  → ' + a));
+    lines.push('');
+  }
+  if (report) lines.push(report);
+  return lines.join('\n').trim();
 }
 
 /* 打开设置页时把上次结果补上（开机自动跑过一次，不必重复点）。 */

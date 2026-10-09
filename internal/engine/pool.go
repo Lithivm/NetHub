@@ -245,10 +245,10 @@ func (e *Engine) dialWarm(ch config.Chain, idx int, dst net.IP, dport uint16) (n
 		// 会话坏了（上游掐了闲置连接等）→ 丢掉，回落到现拨
 		w.conn.Close()
 		e.bus.Warn("链 %s 预热会话打通失败（%v），改为现拨", ch.Name, err)
-		e.markUp(ch.Name, idx, false, 0, err.Error())
+		e.markUp(ch.Name, idx, false, 0, err.Error(), false)
 		return nil, false
 	}
-	e.markUp(ch.Name, idx, true, 0, "")
+	e.markUp(ch.Name, idx, true, 0, "", false)
 	return w.conn, true
 }
 
