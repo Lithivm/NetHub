@@ -89,6 +89,12 @@ type connState struct {
 	// counted 建这条条目时加过 statActive（只有走 relay 的连接加）。
 	// finish 据此决定要不要扣 —— 否则直连/阻断的条目会把活跃数越扣越少。
 	counted bool
+	// self 这条是我们**本进程自己的探针**发起的（见 selfconn.go）：不计数、不进列表。
+	self bool
+	// statsOnly 这条直连连接**只有开着“直连流量统计”时才看得到**（是那个开关把它拉进内核过滤器的）。
+	// 关掉那个开关后它必须从列表里消失 —— 否则界面会挂着一批“已经不再被观察”的连接，
+	// 字节数也停在那一刻，看着像还在跑（用户报的不一致）。
+	statsOnly bool
 
 	// fakeName/realDst：DNS 接管相关。目标是我们发的假 IP 时，fakeName 是它对应的
 	// 域名，realDst 是这个域名在本机解析出的**真实 IP**（假 IP 绝不能拿去连）。
@@ -203,6 +209,29 @@ type ConnView struct {
 // 所以它不影响“最近访问过的目标”那类后台判据（recentTargets 自己一个窗口）。
 const connEndedViewKeep = 15 * time.Second
 
+// ConnsActive 界面上“进行中”的连接数。
+//
+// 为什么不用 statActive：那个只统计**走隧道**的连接 —— 打开“直连流量统计”之后
+// 直连/阻断的行会出现在列表里却不计入，于是显示成“列了 3 条、活跃 0”，自相矛盾。
+// 界面上的“活跃”就用它（同一个口径：不算自己的探针、不算已结束）。
+func (e *Engine) ConnsActive() int {
+	countDirect := e.cfg.CountDirectEnabled()
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	n := 0
+	for _, st := range e.conns {
+		if st.self || st.ended.Load() {
+			continue
+		}
+		// 直连统计关着时，直连的条目已经不处于“被观察”状态了，不能算
+		if st.statsOnly && !countDirect {
+			continue
+		}
+		n++
+	}
+	return n
+}
+
 // Conns 返回连接表快照：进行中在前，其余按最后活动时间倒序；limit<=0 表示不限。
 //
 // 已结束的只保留最近 connEndedViewKeep（15 秒）内的，更早的丢给 janitor。
@@ -229,6 +258,7 @@ func (e *Engine) Conns(limit int, withProc bool) []ConnView {
 
 	now := time.Now()
 	endedCut := now.Add(-connEndedViewKeep).UnixNano()
+	countDirect := e.cfg.CountDirectEnabled()
 	out := make([]ConnView, 0, len(snap))
 	for _, st := range snap {
 		if limit > 0 && len(out) >= limit {
@@ -236,6 +266,14 @@ func (e *Engine) Conns(limit int, withProc bool) []ConnView {
 		}
 		// 已结束且已经过了显示窗口：界面上不再出现（“累计/按链分布”里仍然算过它）
 		if st.ended.Load() && st.last.Load() < endedCut {
+			continue
+		}
+		// 我们自己发的探针连接不进列表（见 selfconn.go：那是仪器，不是应用流量）
+		if st.self {
+			continue
+		}
+		// “直连统计”关掉后，直连的条目立即从列表消失（直到开关再打开）
+		if st.statsOnly && !countDirect {
 			continue
 		}
 		state := "进行中"
@@ -458,6 +496,9 @@ type Engine struct {
 	startedAt time.Time
 	// statSummaryAt 上一次“5 分钟概览”时的累计连接数（算增量用）。
 	statSummaryAt uint64
+	// selfPorts 本进程自己探针正在用的本地端口（见 selfconn.go）——
+	// 建条目时靠它认出“这不是应用流量”。同一个锁保护。
+	selfPorts map[uint16]time.Time
 
 	// startMu 串行化 Start/Stop：两者都要能在同一个 Engine 上反复调用
 	// （托盘“停止 → 启动”、界面重启都会走到），且不能互相插队。
@@ -512,6 +553,7 @@ func New(bus *logbus.Bus, rs *rules.Set, cfg *config.Config) *Engine {
 		bus: bus, cfg: cfg,
 		conns:       map[uint16]*connState{},
 		statPerRule: map[string]uint64{},
+		selfPorts:   map[uint16]time.Time{},
 		done:        make(chan struct{}),
 		pool:        newWarmPool(),
 		loop:        newLoopGuard(),
@@ -2863,22 +2905,26 @@ func (e *Engine) rewriteOutbound(h *divert.Handle, pkt []byte, addr *divert.Addr
 		e.cap.note(pkt)
 		e.mu.Lock()
 		_, existed := e.conns[sport]
+		_, isSelf := e.selfPorts[sport]
 		st := &connState{
 			dst: dst, dport: dport,
 			app: append(net.IP(nil), src...), appPort: sport,
 			chain: chain, action: rules.ActionChain, start: time.Now(),
 			ruleNo: ruleNo, ruleName: ruleName,
 			procName: procName, pid: pid,
-			counted: true, // 紧接着（!existed 时）会 statActive++
+			self:    isSelf,
+			counted: !isSelf, // 紧接着（!existed 时）会 statActive++
 		}
 		// 调用方刚刚查过一次进程表（flowProc）：不额外标记，
 		// 让后续几个包还有机会补上（新连接的第一拍常查不到，见 procTries）。
 		st.touch()
 		e.conns[sport] = st
 		if !existed {
-			e.statTotal++
-			e.statActive++
-			e.statPerRule[chain]++
+			if !isSelf {
+				e.statTotal++
+				e.statActive++
+				e.statPerRule[chain]++
+			}
 		}
 		e.mu.Unlock()
 		if !existed {
@@ -2954,7 +3000,10 @@ func (e *Engine) passThrough(h *divert.Handle, pkt []byte, addr *divert.Address,
 		if _, ok := e.conns[sport]; !ok {
 			st := &connState{dst: dst, dport: dport, app: append(net.IP(nil), src...),
 				appPort: sport, action: act, start: time.Now(),
-				ruleNo: ruleNo, ruleName: ruleName, procName: procName, pid: pid}
+				ruleNo: ruleNo, ruleName: ruleName, procName: procName, pid: pid,
+				// 规则路径的直连目标只在开了“直连统计”时才进过滤器（内置直连 7680
+				// 走 detail=true 另一条路，它一直在）
+				statsOnly: act == rules.ActionDirect && !detail}
 			st.touch()
 			e.conns[sport] = st
 		}
@@ -3014,6 +3063,7 @@ func (e *Engine) janitor() {
 		case <-tk.C:
 			e.pruneLoops() // A14：清掉过期的环路检测窗口
 			e.pruneQUICNotices()
+			e.pruneSelfPorts() // 我们自己探针登记的端口（见 selfconn.go）
 			e.pruneOnce()
 			e.bus.FlushThrottled() // 把“噪声停了但还是欠着”的去重计数补出来
 			if tick++; tick%5 == 0 {

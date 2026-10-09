@@ -577,7 +577,20 @@ function fmtBytes(n) {
   return n.toFixed(1) + ' ' + units[i];
 }
 
+// connsLoading 防重入：1.5 秒一轮的轮询和“点开某一行”都会调 loadConns，
+// 两个同时在飞时会各自 replaceChildren + 追加行 → 出现双份行/半份行（自检里也是这么发现的）。
+let connsLoading = false;
 async function loadConns() {
+  if (connsLoading) return;
+  connsLoading = true;
+  try {
+    await loadConnsOnce();
+  } finally {
+    connsLoading = false;
+  }
+}
+
+async function loadConnsOnce() {
   let d = null;
   try { d = await call('GetConns'); }
   catch (e) { return; }   // 轮询失败静默：别每 1.5 秒弹一次错
@@ -1835,6 +1848,19 @@ async function loadLogLevel() {
 
 // 长说明统一放这里；界面上的小字只留一句概括 + 一个“i”按钮。
 const HELP = {
+  conn: {
+    title: '连接列表：口径与操作',
+    paras: [
+      '一行 = 一条连接（按本地端口建条目）。同一目标、同一进程、同一链的并行连接会合并成一行并标 ×N —— 浏览器对同一 origin 允许 6 条并发，逐条铺开反而看不出“这是一次页面加载”。合并键：目标 + 动作 + 链 + 进程 + PID。',
+      '点整行展开：列出这一组里每一条连接的本地端口、开始时间、时长、收发字节、包数、状态与命中的规则；错误全文也在这里。',
+      '累计：本进程启动以来接管的连接数（只统计走隧道的，直连与阻断不计）。',
+      '活跃：当前进行中的连接数（含直连与阻断的行，与本列表保持一致）。',
+      '各链累计：每条链接管了多少条（不含直连与阻断）。',
+      '直连的目标需要先打开「直连流量统计」才会出现在这里：默认直连网段不进内核过滤器，一个包都看不到。',
+      '本程序自己的探针连接（链路自检、与其它代理共存检测）不列入：它们是仪器，不是应用流量。',
+      '已结束的连接保留 15 秒。',
+    ],
+  },
   runtime: {
     title: '接管状态：各项指标的含义与判定口径',
     paras: [
@@ -2132,6 +2158,7 @@ function wire() {
   };
   const bind = (id, key) => { const b = document.getElementById(id); if (b) b.onclick = () => showHelp(key); };
   bind('btnHelpRuntime', 'runtime');
+  bind('btnHelpConn', 'conn');
   bind('btnHelpDial', 'dial');
   bind('btnHelpService', 'service');
   bind('btnHelpClash', 'clash');
@@ -2147,6 +2174,9 @@ function wire() {
       await call('SetCountDirect', ev.target.checked);
       toast('已保存', (ev.target.checked ? '直连流量从现在起也会被统计' : '直连流量不再经过我们（零开销）') + await saveNote(), 'success');
       await loadCountDirect();
+      // 这个开关直接决定了列表里有没有直连的连接 → 立刻重画，别等下一轮轮询
+      // （“列表里还挂着几条已经不再被观察的直连连接”正是用户报的不一致）
+      refreshAfterToggle();
     } catch (e) { fail(e); ev.target.checked = !ev.target.checked; }
   };
   document.getElementById('setQuicBlock').onchange = async (ev) => {
@@ -2156,6 +2186,7 @@ function wire() {
         ? '本该走隧道的 QUIC 会被拦下（浏览器回落到 TCP，那条路仍走隧道）'
         : 'QUIC 不再经过我们（这部分流量会直接出去）') + await saveNote(), 'success');
       await loadQuicBlock();
+      refreshAfterToggle();
     } catch (e) { fail(e); ev.target.checked = !ev.target.checked; }
   };
 
@@ -2471,6 +2502,16 @@ async function loadQuicBlock() {
 }
 
 /* 直连统计开关（A15） */
+/* refreshAfterToggle 开关类设置（直连统计 / QUIC 阻断）改完之后**立刻**把受影响的视图重画。
+
+   为什么不能只等轮询：这两个开关直接决定“列表里有没有这一类连接”，
+   1.5 秒/5 秒的轮询延迟会让界面短暂地自相矛盾（用户报的“开关改了、列表没同步”）。 */
+async function refreshAfterToggle() {
+  await loadConns();
+  const diag = document.getElementById('page-diag');
+  if (diag && diag.classList.contains('is-active')) await loadRuntimeStatus();
+}
+
 async function loadCountDirect() {
   const cb = document.getElementById('setCountDirect');
   if (!cb) return;
@@ -2481,8 +2522,8 @@ async function loadCountDirect() {
   const info = document.getElementById('countDirectInfo');
   if (info) {
     info.textContent = v.on
-      ? '当前：开。直连流量的 ↑↓ 都会有数字（每包多一点开销）。'
-      : '当前：关。直连的字节数只有出方向的一点点（过滤器不碰直连流量，这是默认的零开销姿势）。';
+      ? '当前：开。直连的连接会出现在上面的列表里（只能数出方向字节，回来的包不经内核过滤器）。'
+      : '当前：关。直连流量完全不经我们 —— 列表与日志里都不会有直连的连接（回到零开销）。';
   }
 }
 

@@ -745,11 +745,12 @@ type ConnList struct {
 
 // GetConns 返回连接表快照（界面上每 1.5 秒拉一次，只统计当前页可见时）。
 func (b *Backend) GetConns() ConnList {
-	total, active := b.a.Engine.Stats()
+	total, _ := b.a.Engine.Stats()
 	return ConnList{
-		List:     b.a.Engine.Conns(150, true),
-		Total:    total,
-		Active:   active,
+		List:  b.a.Engine.Conns(150, true),
+		Total: total,
+		// Active 用界面口径（含直连/阻断的进行中行），见 Engine.ConnsActive
+		Active:   b.a.Engine.ConnsActive(),
 		PerChain: b.a.Engine.ChainCounts(),
 	}
 }

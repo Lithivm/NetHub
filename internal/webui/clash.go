@@ -483,7 +483,9 @@ func (b *Backend) ClashCheck() ClashCheckView {
 	// 两条路的探测器
 	probeDirect := func(h string) (string, error) {
 		return probeHost(h, func(port int) (net.Conn, error) {
-			return net.DialTimeout("tcp", net.JoinHostPort(h, fmt.Sprint(port)), probeTimeout())
+			// 用 DialSelf：内网目标本来就在我们的接管网段里，直连会被自己的过滤器接住 ——
+			// 登记成本进程的探针，免得它出现在连接列表里冒充应用流量（用户报过“纯误导”）。
+			return b.a.Engine.DialSelf("tcp", net.JoinHostPort(h, fmt.Sprint(port)), probeTimeout())
 		})
 	}
 	probeViaProxy := func(h string) (string, error) {

@@ -163,8 +163,10 @@ func (e *Engine) RuntimeStatus() RuntimeStatus {
 	}
 
 	// 连接面
-	total, active := e.Stats()
-	st.Conns.Total, st.Conns.Active = total, active
+	total, _ := e.Stats()
+	st.Conns.Total = total
+	// 活跃用界面口径（含直连/阻断的进行中行），跟连接页上看到的条数一致
+	st.Conns.Active = e.ConnsActive()
 	st.Conns.PerChain = e.ChainCounts()
 	if e.proc != nil {
 		st.Conns.ProcPorts, st.Conns.ProcPIDs = e.proc.Stats()
@@ -174,6 +176,10 @@ func (e *Engine) RuntimeStatus() RuntimeStatus {
 	// 这个指标（v0.5.0 把 60% unknown 修到 0）需要的是“最近这段时间整体怎么样”。
 	e.mu.RLock()
 	for _, cs := range e.conns {
+		// 自己的探针不算（见 selfconn.go）：它们恒为 nethub.exe，会把“已解析”比例抬上去
+		if cs.self {
+			continue
+		}
 		if cs.procName == "" {
 			st.Conns.ProcUnknow++
 		} else {
