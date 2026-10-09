@@ -521,11 +521,11 @@ code, .mono { font-family: var(--font-mono); }
 /* 连接列表：整行可点开（展开明细），明细行跨整行 */
 .conn-row { cursor: pointer; }
 .conn-row.is-open { background: var(--primary-soft); }
-/* 连接表最多显示 10 条，更多的在卡片内部上下滑动（行 43（含 1px 分隔线）+ 表头 32 → 462）。
+/* 连接表最多显示 5 条，更多的在卡片内部上下滑动（行 43（含 1px 分隔线）+ 表头 32 → 247）。
    为什么要封顶：一次页面加载就是 6 条，半小时就能堆出几十条 —— 不封顶会把整页拉得很长，
-   而“我现在有哪些连接”只需要看最近这十条；表头是 sticky 的，滚的时候不会飘走。
+   而“我现在有哪些连接”只需要看最近这几条；表头是 sticky 的，滚的时候不会飘走。
    改行高/表头高度时同步改这里（local/ui-controls-test.ps1 里会量“最多能看到几行”）。 */
-#connTable { max-height: 462px; }
+#connTable { max-height: 247px; }
 .conn-detail { display: block; }
 .conn-detail .cell {
   white-space: normal; overflow: visible; text-overflow: clip;
