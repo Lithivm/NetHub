@@ -546,7 +546,7 @@ func (c *Config) validateLocked() error {
 			}
 		}
 		for _, t := range r.Targets {
-			if _, err := NormalizeTarget(t); err != nil {
+			if _, err := NormalizeTargetExpr(t); err != nil {
 				return fmt.Errorf("第 %d 条规则%s: 目标 %q 不是合法 IP 或 CIDR（%v）", i+1, r.Describe(), t, err)
 			}
 		}
@@ -593,6 +593,13 @@ func NormalizeTarget(s string) (string, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return "", fmt.Errorf("不能为空")
+	}
+	// IP 区间（10.1.1.1-10.1.1.255）会展开成**多条** CIDR —— 那是列表级的写法，
+	// 这个入口只对应"一个写法一个目标"（见 NormalizeTargetExpr）。
+	// 报一句能照着改的提示，别甩一句没有信息量的"解析失败"。
+	if netx.IsIPRange(s) {
+		return "", fmt.Errorf("%q 是 IP 区间 —— 区间展开后是多条网段，请填在规则的目标框里"+
+			"（那里支持一次填多个目标）；单个目标请写 CIDR（如 10.1.1.0/24）", s)
 	}
 	// IP 通配（Proxifier 的写法：10.100.100.* = 一整段）→ 展开成 CIDR
 	if strings.HasSuffix(s, ".*") {
@@ -647,6 +654,35 @@ func NormalizeTarget(s string) (string, error) {
 		return "", fmt.Errorf("只支持 IPv4")
 	}
 	return fmt.Sprintf("%s/%d", n.IP.String(), ones), nil
+}
+
+// NormalizeTargetExpr 归一化一个目标写法 —— 它可能对应**多个**目标：IP 区间会展开成一批 CIDR。
+//
+// 为什么要多这一层：区间是列表级的写法（一条规则的目标框能一次填多条），而配置层的不变量是
+// "目标是 CIDR"，所以展开必须发生在**写进配置之前**。其余入口（Validate / 规则归一化 /
+// 界面里的多目标输入）统一走这里，就不必各自记得"还有区间这回事"。
+func NormalizeTargetExpr(s string) ([]string, error) {
+	if netx.IsIPRange(s) {
+		return netx.RangeToCIDRs(s)
+	}
+	n, err := NormalizeTarget(s)
+	if err != nil {
+		// 形状像区间但写坏了（10.1.1.0-10.1.1.300）：用区间的报错——它会指明是**哪一侧**
+		// 不对，比甩一句"解析失败"有用得多。
+		// 只在不含字母时走这条：带字母的 main-1.his.com 是**域名**，不能拿区间去报错。
+		if hasRangeDash(s) && !strings.ContainsFunc(s, unicode.IsLetter) {
+			if _, rerr := netx.RangeToCIDRs(s); rerr != nil {
+				return nil, rerr
+			}
+		}
+		return nil, err
+	}
+	return []string{n}, nil
+}
+
+// hasRangeDash 字符串里有横线（三种写法任一）。
+func hasRangeDash(s string) bool {
+	return strings.ContainsFunc(s, func(r rune) bool { return netx.IsRangeDash(string(r)) })
 }
 
 // isHostname 目标写法是不是域名（而不是 IP/CIDR）。
@@ -713,29 +749,57 @@ func targetSep(r rune) bool {
 // NormalizeTargets 把一次手输/粘贴的多目标文本解析成目标列表，
 // 供"一条规则填多个目标"用。分隔符：所有空白 + 中英文逗号/分号/顿号。
 //
-//	out  归一化后的 CIDR，保持输入顺序，组内去重
+//	out  归一化后的 CIDR，保持输入顺序，组内去重（IP 区间会展开成多条）
 //	dup  被去掉的重复项（归一化形式，供界面如实告知）
 //	err  第一个非法目标 —— 整条规则都不落地，不留半生效状态
 func NormalizeTargets(raw string) (out, dup []string, err error) {
 	seen := map[string]bool{}
-	for _, f := range strings.FieldsFunc(raw, targetSep) {
+	for _, f := range mergeSpacedRanges(strings.FieldsFunc(raw, targetSep)) {
 		f = strings.TrimSpace(f)
 		if f == "" {
 			continue
 		}
-		n, nerr := NormalizeTarget(f)
+		if netx.IsRangeDash(f) {
+			return nil, nil, fmt.Errorf("目标 %q 不是合法 IP 或 CIDR（这是一根单独的横线："+
+				"区间要写成 10.1.1.1-10.1.1.255，两端都必须是 IP）", f)
+		}
+		ns, nerr := NormalizeTargetExpr(f)
 		if nerr != nil {
 			return nil, nil, fmt.Errorf("目标 %q 不是合法 IP 或 CIDR（%v）", f, nerr)
 		}
-		key := strings.ToLower(n)
-		if seen[key] {
-			dup = append(dup, n)
-			continue
+		for _, n := range ns {
+			key := strings.ToLower(n)
+			if seen[key] {
+				dup = append(dup, n)
+				continue
+			}
+			seen[key] = true
+			out = append(out, n)
 		}
-		seen[key] = true
-		out = append(out, n)
 	}
 	return out, dup, nil
+}
+
+// mergeSpacedRanges 把"被空白拆散的区间"拼回去：
+// ["10.1.1.1", "-", "10.1.1.255"] → ["10.1.1.1-10.1.1.255"]。
+//
+// 为什么要做：区间是从工单/文档里粘过来的，写的人常在横线两边留空格（文档还会把它排成
+// en dash）。而多目标输入的**分隔符就是空白** —— 不拼回去，一个区间会被拆成三个目标，
+// 报一句让人摸不着头脑的错（"目标 - 不是合法 IP"）。
+//
+// 只在**两侧都是 IPv4 字面量**时才拼：否则 "a.com - b.com" 这种会被拼成一个怪域名。
+func mergeSpacedRanges(fields []string) []string {
+	out := make([]string, 0, len(fields))
+	for i := 0; i < len(fields); i++ {
+		if netx.IsRangeDash(fields[i]) && len(out) > 0 && i+1 < len(fields) &&
+			netx.IsIPv4Literal(out[len(out)-1]) && netx.IsIPv4Literal(fields[i+1]) {
+			out[len(out)-1] += "-" + fields[i+1]
+			i++
+			continue
+		}
+		out = append(out, fields[i])
+	}
+	return out
 }
 
 // PortText 端口集合的人话描述：空 = 全部端口。
@@ -1226,20 +1290,22 @@ func (r *Route) normalize() (changed bool, dup []string, err error) {
 	out := make([]string, 0, len(r.Targets))
 	seen := map[string]bool{}
 	for _, t := range r.Targets {
-		n, nerr := NormalizeTarget(t)
+		ns, nerr := NormalizeTargetExpr(t)
 		if nerr != nil {
 			return changed, dup, fmt.Errorf("目标 %q 不是合法 IP 或 CIDR（%v）", t, nerr)
 		}
-		key := strings.ToLower(n)
-		if seen[key] {
-			dup, changed = append(dup, n), true
-			continue
+		for _, n := range ns {
+			key := strings.ToLower(n)
+			if seen[key] {
+				dup, changed = append(dup, n), true
+				continue
+			}
+			seen[key] = true
+			if n != t {
+				changed = true
+			}
+			out = append(out, n)
 		}
-		seen[key] = true
-		if n != t {
-			changed = true
-		}
-		out = append(out, n)
 	}
 	if len(out) == 0 && len(r.Apps) == 0 {
 		return changed, dup, fmt.Errorf("至少要有一个目标（或一个进程条件）")

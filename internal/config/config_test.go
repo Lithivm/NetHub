@@ -46,6 +46,20 @@ func TestNormalizeTargets(t *testing.T) {
 		{name: "非法目标", in: "10.1.1.1 abc", err: `"abc"`},
 		{name: "IPv6 不支持", in: "::1", err: "只支持 IPv4"},
 		{name: "乱写的网段", in: "10.1.1.0/33", err: `"10.1.1.0/33"`},
+		// IP 区间（Proxifier 的写法）：写进配置的必须是展开后的 CIDR
+		{name: "区间并成整段", in: "10.1.1.0-10.1.1.255", out: []string{"10.1.1.0/24"}},
+		{name: "区间与单 IP 混填", in: "10.1.1.0-10.1.1.255\n10.2.0.1",
+			out: []string{"10.1.1.0/24", "10.2.0.1/32"}},
+		{name: "横线两边带空格（从工单里粘过来）", in: "10.1.1.0 - 10.1.1.255",
+			out: []string{"10.1.1.0/24"}},
+		{name: "en dash（文档自动排版）", in: "10.1.1.0–10.1.1.255", out: []string{"10.1.1.0/24"}},
+		{name: "区间与已有网段重复", in: "10.1.1.0-10.1.1.255 10.1.1.0/24",
+			out: []string{"10.1.1.0/24"}, dup: []string{"10.1.1.0/24"}},
+		{name: "区间与 /32 重复", in: "10.1.1.1-10.1.1.1 10.1.1.1",
+			out: []string{"10.1.1.1/32"}, dup: []string{"10.1.1.1/32"}},
+		{name: "带横线的域名不当区间（关键回归）", in: "main-1.his.com", out: []string{"main-1.his.com"}},
+		{name: "区间一侧越界：报错要指明是哪一侧", in: "10.1.1.0-10.1.1.300", err: `"10.1.1.300"`},
+		{name: "只有一根横线：要说清为什么不是区间", in: "- 10.1.1.1", err: "单独的横线"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1028,5 +1042,55 @@ routes:
 	b, _ := os.ReadFile(path)
 	if !strings.Contains(string(b), "10.100.100.0/24") || strings.Contains(string(b), "10.100.100.*") {
 		t.Errorf("保存的配置里应该是 CIDR：\n%s", b)
+	}
+}
+
+// 手写进 config.yaml 的 IP 区间（Proxifier 的写法）同样要能生效，
+// 并且**落盘时就是 CIDR** —— 下游（规则/过滤器/重叠检测）只认 CIDR 这一个不变量。
+func TestIPRangeFromYAML(t *testing.T) {
+	y := `version: 1
+chains:
+  - name: etyy
+    forward: socks5://u:p@1.2.3.4:1080
+routes:
+  - targets: ["172.30.4.1-172.30.4.255", "10.0.0.0-10.0.0.255"]
+    chain: etyy
+    enabled: true
+`
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(y), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("加载失败: %v", err)
+	}
+	got := c.Routes[0].Targets
+	// 第一个区间不含 .0，所以是精确覆盖的一串；第二个是整段，并成一条 /24
+	want := strings.Join([]string{
+		"172.30.4.1/32", "172.30.4.2/31", "172.30.4.4/30", "172.30.4.8/29",
+		"172.30.4.16/28", "172.30.4.32/27", "172.30.4.64/26", "172.30.4.128/25",
+		"10.0.0.0/24",
+	}, ",")
+	if strings.Join(got, ",") != want {
+		t.Fatalf("区间展开结果不对：\n got %v\nwant %s", got, want)
+	}
+	if err := c.Save(); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(path)
+	if strings.Contains(string(b), "172.30.4.1-") {
+		t.Errorf("保存的配置里应该是展开后的 CIDR（不该留区间写法）：\n%s", b)
+	}
+	if !strings.Contains(string(b), "10.0.0.0/24") {
+		t.Errorf("保存的配置里应含 10.0.0.0/24：\n%s", b)
+	}
+}
+
+// 区间写坏了：整条规则都不落地（不留半生效状态），且报错要指明是哪一侧不对。
+func TestIPRangeBadSide(t *testing.T) {
+	if _, _, err := NormalizeTargets("10.1.1.0-10.1.1.300"); err == nil ||
+		!strings.Contains(err.Error(), "10.1.1.300") {
+		t.Fatalf("越界的一侧应被点名，得到 %v", err)
 	}
 }
