@@ -517,7 +517,7 @@ code, .mono { font-family: var(--font-mono); }
 .sim-badge.bad { background: var(--error-soft); color: var(--error); }
 .sim-badge.none { background: var(--card-strong); color: var(--muted); }
 .rule-grid  { grid-template-columns: 34px 46px 200px minmax(220px, 1.5fr) 130px 104px; }
-.conn-grid  { grid-template-columns: 40px 132px minmax(160px, 1.2fr) 62px 92px 74px 84px 84px 92px; }
+.conn-grid  { grid-template-columns: 40px 132px minmax(160px, 1.2fr) 62px 92px 74px 84px 84px 76px 92px; }
 /* 连接列表：整行可点开（展开明细），明细行跨整行 */
 .conn-row { cursor: pointer; }
 .conn-row.is-open { background: var(--primary-soft); }

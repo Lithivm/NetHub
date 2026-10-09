@@ -328,7 +328,9 @@ func runGUI(a *app.App, bus *logbus.Bus, cfgPath string) {
 		Title:     "NetHub · 内网隧道代理",
 		Width:     1120,
 		Height:    720,
-		MinWidth:  880,
+		// MinWidth 从 880 提到 980：连接表添了「速率」一列（见 DESIGN.md 表格一节），
+		// 窗口再窄就会被挤到截断 —— 宁可让窗口有个下限，也不让表格里的一列看不见。
+		MinWidth:  980,
 		MinHeight: 560,
 		Frameless: true, // 自绘标题栏（Win10 原生标题栏是"Win7 味"的主要来源）
 		AssetServer: &assetserver.Options{

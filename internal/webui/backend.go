@@ -741,17 +741,23 @@ type ConnList struct {
 	Total    uint64            `json:"total"`
 	Active   int               `json:"active"`
 	PerChain map[string]uint64 `json:"perChain"`
+	// RateUp/RateDown：全表速率合计（字节/秒）—— "现在到底有没有在传"。
+	RateUp   uint64 `json:"rateUp"`
+	RateDown uint64 `json:"rateDown"`
 }
 
 // GetConns 返回连接表快照（界面上每 1.5 秒拉一次，只统计当前页可见时）。
 func (b *Backend) GetConns() ConnList {
 	total, _ := b.a.Engine.Stats()
+	rateUp, rateDown := b.a.Engine.Rates()
 	return ConnList{
 		List:  b.a.Engine.Conns(150, true),
 		Total: total,
 		// Active 用界面口径（含直连/阻断的进行中行），见 Engine.ConnsActive
 		Active:   b.a.Engine.ConnsActive(),
 		PerChain: b.a.Engine.ChainCounts(),
+		RateUp:   rateUp,
+		RateDown: rateDown,
 	}
 }
 

@@ -577,6 +577,16 @@ function fmtBytes(n) {
   return n.toFixed(1) + ' ' + units[i];
 }
 
+/* fmtRate 速率（字节/秒）的人话形式；0 显示“—”。
+
+   为什么 0 不显示“0 B/s”：这列回答的是“**现在还在不在传**”，
+   0 与“刚建连还没采到样”在扫描时是一回事 —— 都是“此刻没有流量”，写成“—”最省事。 */
+function fmtRate(bps) {
+  const n = Number(bps) || 0;
+  if (n <= 0) return '—';
+  return fmtBytes(n) + '/s';
+}
+
 // connsLoading 防重入：1.5 秒一轮的轮询和“点开某一行”都会调 loadConns，
 // 两个同时在飞时会各自 replaceChildren + 追加行 → 出现双份行/半份行（自检里也是这么发现的）。
 let connsLoading = false;
@@ -604,15 +614,17 @@ async function loadConnsOnce() {
     : '';
   const sum = document.getElementById('connSummary');
   sum.textContent = '累计 ' + ((d && d.total) || 0) + ' · 活跃 ' + ((d && d.active) || 0) +
+    ' · 速率 ↑' + fmtRate(d && d.rateUp) + ' ↓' + fmtRate(d && d.rateDown) +
     (per ? ' · 各链累计 ' + per : '');
   sum.title = '累计：本进程启动以来接管的连接数（走隧道的）\n' +
     '活跃：当前还在跑的\n' +
+    '速率：全表每秒传输量（出/入方向，引擎每秒采样一次；直连只统计出方向）\n' +
     '各链累计：每条链接管了多少条（直连与阻断不计在内）';
 
   const t = document.getElementById('connTable');
   t.replaceChildren();
   const head = el('div', 'trow thead conn-grid');
-  ['#', '进程', '目标', '动作', '链', '时长', '↑ 发送', '↓ 接收', '状态'].forEach(h =>
+  ['#', '进程', '目标', '动作', '链', '时长', '↑ 发送', '↓ 接收', '速率', '状态'].forEach(h =>
     head.appendChild(el('div', 'cell', h)));
   t.appendChild(head);
 
@@ -676,6 +688,14 @@ async function loadConnsOnce() {
     row.appendChild(up);
     row.appendChild(down);
 
+    // 速率：出+入合计。这列回答的是“这条现在还在不在传” —— 业务卡住时，
+    // 累计字节是正常的（之前传完了），只有速率能看出来它已经不动了。
+    const rate = el('div', 'cell mono' + (g.rate ? ' strong' : ' dim'), fmtRate(g.rate));
+    rate.title = '出 ' + fmtRate(g.rateUp) + ' / 入 ' + fmtRate(g.rateDown) +
+      '（引擎每秒采样一次；已结束的连接不显示速率）';
+    if (g.action === '直连') rate.title += '\n直连的流量只统计出方向（回来的包不经内核过滤器）';
+    row.appendChild(rate);
+
     const state = connGroupState(g);
     const st = el('div', 'cell' + (g.active ? ' strong' : ' dim'), state);
     const errs = g.items.filter(c => c.error);
@@ -717,6 +737,10 @@ function connGroups(list) {
     g.up = g.items.reduce((s, c) => s + (c.up || 0), 0);
     g.down = g.items.reduce((s, c) => s + (c.down || 0), 0);
     g.packets = g.items.reduce((s, c) => s + (c.packets || 0), 0);
+    // 速率与收发一样取**和**：合并行代表这一组连接，界面不该只报其中一条的速率
+    g.rateUp = g.items.reduce((s, c) => s + (c.upBps || 0), 0);
+    g.rateDown = g.items.reduce((s, c) => s + (c.downBps || 0), 0);
+    g.rate = g.rateUp + g.rateDown;
     g.oldest = g.items.reduce((a, b) => ((b.ageSec || 0) > (a.ageSec || 0) ? b : a));
     g.active = g.items.filter(c => c.state === '进行中').length;
   }
@@ -743,7 +767,8 @@ function connDetailRow(g) {
     line.appendChild(el('span', 'cmain', '本地端口 ' + (c.sport || '—') +
       ' · 开始 ' + (c.started || '—') + ' · ' + (c.dur || '') +
       ' · ↑ ' + fmtBytes(c.up) + ' ↓ ' + fmtBytes(c.down) +
-      ' · ' + (c.packets || 0) + ' 包 · ' + (c.state || '')));
+      ' · ' + (c.packets || 0) + ' 包 · ' + (c.state || '') +
+      ' · 速率 ↑' + fmtRate(c.upBps) + ' ↓' + fmtRate(c.downBps)));
     if (c.ruleNo) {
       line.appendChild(el('span', 'csub', '第 ' + c.ruleNo + ' 条' +
         (c.ruleName ? '「' + c.ruleName + '」' : '')));
@@ -1856,6 +1881,7 @@ const HELP = {
       '累计：本进程启动以来接管的连接数（只统计走隧道的，直连与阻断不计）。',
       '活跃：当前进行中的连接数（含直连与阻断的行，与本列表保持一致）。',
       '各链累计：每条链接管了多少条（不含直连与阻断）。',
+      '速率：这一行每秒传多少（出+入合计，引擎每秒采样一次；悬停看分方向）。累计字节说的是“一共传了多少”，速率说的是“此刻还在不在传” —— 业务卡住时看的就是它：累计正常、速率为“—”。已结束的连接不显示速率。',
       '直连的目标需要先打开「直连流量统计」才会出现在这里：默认直连网段不进内核过滤器，一个包都看不到。',
       '本程序自己的探针连接（链路自检、与其它代理共存检测）不列入：它们是仪器，不是应用流量。',
       '列表最多显示 5 条，更多的在表内上下滚动；表头固定，滚的时候列名不飘走。',

@@ -113,6 +113,19 @@ type connState struct {
 	ended   atomic.Bool
 	errText atomic.Value // string：失败原因（如隧道建立失败）
 
+	// 速率：上面三个累计值只告诉"一共多少"，速率靠**两拍采样做差**（rateLoop）。
+	//
+	// 为什么把"上一拍"记在连接自己身上、而不是在引擎里留一张表：
+	// 连接被回收时它的上一拍也跟着消失，不存在"表越长越大"要额外清扫的问题；
+	// 端口被复用时会新建一个 connState，上一拍自然归零，**不会算出跨两条连接的速度**。
+	//
+	// 用原子：采样在 rateLoop 里，包路径在同一时刻还在加 up/down。
+	rateUp   atomic.Uint64 // 字节/秒（采样结果，界面直接读）
+	rateDown atomic.Uint64
+	prevUp   atomic.Uint64 // 上一拍的字节数
+	prevDown atomic.Uint64
+	prevAt   atomic.Int64 // 上一拍的时刻（unix nano；0 = 还没采过）
+
 	// relayed / unrelayed：看门狗用（真实事故，见 AGENTS.md）。
 	// relayed = relay 真的收到了这条连接（handleConn 开始处理时置位）；
 	// 如果 SYN 被改写注入后**迟迟没有**送达 relay，客户端会卡到 SYN 重传耗尽（约 30s）
@@ -197,6 +210,13 @@ type ConnView struct {
 	Up      uint64 `json:"up"`
 	Down    uint64 `json:"down"`
 	Packets uint64 `json:"packets"`
+	// UpBps / DownBps：这条连接**当前的速率**（字节/秒；见 rateLoop 的采样）。
+	//
+	// 为什么必须与累计字节分开给：累计字节回答"这条一共传了多少"，回答不了
+	// "现在还在不在传" —— 业务卡住时，看的就是后者（卡住的那条累计字节是正常的）。
+	// 已结束的连接一律为 0（界面不该在"已结束"旁边挂一个速率）。
+	UpBps   uint64 `json:"upBps"`
+	DownBps uint64 `json:"downBps"`
 	State   string `json:"state"`
 	Error   string `json:"error"`
 }
@@ -314,6 +334,8 @@ func (e *Engine) Conns(limit int, withProc bool) []ConnView {
 			Up:       st.up.Load(),
 			Down:     st.down.Load(),
 			Packets:  st.packets.Load(),
+			UpBps:    st.rateUp.Load(),
+			DownBps:  st.rateDown.Load(),
 			State:    state,
 			Error:    st.err(),
 		})
@@ -492,6 +514,10 @@ type Engine struct {
 	statTotal   uint64
 	statActive  int
 	statPerRule map[string]uint64
+	// rateUp/rateDown：全表速率合计（字节/秒，出/入方向），由 rateLoop 每秒更新。
+	// 界面顶栏/连接页汇总量每次轮询直接读，不必自己遍历连接表。
+	rateUp   atomic.Uint64
+	rateDown atomic.Uint64
 	// startedAt 本次启动的时刻（诊断页“运行时长”用）。
 	startedAt time.Time
 	// statSummaryAt 上一次“5 分钟概览”时的累计连接数（算增量用）。
@@ -787,6 +813,7 @@ func (e *Engine) Start() error {
 	e.startLoop("healthLoop", e.healthLoop)
 	e.startLoop("targetLoop", e.targetLoop)
 	e.startLoop("localNetLoop", e.localNetLoop)
+	e.startLoop("rateLoop", e.rateLoop)
 	// 只读嗅探 DNS + SNI/Host：只有真的用了通配域名才开（否则一分钱不花）。
 	// 它们负责把“应用实际要去哪个名字”学回来，并维护动态过滤器。
 	if e.ruleSet().HasWildcards() {
@@ -3049,6 +3076,85 @@ func (e *Engine) passThrough(h *divert.Handle, pkt []byte, addr *divert.Address,
 	e.cap.note(pkt)
 	_, _ = h.Send(pkt, addr)
 }
+
+// ── 速率采样 ──
+//
+// 为什么速率要在引擎侧算、而不是界面拿两次快照自己做差：
+//   - 界面的轮询**只在「连接」页可见时**跑（1.5 秒一次）。切到别的页再回来做差，
+//     得到的是"这两次拉取之间"的均值 —— 中间隔了多久就摊多久，数字会荒谬地小；
+//   - 速率是"现在还在不在传"的答案，它不该受界面在不在看影响。
+//
+// 采样点固定每秒一次：上一拍的字节数与时刻记在**连接自己身上**（见 connState.prevAt），
+// 所以引擎里不需要额外维护一张会越积越大的表。
+const rateTick = time.Second
+
+func (e *Engine) rateLoop() {
+	defer e.wg.Done()
+	tk := time.NewTicker(rateTick)
+	defer tk.Stop()
+	for {
+		select {
+		case <-e.done:
+			return
+		case <-tk.C:
+			e.sampleRates(time.Now())
+		}
+	}
+}
+
+// sampleRates 给每条连接算一次速率，并记下这一拍供下一拍做差。
+func (e *Engine) sampleRates(now time.Time) {
+	nowN := now.UnixNano()
+	e.mu.RLock()
+	conns := make([]*connState, 0, len(e.conns))
+	for _, st := range e.conns {
+		conns = append(conns, st)
+	}
+	e.mu.RUnlock()
+
+	var sumUp, sumDown uint64
+	for _, st := range conns {
+		// 我们自己的探针（自检/共存检测）不算：它不进连接列表，速率里也不该有它。
+		if st.self {
+			continue
+		}
+		// 已结束的连接速率归 0：界面上"已结束"旁边还挂着一个速率，看着像还在跑。
+		if st.ended.Load() {
+			st.rateUp.Store(0)
+			st.rateDown.Store(0)
+			continue
+		}
+		up, down := st.up.Load(), st.down.Load()
+		prevAt := st.prevAt.Swap(nowN)
+		if prevAt == 0 { // 第一次采样只记底数，速率下一拍才有
+			st.prevUp.Store(up)
+			st.prevDown.Store(down)
+			continue
+		}
+		pu, pd := st.prevUp.Swap(up), st.prevDown.Swap(down)
+		dt := float64(nowN-prevAt) / float64(time.Second)
+		ru, rd := perSecond(up, pu, dt), perSecond(down, pd, dt)
+		st.rateUp.Store(ru)
+		st.rateDown.Store(rd)
+		sumUp, sumDown = sumUp+ru, sumDown+rd
+	}
+	e.rateUp.Store(sumUp)
+	e.rateDown.Store(sumDown)
+}
+
+// perSecond 两拍之间的平均速率（字节/秒）。
+//
+// 时钟没走（dt<=0，理论上不该有）与"计数变小了"都返回 0 而不报负值：
+// 后者只可能在端口复用/重冒烟的情况下出现，宁可显示"没在传"也不能显示一个负数。
+func perSecond(now, prev uint64, dt float64) uint64 {
+	if dt <= 0 || now < prev {
+		return 0
+	}
+	return uint64(float64(now-prev) / dt)
+}
+
+// Rates 全表速率合计（字节/秒，出/入方向）。
+func (e *Engine) Rates() (up, down uint64) { return e.rateUp.Load(), e.rateDown.Load() }
 
 // janitor 定期清理已经没人用的连接条目（已结束的留得短一些）。
 func (e *Engine) janitor() {
