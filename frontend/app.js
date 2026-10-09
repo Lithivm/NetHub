@@ -584,11 +584,17 @@ async function loadConns() {
   conns = (d && d.list) || [];
 
   document.getElementById('badgeConn').textContent = (d && d.active) || 0;
+  // 汇总行：每一段都带**标签**（以前直接拼 `etyy 812　sjy 402`，数字小了就成了
+  // “etyy12 syj1”这种看不懂的东西 —— 用户反馈过）
   const per = d && d.perChain
-    ? Object.keys(d.perChain).map(k => k + ' ' + d.perChain[k]).join('　')
+    ? Object.keys(d.perChain).map(k => k + ' ' + d.perChain[k]).join(' · ')
     : '';
-  document.getElementById('connSummary').textContent =
-    '累计 ' + ((d && d.total) || 0) + '　活跃 ' + ((d && d.active) || 0) + (per ? '　　' + per : '');
+  const sum = document.getElementById('connSummary');
+  sum.textContent = '累计 ' + ((d && d.total) || 0) + ' · 活跃 ' + ((d && d.active) || 0) +
+    (per ? ' · 各链累计 ' + per : '');
+  sum.title = '累计：本进程启动以来接管的连接数（走隧道的）\n' +
+    '活跃：当前还在跑的\n' +
+    '各链累计：每条链接管了多少条（直连与阻断不计在内）';
 
   const t = document.getElementById('connTable');
   t.replaceChildren();

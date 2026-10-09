@@ -278,3 +278,45 @@ func TestRelayWatchdog(t *testing.T) {
 		t.Error("第二次检查也应该标记")
 	}
 }
+
+// 已结束的连接在界面上只留 15 秒（connEndedViewKeep）：
+// 更早的不显示，但**进行中**的不受这个窗口影响（长时间没包也是在跑）。
+func TestConnsHidesOldEndedEntries(t *testing.T) {
+	e := newTestEngine()
+	mk := func(sport uint16, ended bool, ago time.Duration) {
+		st := &connState{
+			dst: net.ParseIP("10.0.0.5"), dport: 443,
+			app: net.ParseIP("192.168.1.9"), appPort: sport,
+			chain: "proxy-a", action: rules.ActionChain,
+			start: time.Now().Add(-ago),
+		}
+		if ended {
+			st.ended.Store(true)
+		}
+		st.last.Store(time.Now().Add(-ago).UnixNano())
+		e.conns[sport] = st
+	}
+	mk(40001, true, 30*time.Second)  // 结束 30 秒 → 不显示
+	mk(40002, true, 3*time.Second)   // 刚结束 → 显示
+	mk(40003, false, 30*time.Second) // 进行中、长时间无包 → 显示
+
+	got := e.Conns(0, false)
+	seen := map[string]bool{}
+	for _, c := range got {
+		seen[c.State] = true
+		seen[c.Target] = true
+	}
+	// 计数靠条数：3 条里应当只剩 2 条
+	if len(got) != 2 {
+		t.Fatalf("应当只剩 2 条（一条旧「已结束」被隐藏），得到 %d 条：%v", len(got), got)
+	}
+	for _, c := range got {
+		if c.State == "已结束" && c.Dur == "" {
+			t.Errorf("刚结束的那条不该被隐藏：%+v", c)
+		}
+	}
+	// 隐藏的是最旧那条：按源端口查（ConnView 里没有端口，用时长区分不了，直接看总数即可）
+	if seen["已结束"] != true {
+		t.Error("刚结束的那条应当还在（状态=已结束）")
+	}
+}

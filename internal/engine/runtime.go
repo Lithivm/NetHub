@@ -169,13 +169,18 @@ func (e *Engine) RuntimeStatus() RuntimeStatus {
 	if e.proc != nil {
 		st.Conns.ProcPorts, st.Conns.ProcPIDs = e.proc.Stats()
 	}
-	for _, c := range e.Conns(5000, false) {
-		if c.Proc == "" || c.Proc == "unknown" {
+	// 进程名解析率：**直接数保留期内的全部条目**，不走 Conns() ——
+	// Conns() 带“已结束只显示 15 秒”的界面策略，用它会把样本量压得很小，
+	// 这个指标（v0.5.0 把 60% unknown 修到 0）需要的是“最近这段时间整体怎么样”。
+	e.mu.RLock()
+	for _, cs := range e.conns {
+		if cs.procName == "" {
 			st.Conns.ProcUnknow++
 		} else {
 			st.Conns.ProcKnown++
 		}
 	}
+	e.mu.RUnlock()
 
 	// 规则面
 	st.Rules.Total, st.Rules.Ranges = len(e.ruleSet().List()), mainRanges

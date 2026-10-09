@@ -184,7 +184,17 @@ type ConnView struct {
 	Error   string `json:"error"`
 }
 
+// connEndedViewKeep 已结束的连接在**界面上**还留多久。
+//
+// 为什么只有 15 秒：已结束的条目看的是“刚刚发生了什么”，几十秒之后没人再去看它，
+// 留着只会把在跑的挤下去（一条结束的连接很快就不再提供任何信息）。
+// 注意这只是**显示**窗口：条目本身仍由 janitor 按 2 分钟物理回收（见 janitor），
+// 所以它不影响“最近访问过的目标”那类后台判据（recentTargets 自己一个窗口）。
+const connEndedViewKeep = 15 * time.Second
+
 // Conns 返回连接表快照：进行中在前，其余按最后活动时间倒序；limit<=0 表示不限。
+//
+// 已结束的只保留最近 connEndedViewKeep（15 秒）内的，更早的丢给 janitor。
 //
 // withProc 为真时，给还没查过进程的连接补上进程名（连接页打开时用）。
 // 为什么不在建连接时无脑查：TCP 表是全量枚举，毫秒级开销；只有界面真要看到
@@ -207,10 +217,15 @@ func (e *Engine) Conns(limit int, withProc bool) []ConnView {
 	})
 
 	now := time.Now()
+	endedCut := now.Add(-connEndedViewKeep).UnixNano()
 	out := make([]ConnView, 0, len(snap))
 	for _, st := range snap {
 		if limit > 0 && len(out) >= limit {
 			break
+		}
+		// 已结束且已经过了显示窗口：界面上不再出现（“累计/按链分布”里仍然算过它）
+		if st.ended.Load() && st.last.Load() < endedCut {
+			continue
 		}
 		state := "进行中"
 		switch {
