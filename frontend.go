@@ -58,7 +58,9 @@ func redirectStderrTo(logDir string) {
 //
 // **刻意只收一个日志目录、不收配置路径**：界面不该读也不该写配置（那里有上游凭据），
 // 所有配置读写都归引擎进程一条路 —— 前端连路径都不知道，就不存在"两头写配置文件"的风险。
-func runFrontend(logDir, themeMode string) {
+//
+// startHidden：上次界面就是收在托盘里的（被杀之前），这次起来也别露出来。
+func runFrontend(logDir, themeMode string, startHidden bool) {
 	redirectStderrTo(logDir)
 
 	theme := wopts.Light
@@ -68,7 +70,7 @@ func runFrontend(logDir, themeMode string) {
 		bg = 0xff121314 // ABGR
 	}
 
-	br := webui.NewBridge(uiPipeName())
+	br := webui.NewBridge(uiPipeName(), themeMode)
 	// 自己的浏览器子进程被外部程序按名字杀干净了就立刻退出 ——
 	// 别等 Wails 那个模态报错框被点（它会一直等，界面进程就卡成"活着但没用"）。
 	go watchOwnWebview2()
@@ -77,9 +79,10 @@ func runFrontend(logDir, themeMode string) {
 		Width:  1120,
 		Height: 720,
 		// 与 DESIGN.md 的表格一节一致：窗口再窄就会把「速率」列挤到截断
-		MinWidth:  980,
-		MinHeight: 560,
-		Frameless: true, // 自绘标题栏（Win10 原生标题栏是"Win7 味"的主要来源）
+		MinWidth:    980,
+		MinHeight:   560,
+		Frameless:   true, // 自绘标题栏（Win10 原生标题栏是"Win7 味"的主要来源）
+		StartHidden: startHidden,
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
@@ -98,8 +101,8 @@ func runFrontend(logDir, themeMode string) {
 		OnStartup: br.OnStartup,
 		OnBeforeClose: func(ctx context.Context) bool {
 			// 点 X = 收进托盘继续跑：托盘在引擎进程里（另一个进程，不受界面死活影响），
-			// 它能把窗口再叫回来。
-			webui.HideWindowNow(ctx)
+			// 它能把窗口再叫回来。顺手告诉后端"我现在是收着的"（重启时照上次的样子起来）。
+			br.HideToTrayNow(ctx)
 			return true
 		},
 		OnShutdown: func(context.Context) { br.Close() },
@@ -129,7 +132,6 @@ type frontendSupervisor struct {
 	bus    *logbus.Bus
 	exe    string
 	logDir string
-	theme  string
 
 	nudge chan struct{} // "现在就拉起"（托盘点了显示界面、或第二次双击）
 
@@ -139,13 +141,13 @@ type frontendSupervisor struct {
 	deaths   []time.Time // 最近的被杀时间，用来识别"反复被杀"
 }
 
-func newFrontendSupervisor(b *webui.Backend, bus *logbus.Bus, logDir, theme string) *frontendSupervisor {
+func newFrontendSupervisor(b *webui.Backend, bus *logbus.Bus, logDir string) *frontendSupervisor {
 	exe, err := os.Executable()
 	if err != nil {
 		exe = "nethub.exe"
 	}
 	return &frontendSupervisor{
-		b: b, bus: bus, exe: exe, logDir: logDir, theme: theme,
+		b: b, bus: bus, exe: exe, logDir: logDir,
 		nudge: make(chan struct{}, 1),
 	}
 }
@@ -340,11 +342,17 @@ func (f *frontendSupervisor) backoff() {
 }
 
 func (f *frontendSupervisor) launch() (*os.Process, error) {
-	// -theme 只是"窗口刚出现那一下"的主题，避免深色用户看到一闪的浅色；
-	// 连上引擎之后后端还会再对齐一次（Backend.PushTheme）。
+	// -theme 是"窗口刚出现那一下"的主题（连上引擎后后端还会再对齐一次，见 PushTheme）。
+	// **每次拉起都重新读配置** —— 不能在后端启动时抓一份留着用：用户中途切了主题，
+	// 下一次拉起来的窗口就会用旧主题（看着就像"没记住"）。
 	args := []string{"-frontend", "-logdir", f.logDir}
-	if f.theme != "" {
-		args = append(args, "-theme", f.theme)
+	if theme := f.b.CurrentTheme(); theme != "" {
+		args = append(args, "-theme", theme)
+	}
+	// 上次界面是收在托盘里的（被杀之前）：这次也别露出来 —— 人家本来在专心干别的，
+	// 不该因为"外面的程序把我的界面杀了"就弹个窗口打断他。托盘图标一直在，点它就能显示。
+	if f.b.UIHidden() {
+		args = append(args, "-hidden")
 	}
 	cmd := exec.Command(f.exe, args...)
 	cmd.Dir = filepath.Dir(f.exe)
@@ -354,6 +362,6 @@ func (f *frontendSupervisor) launch() (*os.Process, error) {
 	f.mu.Lock()
 	f.proc = cmd.Process
 	f.mu.Unlock()
-	f.bus.Info("界面进程已拉起（pid=%d）", cmd.Process.Pid)
+	f.bus.Info("界面进程已拉起（pid=%d，主题 %s）", cmd.Process.Pid, f.b.CurrentTheme())
 	return cmd.Process, nil
 }

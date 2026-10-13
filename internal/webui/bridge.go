@@ -24,6 +24,8 @@ import (
 type Bridge struct {
 	pipeName string
 
+	initialTheme string // 见 NewBridge
+
 	mu      sync.RWMutex
 	ctx     context.Context
 	client  *ipc.Client
@@ -35,9 +37,15 @@ type Bridge struct {
 }
 
 // NewBridge 造界面侧的桥。pipeName 要跟引擎进程建的一致（main.go 里同一个来源）。
-func NewBridge(pipeName string) *Bridge {
-	return &Bridge{pipeName: pipeName, closed: make(chan struct{})}
+// initialTheme 是启动参数里那个主题（dark/light）：界面**第一帧**就用它，避免
+//
+//	先浅色再等 GetState 回来才变暗 —— 那一闪会被当成"没记住我的深色设置"。
+func NewBridge(pipeName, initialTheme string) *Bridge {
+	return &Bridge{pipeName: pipeName, initialTheme: initialTheme, closed: make(chan struct{})}
 }
+
+// InitialTheme 启动时那个主题（同步取，不走管道）。
+func (br *Bridge) InitialTheme() string { return br.initialTheme }
 
 // OnStartup 由 Wails 调用：记住 ctx（反向操作要用），开始连引擎。
 func (br *Bridge) OnStartup(ctx context.Context) {
@@ -235,9 +243,6 @@ func (br *Bridge) applyTheme(ctx context.Context, dark bool) {
 	wruntime.WindowSetBackgroundColour(ctx, 0xff, 0xff, 0xff, 0xff)
 }
 
-// HideWindowNow 界面进程内部的窗口操作（前端进程自己调，不走引擎那条路）。
-func HideWindowNow(ctx context.Context) { wruntime.WindowHide(ctx) }
-
 // ShowWindowSelf 供第二实例的唤回路径用：把本进程的窗口叫到前面。
 func (br *Bridge) ShowWindowSelf() {
 	br.mu.RLock()
@@ -247,6 +252,15 @@ func (br *Bridge) ShowWindowSelf() {
 		wruntime.WindowShow(ctx)
 		wruntime.WindowUnminimise(ctx)
 	}
+}
+
+// HideToTrayNow 界面进程内部的"收进托盘"（自绘标题栏以外的系统关闭路径用它）。
+//
+// 两件事：① 告诉后端我现在是收着的（重启时按这个决定窗口要不要露出来）；
+// ② 把窗口藏起来。上报是**尽力而为**的异步调用：后端万一不在，窗口照样得藏。
+func (br *Bridge) HideToTrayNow(ctx context.Context) {
+	go br.Call("NoteUIHidden", []any{true})
+	wruntime.WindowHide(ctx)
 }
 
 // Close 断开与引擎的连接（界面退出时调）。

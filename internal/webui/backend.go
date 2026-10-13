@@ -46,6 +46,9 @@ type Backend struct {
 	logCh    chan logbus.Line
 	tray     *Tray
 	quitting bool
+	// uiHidden 界面现在是收着的吗（看护重启时按它决定要不要带 -hidden）。
+	// 两个来源：后端自己叫它藏（HideToTray），以及界面进程的窗口关闭路径主动上报。
+	uiHidden bool
 	quitOnce sync.Once
 	quitHook func() // 引擎进程的收尾钩子（关管道、停看护、落日志）
 
@@ -1150,8 +1153,41 @@ func (b *Backend) Quit() {
 }
 
 // HideToTray 自绘标题栏的"最小化到托盘"按钮。
+//
+// 顺手记下"界面现在是收着的"：界面被外部程序杀掉再拉回来时得按上次的样子起来 ——
+// 人家本来收在托盘里干活，不该让窗口弹到人脸上（见 UIHidden/NoteUIHidden）。
 func (b *Backend) HideToTray() {
+	b.noteUIHidden(true)
 	b.uiOrNoop().HideWindow()
+}
+
+// NoteUIHidden 界面自己上报"我收起来了 / 我露出来了"。
+//
+// 为什么需要它：窗口的**系统关闭路径**（Alt+F4 / 系统菜单 / 任务栏关闭）走的是界面进程的
+// OnBeforeClose，后端根本看不见，所以那边要主动报一声。
+func (b *Backend) NoteUIHidden(hidden bool) { b.noteUIHidden(hidden) }
+
+// UIHidden 界面现在是不是收着的（看护重启界面时按它决定要不要带 -hidden）。
+func (b *Backend) UIHidden() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.uiHidden
+}
+
+func (b *Backend) noteUIHidden(hidden bool) {
+	b.mu.Lock()
+	changed := b.uiHidden != hidden
+	b.uiHidden = hidden
+	b.mu.Unlock()
+	// 只在状态真变了的时候记一行：这条回答的是"待会儿拉起来要不要露窗口"，
+	// 现场排障时（“为什么界面自己回来了却不弹出来”）能一眼看到。
+	if changed && b.a != nil && b.a.Bus != nil {
+		if hidden {
+			b.a.Bus.Info("界面已收入托盘（被外部程序杀掉后拉起来时保持收着）")
+		} else {
+			b.a.Bus.Info("界面已显示（拉回来时会跟着露出来）")
+		}
+	}
 }
 
 // ───────────────────────── 链路（≈ Proxifier 的 Proxy Servers）─────────────────────────
@@ -1521,6 +1557,9 @@ func (b *Backend) SaveSettings(s SettingsView) error {
 	return nil
 }
 
+// CurrentTheme 当前主题（dark/light）—— 看护拉起界面时用它，每次现读。
+func (b *Backend) CurrentTheme() string { return b.a.Cfg.Theme() }
+
 // SetTheme 切换深浅色并记住（同时切换窗口标题栏配色）。
 func (b *Backend) SetTheme(mode string) error {
 	if mode != "dark" {
@@ -1528,7 +1567,13 @@ func (b *Backend) SetTheme(mode string) error {
 	}
 	b.a.Cfg.SetTheme(mode)
 	b.uiOrNoop().SetTheme(mode == "dark")
-	return b.a.Cfg.Save()
+	if err := b.a.Cfg.Save(); err != nil {
+		return err
+	}
+	// 这一行是给"设置到底存没存住"用的：以前它静默写盘，现场根本看不出
+	// 是没写、还是写了没读回来（见 SaveSettings 那条同源日志）。
+	b.a.Bus.Info("主题已切到 %s（已写入配置）", map[bool]string{true: "深色", false: "浅色"}[mode == "dark"])
+	return nil
 }
 
 // SetAutostart 开关开机自启（立即生效，不等"保存"）。
@@ -1931,6 +1976,7 @@ func (b *Backend) SetTray(t *Tray) { b.tray = t }
 
 // ShowMainWindow 从托盘/第二实例唤回窗口。
 func ShowMainWindow(b *Backend) {
+	b.noteUIHidden(false)
 	b.uiOrNoop().ShowWindow()
 }
 

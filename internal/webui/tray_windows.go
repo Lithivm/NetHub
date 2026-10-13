@@ -473,8 +473,13 @@ func WatchShowSignal(onShow func()) (stop func()) {
 }
 
 // RequestShowWindow 请正在运行的后端把界面叫回来；返回是否真的找到了在跑的实例。
+//
+// 与退出信号不同：这里**先试 Local\，不行再试 Global\**、不两个都发 ——
+// 两条通道是给不同会话用的，同一个会话里两个都会送到，两个都发就会打两行日志、
+// 白叫一次（2026-10-13 实测：日志里出现两条"收到「显示界面」请求"）。
 func RequestShowWindow() bool {
-	local := signalEvent(showEventLocal)
-	global := signalEvent(showEventGlobal)
-	return local || global
+	if signalEvent(showEventLocal) {
+		return true
+	}
+	return signalEvent(showEventGlobal)
 }

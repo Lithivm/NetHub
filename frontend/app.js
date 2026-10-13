@@ -2632,7 +2632,11 @@ async function boot() {
   if (!B()) { toast('启动异常', '界面桥未注入', 'error'); return; }
 
   wire();
-  applyTheme('light');
+  // 第一帧就用启动参数里那个主题：以前这里写死 'light'，要等第一轮 GetState 回来才变暗，
+  // 那一闪看着就像"没记住我的深色设置"。
+  let bootTheme = 'light';
+  try { bootTheme = (await B().InitialTheme()) || 'light'; } catch (e) { /* 老桥/探针没这个方法 */ }
+  applyTheme(bootTheme);
 
   // 状态轮询【先注册】：任何面板加载失败都不能让状态栏冻在启动前的快照上。
   // 告警条也跟着它走（后端在 GetState 里算好），所以不再单开一条 60 秒的横幅轮询。

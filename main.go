@@ -71,6 +71,7 @@ func main() {
 	frontendMode := flag.Bool("frontend", false, "内部用：只跑界面（由引擎进程拉起），不碰引擎与配置")
 	themeFlag := flag.String("theme", "", "内部用：界面初始主题（light/dark），避开深色用户看到一闪的浅色")
 	logDirFlag := flag.String("logdir", "", "内部用：界面进程的日志目录（界面不读配置，只要这一个路径）")
+	hiddenFlag := flag.Bool("hidden", false, "内部用：界面起来时收在托盘里（上次就是收着的）")
 	flag.Parse()
 
 	if *verFlag {
@@ -203,7 +204,7 @@ func main() {
 		if ld == "" {
 			ld = filepath.Join(filepath.Dir(config.DefaultPath()), "logs")
 		}
-		runFrontend(ld, *themeFlag)
+		runFrontend(ld, *themeFlag, *hiddenFlag)
 		return
 	}
 
@@ -352,7 +353,7 @@ func runBackend(a *app.App, bus *logbus.Bus, cfgPath string) {
 	})
 
 	// 托盘归引擎进程：界面被杀掉时图标不会变僵尸，而且它还能把界面叫回来
-	fw := newFrontendSupervisor(b, bus, filepath.Join(filepath.Dir(cfgPath), "logs"), a.Cfg.Theme())
+	fw := newFrontendSupervisor(b, bus, filepath.Join(filepath.Dir(cfgPath), "logs"))
 	tray := webui.NewTray(filepath.Join(filepath.Dir(cfgPath), "nethub.ico"),
 		func() { fw.Show() }, // 显示主界面（不在跑就先拉起来）
 		func() { go func() { _ = a.Start() }() },
