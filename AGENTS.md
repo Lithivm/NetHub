@@ -21,6 +21,18 @@ Go + **Wails v2**（WebView2 界面）+ **WinDivert**（内核驱动），**仅 
   现在拦下 + 记一行 `quic.block`，让应用回落到 TCP（TCP 那条路仍归我们管）；单条规则可勾「不拦 QUIC」放行。
 - **停就撤、启再写**：停引擎/退出时把 hosts 段与 `runtime.json` 一起收走（引擎一停，hosts 段里
   那些名字就没人兑付）。被强杀撤不掉 → `-status` 报 `hosts.stale` 与一条 note，下次启动盖回去。
+- **界面和引擎是两个进程**（`nethub.exe` 后端 + `nethub.exe -frontend` 前端；编排见 `frontend.go`，
+  通信见 `internal/ipc`）：现场机器上的 HIS/医保客户端启动器清自己 WebView2 缓存时，
+  **按进程名杀掉全系统所有 `msedgewebview2.exe`**（反编译 DF.HIS.Launcher.exe 的
+  `WebMainForm.DelectCache` 实证），界面首当其冲；而 Wails 在浏览器进程消失后会 `os.Exit(-1)`
+  且跳过所有收尾。同进程就意味着引擎被连坐 —— 现场表现是“整个 NetHub 静默消失、hosts 段留在
+  系统里没人兑付”。拆开之后：被杀只影响界面，引擎/隧道/hosts 毫发无损，后端看护循环约 2 秒
+  把界面拉回来并在日志里写一条“界面进程被外部程序结束（退出码 N）”。
+  - **前端不读也不写配置**（配置里有上游凭据）：只给它 `-logdir`，结构上碰不到 config.yaml。
+  - **已知边界**：有人**点名杀 `nethub.exe`** 时后端一样会死 —— 那种情况只能靠 SCM 失败重启
+    （未做，属下一轮）。对外只承诺“杀界面不影响业务”，不承诺“杀不掉”。
+  - 前端**卡死**也要能被处理：`os.Process.Wait()` 的退出码不在 error 里、Wails 的报错框会等人点，
+    所以两边都用“自己名下的 msedgewebview2 还剩几个”当存活判据（`internal/proc.ChildrenByName`）。
 - **日志三档（照抄 Proxifier 的 Normal / Verbose / Debug）**：运行日志页的三段滑块
   `normal | verbose | debug`（配置 `ui.log_level`，默认 normal）。normal 只写连接开/关、启停、
   状态翻转、错误；verbose 加**判定面**（每条连接的 `route.match`、DNS 请求与应答）；

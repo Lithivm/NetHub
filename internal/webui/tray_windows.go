@@ -401,7 +401,7 @@ func WatchQuitSignal(onQuit func()) (stop func()) {
 
 // RequestQuit 请求正在运行的界面版优雅退出（-quit 用）；返回是否真的找到了运行中的实例。
 func RequestQuit() bool {
-	return signalQuit(quitEventLocal)
+	return signalEvent(quitEventLocal)
 }
 
 // RequestQuitCrossSession 服务/headless 用：请用户会话里的界面版让位。
@@ -409,12 +409,13 @@ func RequestQuit() bool {
 // 为什么不能只用 Local\：服务在 session 0，界面版在用户会话，Local\ 名字空间
 // 根本看不到；窗口消息又跨不了会话（还被 UIPI 拦）。两条都发一遍，各自尽力。
 func RequestQuitCrossSession() bool {
-	global := signalQuit(quitEventGlobal)
-	local := signalQuit(quitEventLocal) // 若服务恰好与界面版同会话（手动 -headless）
+	global := signalEvent(quitEventGlobal)
+	local := signalEvent(quitEventLocal) // 若服务恰好与界面版同会话（手动 -headless）
 	return global || local
 }
 
-func signalQuit(name string) bool {
+// signalEvent 给一个命名事件置位；事件不存在（没人在跑）返回 false。
+func signalEvent(name string) bool {
 	p, err := windows.UTF16PtrFromString(name)
 	if err != nil {
 		return false
@@ -425,4 +426,55 @@ func signalQuit(name string) bool {
 	}
 	defer windows.CloseHandle(h)
 	return windows.SetEvent(h) == nil
+}
+
+// ───────────────────── "把界面叫回来"（第二次双击 / 托盘）─────────────────────
+//
+// 与退出信号同一套命名事件机制，但**可以重复触发**（自动 reset 事件等一次就重新武装）。
+//
+// 为什么不走那条给界面用的管道：管道只服务一个客户端，那个位子是留给真界面的 ——
+// 第二次双击的进程挤进去会把界面顶掉（它俩都会不停断开重连，互相踩）。
+const (
+	showEventLocal  = `Local\NetHubShowRequest`
+	showEventGlobal = `Global\NetHubShowRequest`
+)
+
+// WatchShowSignal 起等待线程：收到"把界面叫回来"就调 onShow（返回 stop 用于收尾）。
+func WatchShowSignal(onShow func()) (stop func()) {
+	var handles []windows.Handle
+	for _, name := range []string{showEventLocal, showEventGlobal} {
+		p, err := windows.UTF16PtrFromString(name)
+		if err != nil {
+			continue
+		}
+		h, err := windows.CreateEvent(nil, 0 /* 自动 reset */, 0, p)
+		if err != nil || h == 0 {
+			continue
+		}
+		handles = append(handles, h)
+		go func(h windows.Handle) {
+			for {
+				// 自动 reset 事件：等到一次后自己重新武装，所以能反复收
+				rc, err := windows.WaitForSingleObject(h, windows.INFINITE)
+				if err != nil || rc != windows.WAIT_OBJECT_0 {
+					return // 句柄被关了（收尾）
+				}
+				if onShow != nil {
+					onShow()
+				}
+			}
+		}(h)
+	}
+	return func() {
+		for _, h := range handles {
+			_ = windows.CloseHandle(h)
+		}
+	}
+}
+
+// RequestShowWindow 请正在运行的后端把界面叫回来；返回是否真的找到了在跑的实例。
+func RequestShowWindow() bool {
+	local := signalEvent(showEventLocal)
+	global := signalEvent(showEventGlobal)
+	return local || global
 }

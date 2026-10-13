@@ -33,7 +33,7 @@ func (b *Backend) ExportConfigRedacted() (string, error) {
 	if p := b.a.Cfg.Path(); p != "" {
 		name = filepath.Join(dirOf(p), name)
 	}
-	path, err := wruntime.SaveFileDialog(b.ctx, wruntime.SaveDialogOptions{
+	path, err := b.uiOrNoop().SaveFile(wruntime.SaveDialogOptions{
 		Title:           "导出配置（无凭据，仍可导入）",
 		DefaultFilename: name,
 		Filters: []wruntime.FileFilter{
@@ -63,7 +63,7 @@ func (b *Backend) ExportConfigRedacted() (string, error) {
 // 免得把一台正在干活的机器改成起不来。
 func (b *Backend) ImportConfig() (string, error) {
 	dir := dirOf(b.a.Cfg.Path())
-	path, err := wruntime.OpenFileDialog(b.ctx, wruntime.OpenDialogOptions{
+	path, err := b.uiOrNoop().OpenFile(wruntime.OpenDialogOptions{
 		Title:            "导入配置（.yaml 或含 config.yaml 的 .zip）",
 		DefaultDirectory: dir,
 		Filters: []wruntime.FileFilter{

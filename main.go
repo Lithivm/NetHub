@@ -30,16 +30,13 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/wailsapp/wails/v2"
-	"github.com/wailsapp/wails/v2/pkg/options"
-	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
-	wopts "github.com/wailsapp/wails/v2/pkg/options/windows"
 	"golang.org/x/sys/windows"
 
 	"nethub/internal/app"
 	"nethub/internal/autostart"
 	"nethub/internal/config"
 	"nethub/internal/gostbat"
+	"nethub/internal/ipc"
 	"nethub/internal/logbus"
 	"nethub/internal/selfupdate"
 	"nethub/internal/webui"
@@ -71,6 +68,9 @@ func main() {
 	statusFlag := flag.Bool("status", false, "打印机器可读的 JSON 现状（版本/服务/链路/规则/开关/运行实例），随后退出（不需管理员）")
 	applyFlag := flag.String("apply", "", "把指定的配置文件应用到正在运行的实例（校验→落盘→热生效），随后退出（不需管理员）")
 	applyForce := flag.Bool("apply-force", false, "配合 -apply：即使目标配置比源文件新也覆盖")
+	frontendMode := flag.Bool("frontend", false, "内部用：只跑界面（由引擎进程拉起），不碰引擎与配置")
+	themeFlag := flag.String("theme", "", "内部用：界面初始主题（light/dark），避开深色用户看到一闪的浅色")
+	logDirFlag := flag.String("logdir", "", "内部用：界面进程的日志目录（界面不读配置，只要这一个路径）")
 	flag.Parse()
 
 	if *verFlag {
@@ -195,6 +195,18 @@ func main() {
 		os.Exit(cmdApply(*applyFlag, configPathFor(*cfgPath), *applyForce))
 	}
 
+	// 界面进程（-frontend，由引擎进程拉起）：只画界面。
+	// 放在提权之前 —— 界面不需要管理员（引擎已经提权跑着了），它也不该自己去提权。
+	// 只传日志目录：界面不读也不写配置（配置里有上游凭据，归引擎进程一条路）。
+	if *frontendMode {
+		ld := *logDirFlag
+		if ld == "" {
+			ld = filepath.Join(filepath.Dir(config.DefaultPath()), "logs")
+		}
+		runFrontend(ld, *themeFlag)
+		return
+	}
+
 	// 需要管理员：装 WinDivert 驱动、改 hosts、起驱动服务
 	if !*noElevate && !isElevated() {
 		if err := relaunchElevated(); err != nil {
@@ -202,6 +214,20 @@ func main() {
 		}
 		return // 新进程接管
 	}
+
+	// 角色：能当后端就当后端。抢不到这把锁 = 已经有后端在跑（用户又双击了一次，
+	// 或者界面刚被外部程序杀掉、他想手动叫回来）—— 那就只把它的窗口唤回来，**绝不**
+	// 启动第二套引擎（两套引擎会各装一份 WinDivert 过滤器互相干扰，是静默出错）。
+	releaseBackend, backendBusy, lockWarn := app.AcquireBackendLock()
+	if backendBusy {
+		if webui.RequestShowWindow() {
+			fmt.Println("NetHub 已经在运行，已把它的窗口叫回来")
+		} else {
+			fmt.Println("NetHub 已经在运行（没接上它的界面通道：可能跑的是服务模式，或界面正在重启）")
+		}
+		return
+	}
+	defer releaseBackend()
 
 	p := *cfgPath
 	if p == "" {
@@ -241,7 +267,11 @@ func main() {
 	// 日志单独放 logs\ —— 运行期产物不跟 exe/config 混在一个目录里
 	logDir := filepath.Join(filepath.Dir(p), "logs")
 	_ = bus.SetFile(filepath.Join(logDir, "nethub.log"))
+	redirectStderrTo(logDir) // 见 frontend.go：windowsgui 没有控制台，panic 得接走
 	bus.Info("NetHub 启动，配置 %s", p)
+	if lockWarn != "" {
+		bus.Warn("%s —— 角色锁没建出来，本次仍按「我是后端」继续", lockWarn)
+	}
 	if !isElevated() {
 		bus.Warn("当前不是管理员权限，驱动加载可能失败")
 	}
@@ -293,71 +323,71 @@ func main() {
 		runHeadless(a, bus)
 		return
 	}
-	runGUI(a, bus, p)
+	runBackend(a, bus, p)
 }
 
-// runGUI 启动 Wails 界面（阻塞到退出）。
-func runGUI(a *app.App, bus *logbus.Bus, cfgPath string) {
+// runBackend 引擎进程：引擎 + 托盘 + 界面进程的看护者。阻塞到退出。
+//
+// 它不再承担任何"界面"职责 —— 窗口是另一个进程画的（见 frontend.go 与 internal/ipc
+// 的包注释）。引擎必须活在界面之外：现场机器上的 HIS/医保客户端启动器清理 WebView2
+// 缓存时会按名字杀掉全系统的 msedgewebview2，界面首当其冲，而 Wails 在浏览器进程消失后
+// 直接 os.Exit(-1) —— 同进程就意味着引擎被连坐（现场表现：整个 NetHub 静默消失、
+// hosts 段留在系统里没人兑付）。
+func runBackend(a *app.App, bus *logbus.Bus, cfgPath string) {
 	b := webui.New(a)
 
-	// 托盘：先建好，点 X 才有地方可去
+	// 界面通道：界面进程用它调引擎（引擎侧靠反射派发，见 internal/ipc/dispatch.go）。
+	srv := ipc.NewServer(uiPipeName(), b)
+	b.SetUI(webui.NewRemoteUI(srv))
+	if err := srv.Start(); err != nil {
+		bus.Error("界面通道起不来：%v（引擎照常跑，只是界面连不上）", err)
+	}
+	srv.SetConnHook(func(connected bool) {
+		if !connected {
+			bus.Info("界面已断开（引擎继续跑，看护循环会把界面拉回来）")
+			return
+		}
+		bus.Info("界面已接入")
+		b.PushTheme() // 界面窗口刚出现时主题来自启动参数，这里再对齐一次
+	})
+
+	// 托盘归引擎进程：界面被杀掉时图标不会变僵尸，而且它还能把界面叫回来
+	fw := newFrontendSupervisor(b, bus, filepath.Join(filepath.Dir(cfgPath), "logs"), a.Cfg.Theme())
 	tray := webui.NewTray(filepath.Join(filepath.Dir(cfgPath), "nethub.ico"),
-		func() { webui.ShowMainWindow(b) }, // 显示主界面
+		func() { fw.Show() }, // 显示主界面（不在跑就先拉起来）
 		func() { go func() { _ = a.Start() }() },
 		func() { a.Stop() },
 		func() { b.Quit() },
-		func(m string) { a.Bus.Info("托盘: %s", m) },
+		func(m string) { bus.Info("托盘: %s", m) },
 	)
 	b.SetTray(tray)
-	// 优雅退出通道：重启脚本用 `nethub.exe -quit` 通知旧实例走正常退出（摘掉托盘图标），
-	// 而不是强杀 —— 强杀会留下“僵尸图标”。
+	// 退出通道一：托盘菜单 → 退出（或别的收尾路径），关掉这个 channel 就结束主循环
+	done := make(chan struct{})
+	b.SetQuitHook(func() { close(done) })
+
+	// 退出通道二：重启脚本用 `nethub.exe -quit` 通知旧实例走正常退出（摘掉托盘图标），
+	// 而不是强杀 —— 强杀会留下“僵尸图标”，也来不及撤 hosts 段。
 	stopWatch := webui.WatchQuitSignal(func() {
-		a.Bus.Info("收到外部退出请求（-quit），正在优雅退出")
+		bus.Info("收到外部退出请求（-quit），正在优雅退出")
 		b.Quit()
 	})
 	defer stopWatch()
 
-	theme := wopts.Light
-	bg := uint32(0xffffffff)
-	if a.Cfg.Theme() == "dark" {
-		theme = wopts.Dark
-		bg = 0xff121314 // ABGR
-	}
-
-	err := wails.Run(&options.App{
-		Title:  "NetHub · 内网隧道代理",
-		Width:  1120,
-		Height: 720,
-		// MinWidth 从 880 提到 980：连接表添了「速率」一列（见 DESIGN.md 表格一节），
-		// 窗口再窄就会被挤到截断 —— 宁可让窗口有个下限，也不让表格里的一列看不见。
-		MinWidth:  980,
-		MinHeight: 560,
-		Frameless: true, // 自绘标题栏（Win10 原生标题栏是"Win7 味"的主要来源）
-		AssetServer: &assetserver.Options{
-			Assets: assets,
-		},
-		BackgroundColour: &options.RGBA{R: uint8(bg & 0xff), G: uint8((bg >> 8) & 0xff), B: uint8((bg >> 16) & 0xff), A: 255},
-		Bind:             []interface{}{b},
-		Windows: &wopts.Options{
-			Theme:        theme,
-			BackdropType: wopts.None, // Mica 需要 Win11 22621+，Win10 上只能 None
-		},
-		OnStartup:     b.OnStartup,
-		OnDomReady:    b.OnDomReady,
-		OnBeforeClose: b.OnBeforeClose,
-		OnShutdown:    b.OnShutdown,
-		SingleInstanceLock: &options.SingleInstanceLock{
-			UniqueId: "NetHub-single-instance",
-			OnSecondInstanceLaunch: func(options.SecondInstanceData) {
-				webui.ShowMainWindow(b)
-			},
-		},
+	// 退出通道三：再双击一次 = 把界面叫回来，而不是启动第二个引擎
+	stopShow := webui.WatchShowSignal(func() {
+		bus.Info("收到「显示界面」请求（多半是用户又双击了一次）")
+		fw.Show()
 	})
-	if err != nil {
-		bus.Error("界面退出: %v", err)
-	}
-	a.Stop()
+	defer stopShow()
+
+	b.Bootstrap() // 引擎 + 巡检 + 自检（原 OnStartup 的主体）
+	fw.Start()    // 拉起界面，并开始看护它
+
+	<-done
 	bus.Info("已退出")
+	fw.Stop()
+	srv.Close()
+	b.Shutdown()
 	bus.Close()
 }
 

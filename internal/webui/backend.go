@@ -10,7 +10,6 @@
 package webui
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -37,15 +36,18 @@ import (
 	"nethub/internal/winsvc"
 )
 
-// Backend 是绑定给前端的对象。
+// Backend 是引擎进程那边的"能力面"：引擎进程自己直接调它（托盘、看护），
+// 同时也是 ipc 反射派发的目标 —— 界面进程发来的每个方法调用都落在这里。
 type Backend struct {
-	a   *app.App
-	ctx context.Context
+	a  *app.App
+	ui UI
 
 	mu       sync.Mutex
 	logCh    chan logbus.Line
 	tray     *Tray
 	quitting bool
+	quitOnce sync.Once
+	quitHook func() // 引擎进程的收尾钩子（关管道、停看护、落日志）
 
 	// 最近一次链路自检的结果：界面直接看，不用再翻日志（打开设置页也能看到上次的）。
 	selfTestMu   sync.RWMutex
@@ -76,12 +78,29 @@ type Backend struct {
 }
 
 func New(a *app.App) *Backend {
-	return &Backend{a: a, logCh: make(chan logbus.Line, 256)}
+	return &Backend{a: a, logCh: make(chan logbus.Line, 256), ui: noUI{}}
 }
 
-// OnStartup Wails 启动回调：拿 ctx、接管通知、把日志推给前端、拉起服务。
-func (b *Backend) OnStartup(ctx context.Context) {
-	b.ctx = ctx
+// SetUI 装上"界面配合"的实现（引擎进程装 remoteUI；测试/无界面时留 noUI）。
+func (b *Backend) SetUI(ui UI) { b.ui = ui }
+
+// uiOrNoop 取 UI；没装就用空实现。
+//
+// 引擎是个长跑进程：哪怕只是测试里手搓出来的 Backend 忘了装 UI，也不能 nil panic ——
+// 那会直接在用户机器上把隧道带走（同一个道理见 "绝不静默降级" 那些注释）。
+func (b *Backend) uiOrNoop() UI {
+	if b.ui == nil {
+		return noUI{}
+	}
+	return b.ui
+}
+
+// Bootstrap 拿通知口子、把日志推给前端、拉起服务与各路后台巡检。
+//
+// **由引擎进程调用**，不再是 Wails 的 OnStartup 回调 —— 界面与引擎拆成两个进程后，
+// 这些活的归属是引擎进程（为什么要拆见 internal/ipc 的包注释）。
+// 名字不叫 Start：Start 是界面上那个"启动服务"按钮（见下方启停一节）。
+func (b *Backend) Bootstrap() {
 	b.refreshAutostart()
 	// 提示只走应用内（前端 toast），不弹 Windows 系统通知：
 	// 既不占用户的「操作中心」，也避免窗口收起来时被系统弹窗打断。
@@ -130,38 +149,18 @@ func (b *Backend) OnStartup(ctx context.Context) {
 	}()
 }
 
-// OnDomReady 页面就绪。
-func (b *Backend) OnDomReady(ctx context.Context) {
-	b.a.Bus.Info("界面已就绪")
-}
-
-// OnShutdown Wails 退出回调：兜底注销托盘图标。
+// Shutdown 引擎进程退出时的兜底：注销托盘图标。
 //
-// 正常退出（托盘菜单 → 退出）走 Quit()，那里已经 Remove 过了；
-// 但窗口被强制关闭、或者别的退出路径不能让图标变成孤儿 ——
-// 孤儿图标会堆在托盘折叠面板里，显得像“注册了一堆图标”。
-func (b *Backend) OnShutdown(ctx context.Context) {
+// 正常退出（托盘菜单 → 退出）走 Quit()，那里已经 Remove 过了；但别的退出路径
+// 不能让图标变成孤儿 —— 孤儿图标会堆在托盘折叠面板里，显得像"注册了一堆图标"。
+func (b *Backend) Shutdown() {
 	if b.tray != nil {
 		b.tray.Remove()
 		b.tray = nil
 	}
 }
 
-// OnBeforeClose 点 X → 收进托盘继续跑，返回 true 阻止关闭。
-func (b *Backend) OnBeforeClose(ctx context.Context) bool {
-	if b.quitting {
-		return false
-	}
-	wruntime.WindowHide(ctx)
-	return true
-}
-
-func (b *Backend) emit(name string, data any) {
-	if b.ctx == nil {
-		return
-	}
-	wruntime.EventsEmit(b.ctx, name, data)
-}
+func (b *Backend) emit(name string, data any) { b.uiOrNoop().Emit(name, data) }
 
 // ───────────────────────── 视图类型（与前端 JSON 对齐）─────────────────────────
 
@@ -1123,19 +1122,36 @@ func (b *Backend) Start() error   { return b.a.Start() }
 func (b *Backend) Stop()          { b.a.Stop() }
 func (b *Backend) Restart() error { return b.a.Restart() }
 
-// Quit 真正退出：先停服务再关窗。
+// PushTheme 把当前主题推给界面：界面进程刚起来时窗口主题来自启动参数，
+// 连上之后再对齐一次，保证与配置一致。
+func (b *Backend) PushTheme() { b.uiOrNoop().SetTheme(b.a.Cfg.Theme() == "dark") }
+
+// SetQuitHook 装上退出收尾：Quit() 把引擎停完、请界面退出之后调它一次。
+//
+// 引擎进程靠它结束主循环（界面进程不需要这个 —— 它退出就退出了）。
+func (b *Backend) SetQuitHook(fn func()) { b.quitHook = fn }
+
+// Quit 真正退出：先停服务再关窗（并请引擎进程收尾退出）。
 func (b *Backend) Quit() {
 	b.quitting = true
 	b.a.Stop()
 	if b.tray != nil {
 		b.tray.Remove()
+		b.tray = nil
 	}
-	wruntime.Quit(b.ctx)
+	// 界面那边是通知型的（它收到就退、不回执），所以丢到 goroutine 里发，
+	// 绝不阻塞退出流程 —— 否则就是干等超时、被用户当成"点了退出没反应"。
+	go b.uiOrNoop().QuitApp()
+	b.quitOnce.Do(func() {
+		if b.quitHook != nil {
+			b.quitHook()
+		}
+	})
 }
 
 // HideToTray 自绘标题栏的"最小化到托盘"按钮。
 func (b *Backend) HideToTray() {
-	wruntime.WindowHide(b.ctx)
+	b.uiOrNoop().HideWindow()
 }
 
 // ───────────────────────── 链路（≈ Proxifier 的 Proxy Servers）─────────────────────────
@@ -1374,7 +1390,7 @@ func (b *Backend) MoveRoute(from, to int) error {
 
 // PickBatFile 弹文件框选一个 gost .bat，解析出 -L/-F 回填给表单（不直接写配置）。
 func (b *Backend) PickBatFile() (*BatEntryView, error) {
-	path, err := wruntime.OpenFileDialog(b.ctx, wruntime.OpenDialogOptions{
+	path, err := b.uiOrNoop().OpenFile(wruntime.OpenDialogOptions{
 		Title: "选择 gost 批处理",
 		Filters: []wruntime.FileFilter{
 			{DisplayName: "gost 批处理 (*.bat)", Pattern: "*.bat"},
@@ -1396,7 +1412,7 @@ func (b *Backend) PickBatFile() (*BatEntryView, error) {
 
 // ImportBatDir 选一个目录，批量把里面的 gost .bat 加为链（同名则更新上游）。
 func (b *Backend) ImportBatDir() (*ImportResult, error) {
-	dir, err := wruntime.OpenDirectoryDialog(b.ctx, wruntime.OpenDialogOptions{
+	dir, err := b.uiOrNoop().OpenDir(wruntime.OpenDialogOptions{
 		Title: "选择 gost 脚本所在目录",
 	})
 	if err != nil {
@@ -1511,13 +1527,7 @@ func (b *Backend) SetTheme(mode string) error {
 		mode = "light"
 	}
 	b.a.Cfg.SetTheme(mode)
-	if mode == "dark" {
-		wruntime.WindowSetDarkTheme(b.ctx)
-		wruntime.WindowSetBackgroundColour(b.ctx, 0x14, 0x13, 0x12, 0xff)
-	} else {
-		wruntime.WindowSetLightTheme(b.ctx)
-		wruntime.WindowSetBackgroundColour(b.ctx, 0xff, 0xff, 0xff, 0xff)
-	}
+	b.uiOrNoop().SetTheme(mode == "dark")
 	return b.a.Cfg.Save()
 }
 
@@ -1921,11 +1931,7 @@ func (b *Backend) SetTray(t *Tray) { b.tray = t }
 
 // ShowMainWindow 从托盘/第二实例唤回窗口。
 func ShowMainWindow(b *Backend) {
-	if b.ctx == nil {
-		return
-	}
-	wruntime.WindowShow(b.ctx)
-	wruntime.WindowUnminimise(b.ctx)
+	b.uiOrNoop().ShowWindow()
 }
 
 // ───────────────────────── 导出 / 导入设置 ─────────────────────────
@@ -1942,7 +1948,7 @@ func (b *Backend) ExportConfig() (string, error) {
 		dir := dirOf(p)
 		name = filepath.Join(dir, "nethub-config.yaml")
 	}
-	path, err := wruntime.SaveFileDialog(b.ctx, wruntime.SaveDialogOptions{
+	path, err := b.uiOrNoop().SaveFile(wruntime.SaveDialogOptions{
 		Title:           "导出设置（含上游凭据，请通过安全渠道分发）",
 		DefaultFilename: name,
 		Filters: []wruntime.FileFilter{

@@ -1,11 +1,14 @@
 /* NetHub 前端逻辑。
-   后端调用约定（Wails 运行时自动生成的 bindings）：
-     window.go.webui.Backend.<Method>(...)
-   Go 侧返回值末尾带 error 的方法，Promise 会 reject —— 统一在 call() 里兜住。 */
+   引擎在**另一个进程**里（为什么拆见 internal/ipc 的包注释）：这里不直连引擎，
+   所有后端调用都走一个口子 ——
+     window.go.webui.Bridge.Call(method, args)   // Go 侧转成命名管道请求
+   Go 侧返回值末尾带 error 的方法，Promise 会 reject —— 统一在 call() 里兜住。
+   引擎推来的事件（log / notify / selftest…）由界面进程转成 Wails 事件，
+   所以下面 R().EventsOn(...) 那些监听器跟以前完全一样，不用改。 */
 
 'use strict';
 
-const B = () => window.go.webui.Backend;   // 每次取，避免绑定还没注入时抓到 undefined
+const B = () => window.go.webui.Bridge;   // 每次取，避免绑定还没注入时抓到 undefined
 const R = () => window.runtime;
 
 let state = { theme: 'light' };
@@ -19,9 +22,11 @@ let autoScrollLog = true;
 /* ═══════════════ 基础工具 ═══════════════ */
 
 async function call(fn, ...args) {
-  const b = B();
-  if (!b) throw new Error('后端绑定还没就绪');
-  return await b[fn](...args);
+  const br = B();
+  if (!br) throw new Error('界面桥还没就绪');
+  // 方法名 + 参数原样发给引擎进程，它那边反射派发到真正的后端对象 ——
+  // 所以这一行与以前的 window.go.webui.Backend[fn](...args) 等价。
+  return await br.Call(fn, args);
 }
 
 function el(tag, cls, text) {
@@ -2622,9 +2627,9 @@ function now() {
 }
 
 async function boot() {
-  // 等 bindings 注入
+  // 等界面桥注入（Wails 会把 window.go 注入进来）
   for (let i = 0; i < 60 && !B(); i++) await new Promise(r => setTimeout(r, 50));
-  if (!B()) { toast('启动异常', '后端绑定未注入', 'error'); return; }
+  if (!B()) { toast('启动异常', '界面桥未注入', 'error'); return; }
 
   wire();
   applyTheme('light');
