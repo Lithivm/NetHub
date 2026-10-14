@@ -147,8 +147,9 @@ func (a *App) setLastError(s string, cause error) {
 // 否则界面说"运行中"、实际一个包都没拦 —— 那种静默失败最坑人。
 //
 //	running = true 且无错 → Ready
+//	running = false 但正拉起引擎（Starting）→ 启动中（琥珀，转圈）
 //	running = false 但有错 → Error（红）
-//	running = false 无错   → 已停止（灰，手动停的不算错）
+//	running = false 无错   → 未启动（灰，手动停的不算错）
 func (a *App) Status() (running bool, errText string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

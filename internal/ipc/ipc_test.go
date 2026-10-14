@@ -146,6 +146,55 @@ func TestCallDispatch(t *testing.T) {
 	}
 }
 
+// TestConnHookDoesNotBlockReads：连上时的钩子哪怕卡住（比如在里面做反向请求，
+// 等一个要 readLoop 才能读到的回执），也**不能让界面后续的方法调用跟着卡**。
+//
+// 踩过的坑（2026-10-14）：“连上就推主题”写在钩子里，而钩子是在 readLoop 之前同步调的
+// → 回执永远读不到 → 恒定等满 30 秒超时，界面这 30 秒里所有 GetState 都堆着，
+// 上层表现是"服务明明已经起来了，但界面 Ready 迟迟不变"。
+func TestConnHookDoesNotBlockReads(t *testing.T) {
+	srv := NewServer(testPipe(t), &demo{})
+	hookEntered := make(chan struct{})
+	release := make(chan struct{})
+	srv.SetConnHook(func(connected bool) {
+		if !connected {
+			return
+		}
+		close(hookEntered)
+		<-release // 模拟"钩子里在等一个永远不来的回执"
+	})
+	if err := srv.Start(); err != nil {
+		t.Fatalf("起服务端失败: %v", err)
+	}
+	t.Cleanup(func() { close(release); srv.Close() })
+
+	c := dialServer(t, srv)
+	<-hookEntered // 钩子确实进去了（而且卡在那里）
+
+	done := make(chan string, 1)
+	go func() {
+		raw, err := c.Call(context.Background(), "Echo", "x", 1)
+		if err != nil {
+			done <- "ERR:" + err.Error()
+			return
+		}
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			done <- "BADJSON:" + string(raw)
+			return
+		}
+		done <- s
+	}()
+	select {
+	case s := <-done:
+		if s != "x/1" {
+			t.Fatalf("调用结果不对: %q", s)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("钩子卡住时，界面调用也被堵住了（钩子不能同步堵连接建立）")
+	}
+}
+
 func TestEventAndReverseRequest(t *testing.T) {
 	srv := startServer(t, &demo{})
 	c := dialServer(t, srv)

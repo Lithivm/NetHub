@@ -45,7 +45,9 @@ var traceOn = os.Getenv("NETHUB_IPC_TRACE") != ""
 
 func tracef(format string, a ...any) {
 	if traceOn {
-		fmt.Fprintf(os.Stderr, "[ipc] "+format+"\n", a...)
+		// 带时间戳：排"界面多久才拿到 running=true"这类问题全靠它
+		//（日志那边是另一个进程写的，两边只能靠时间对齐）。
+		fmt.Fprintf(os.Stderr, "[ipc] %s "+format+"\n", append([]any{time.Now().Format("15:04:05.000")}, a...)...)
 	}
 }
 
@@ -110,7 +112,12 @@ func NewServer(name string, target any) *Server {
 	}
 }
 
-// SetConnHook 设置"界面连上/断开"回调。会被串行调用。
+// SetConnHook 设置"界面连上/断开"回调。
+//
+// 契约：**连上的那次回调不得依赖本连接上的读**（比如在里面发反向请求）——
+// 连上时钩子先于 readLoop 启动，同步调用会把读循环堵住、把回执永远等不到
+// （2026-10-14 实测：连上就推主题 → 恒定卡满 30 秒超时）。所以连上那次由服务端
+// 另起 goroutine 调（见 acceptLoop），钩子里也尽可以慢慢做。
 func (s *Server) SetConnHook(fn func(connected bool)) { s.connHook = fn }
 
 // Start 起服务端：建好管道实例并开始等界面连上（不阻塞）。
@@ -246,8 +253,11 @@ func (s *Server) acceptLoop(ln *pipeListener) {
 		s.conn = c
 		s.mu.Unlock()
 		tracef("acceptLoop: 界面已连上，开始读")
+		// 钩子**必须**另起 goroutine：它可能做反向请求（比如连上就推主题），
+		// 而反向请求的回执要等下面的 readLoop 去读 —— 同步调用 = 自己堵自己，
+		// 恒定等满超时（实测 30 秒，期间界面所有方法调用都堆着、状态整整滞后 30 秒）。
 		if s.connHook != nil {
-			s.connHook(true)
+			go s.connHook(true)
 		}
 		c.readLoop(func(f frame) {
 			switch {

@@ -841,22 +841,29 @@ async function refreshState() {
   // 只读态：引擎锁被别的进程（服务版/另一实例）拿着 —— 本界面不跑引擎，只展示。
   // 两种引擎同时跑会各自改写到自己的 relay（静默互扰），所以宁可只读也不降级启动。
   const ro = !!s.readOnly;
+  // 启动中：后端正在拉起引擎（自动启动服务 / 手动点启动 / 重启 / 接管），
+  // 或者用户刚点了启动、后端那边还没标上（本地 pendingStart，图个手感即时）。
+  const starting = !on && !ro && !bad && (!!s.starting || !!state.pendingStart);
+  if (on || bad) state.pendingStart = false;   // 真实状态到了，本地乐观值就撤掉
   const rs = document.getElementById('runState');
   rs.classList.toggle('is-on', on);
   rs.classList.toggle('is-bad', bad && !ro);   // 只读不是故障：别同时挂 is-bad（琥珀会被红色盖掉）
-  rs.classList.toggle('is-busy', ro);          // 琥珀色、不呼吸
-  // 四态：Ready（绿，呼吸）/ Error（红，呼吸）/ 只读（琥珀，静止）/ 已停止（灰，静止）
+  rs.classList.toggle('is-busy', ro);          // 只读：琥珀、静止
+  rs.classList.toggle('is-starting', starting); // 启动中：琥珀 + 转圈（"正在动"与"就停在这"得能区分）
+  // 五态：Ready（绿，呼吸）/ 启动中（琥珀，转圈）/ Error（红，呼吸）/ 只读（琥珀，静止）/ 未启动（灰）
   document.getElementById('runStateText').textContent =
-    ro ? '只读' : (on ? 'Ready' : (bad ? 'Error' : '已停止'));
+    ro ? '只读' : (starting ? '启动中' : (on ? 'Ready' : (bad ? 'Error' : '未启动')));
   // 出错原因平时不占位置，悬停能看；内部中转端口同样只在悬停里出现
   rs.title = ro
     ? (s.readOnlyWhy || '服务版正在运行') + ' —— 点「接管引擎」可切回界面版'
-    : (bad ? s.error : ('内部中转端口 ' + (s.relay || '—') + '（实现细节，无需配置）'));
+    : (starting ? '正在拉起引擎：写 hosts → 起驱动 → 装过滤器 → 起 relay（通常几秒）'
+      : (bad ? s.error : ('内部中转端口 ' + (s.relay || '—') + '（实现细节，无需配置）')));
   // 只读态下别让用户去点会失败的东西：藏掉启动/停止、置灰重启，只留「接管引擎」
   document.getElementById('btnTakeover').style.display = ro ? '' : 'none';
   const tog = document.getElementById('btnToggle');
   tog.style.display = ro ? 'none' : '';
-  tog.textContent = on ? '停止' : '启动';
+  tog.textContent = starting ? '启动中…' : (on ? '停止' : '启动');
+  tog.disabled = starting;
   tog.className = on ? 'btn' : 'btn btn-primary';
   document.getElementById('btnRestart').disabled = ro;
   // 只读态不再弹 toast：后端会给一条**常驻**告警（顶上那条，带「接管引擎」按钮），
@@ -2237,15 +2244,25 @@ function wire() {
 
   // 主操作
   document.getElementById('btnToggle').onclick = async () => {
-    const rs = document.getElementById('runState');
-    rs.classList.add('is-busy');
-    try { state.running ? await call('Stop') : await call('Start'); }
-    catch (e) { toast('操作失败', (e && e.message) || String(e), 'error'); }
-    finally { rs.classList.remove('is-busy'); refreshState(); }
+    if (state.running) {
+      try { await call('Stop'); }
+      catch (e) { toast('操作失败', (e && e.message) || String(e), 'error'); }
+      refreshState();
+      return;
+    }
+    // 点了立刻显示「启动中」：后端会在 RPC 里把 starting 标上，这里先乐观一下，
+    // 让手指和眼睛之间没有延迟（以前是临时挂 is-busy，结果是"黄色未启动"，像没反应）。
+    state.pendingStart = true;
+    refreshState();   // 不 await：先把中间态画出来
+    try { await call('Start'); }
+    catch (e) { state.pendingStart = false; toast('操作失败', (e && e.message) || String(e), 'error'); }
+    refreshState();
   };
   document.getElementById('btnRestart').onclick = async () => {
+    state.pendingStart = true;   // 重启也是"先停再起"，同样给个进行中
+    refreshState();
     try { await call('Restart'); toast('已重启', '拦截与隧道已重新建立', 'success'); }
-    catch (e) { toast('重启失败', (e && e.message) || String(e), 'error'); }
+    catch (e) { state.pendingStart = false; toast('重启失败', (e && e.message) || String(e), 'error'); }
     refreshState();
   };
   document.getElementById('themeSeg').addEventListener('click', ev => {

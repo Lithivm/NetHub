@@ -49,6 +49,8 @@ type Backend struct {
 	// uiHidden 界面现在是收着的吗（看护重启时按它决定要不要带 -hidden）。
 	// 两个来源：后端自己叫它藏（HideToTray），以及界面进程的窗口关闭路径主动上报。
 	uiHidden bool
+	// starting 引擎正在拉起来（给界面的"启动中"中间态用，见 StateView.Starting）。
+	starting bool
 	quitOnce sync.Once
 	quitHook func() // 引擎进程的收尾钩子（关管道、停看护、落日志）
 
@@ -127,9 +129,13 @@ func (b *Backend) Bootstrap() {
 
 	// 起来就把服务拉起（计划任务开机自启靠这个：进程起来 = 隧道就绪）
 	go func() {
+		// 先标"正在启动"：界面第一帧就显示「启动中」，而不是灰「未启动」直接跳 Ready。
+		// 标记点必须在"决定要拉"这一刻，不能等真去 Start 才标 —— 否则界面还没连上
+		// 标记就已经结束了，中间态等于不存在（2026-10-14 实测：那个窗口只有 0.9 秒）。
+		b.setStarting(true)
 		time.Sleep(600 * time.Millisecond)
 		b.a.Bus.Info("开始自动启动服务…")
-		if err := b.a.Start(); err != nil {
+		if err := b.startEngine(); err != nil {
 			// 引擎锁被别的进程（服务版/另一实例）拿着：降级为只读，不弹错、不退出。
 			// 界面上会显示醒目状态 + 「接管」按钮，用户要抢回来只需点一下。
 			if errors.Is(err, app.ErrEngineBusy) {
@@ -168,8 +174,14 @@ func (b *Backend) emit(name string, data any) { b.uiOrNoop().Emit(name, data) }
 // ───────────────────────── 视图类型（与前端 JSON 对齐）─────────────────────────
 
 type StateView struct {
-	Running bool   `json:"running"`
-	Relay   string `json:"relay"` // 内部中转端口（界面上不再直接显示，只作悬停提示）
+	Running bool `json:"running"`
+	// Starting 正在拉起引擎（自动启动 / 手动点启动 / 重启 / 接管都算）。
+	//
+	// 为什么要单独一个字段：以前界面只有"未启动/Ready"两态，用户点了启动之后
+	// 那几秒里胺囊还是"未启动"（只是变成黄色），看着像没反应；自动启动服务时
+	// 更是直接从灰"未启动"跳到 Ready。（用户 2026-10-14 明确要求加中间态）
+	Starting bool   `json:"starting"`
+	Relay    string `json:"relay"` // 内部中转端口（界面上不再直接显示，只作悬停提示）
 	// Error 非空表示当前处于出错态（启动失败 / 拦截中断）。前端用它决定红/绿。
 	Error string `json:"error"`
 	// 预热连接池近况（A11）
@@ -342,6 +354,7 @@ func (b *Backend) GetState() StateView {
 	readOnly, why := b.readOnlyState()
 	return StateView{
 		Running:       running,
+		Starting:      b.startingNow(),
 		Error:         errText,
 		PoolWarm:      warm,
 		PoolHits:      taken,
@@ -411,7 +424,7 @@ func (b *Backend) TakeoverEngine() (string, error) {
 		}
 		stoppedService = true
 	}
-	if err := b.a.Start(); err != nil {
+	if err := b.startEngine(); err != nil {
 		// 服务已停但锁仍被占 → 是别的实例拿着，说清楚别让人以为是服务的锅
 		if errors.Is(err, app.ErrEngineBusy) {
 			return "", fmt.Errorf("%s，接管没成功", describeEngineHolder())
@@ -1121,9 +1134,35 @@ func defaultHostsEntries() []string {
 
 // ───────────────────────── 启停 ─────────────────────────
 
-func (b *Backend) Start() error   { return b.a.Start() }
-func (b *Backend) Stop()          { b.a.Stop() }
-func (b *Backend) Restart() error { return b.a.Restart() }
+func (b *Backend) Start() error { return b.startEngine() }
+func (b *Backend) Stop()        { b.a.Stop() }
+func (b *Backend) Restart() error {
+	b.setStarting(true)
+	defer b.setStarting(false)
+	return b.a.Restart()
+}
+
+// startEngine 统一的"拉起引擎"入口：顺手把"正在启动"标上，界面好显示「启动中」中间态。
+//
+// 自动启动服务 / 手动点启动 / 接管都走它 —— 干别的事（比如交棒给服务版）不走。
+func (b *Backend) startEngine() error {
+	b.setStarting(true)
+	defer b.setStarting(false)
+	return b.a.Start()
+}
+
+// setStarting / startingNow："正在启动"标记（GetState 每秒读一次）。
+func (b *Backend) setStarting(v bool) {
+	b.mu.Lock()
+	b.starting = v
+	b.mu.Unlock()
+}
+
+func (b *Backend) startingNow() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.starting
+}
 
 // PushTheme 把当前主题推给界面：界面进程刚起来时窗口主题来自启动参数，
 // 连上之后再对齐一次，保证与配置一致。

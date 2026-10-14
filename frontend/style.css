@@ -222,6 +222,8 @@ code, .mono { font-family: var(--font-mono); }
 .runstate.is-on { background: var(--success-soft); border-color: color-mix(in srgb, var(--success) 28%, transparent); }
 .runstate.is-busy { background: var(--warning-soft); border-color: color-mix(in srgb, var(--warning) 28%, transparent); }
 .runstate.is-bad { background: var(--error-soft); border-color: color-mix(in srgb, var(--error) 28%, transparent); }
+/* 启动中：琥珀 + 转圈。跟 is-busy（只读，琥珀但静止）区分开——“正在动”和“就停在这”不能长一样。 */
+.runstate.is-starting { background: var(--warning-soft); border-color: color-mix(in srgb, var(--warning) 28%, transparent); }
 .dot {
   width: 8px; height: 8px; border-radius: 50%;
   background: var(--muted-soft);
@@ -230,6 +232,14 @@ code, .mono { font-family: var(--font-mono); }
 }
 .runstate.is-on .dot { background: var(--success); color: var(--success); box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 22%, transparent); }
 .runstate.is-busy .dot { background: var(--warning); }
+.runstate.is-starting .dot {
+  background: transparent;
+  border: 2px solid color-mix(in srgb, var(--warning) 32%, transparent);
+  border-top-color: var(--warning);
+  width: 9px; height: 9px;   /* 含边框比实心点大一圈，视觉上还是同一个位子 */
+  animation: dot-spin .9s linear infinite;
+}
+@keyframes dot-spin { to { transform: rotate(360deg); } }
 
 /* 指示灯呼吸：ready 绿、出错红。做两层——底色淡入淡出 + 一圈向外扩散的光晕，
    比单纯改透明度更容易在余光里看见（余光对“闪”敏感，对“淡”不敏感）。 */
@@ -253,6 +263,8 @@ code, .mono { font-family: var(--font-mono); }
 /* 系统里开了“减少动态效果”就别动（无障碍） */
 @media (prefers-reduced-motion: reduce) {
   .runstate.is-on .dot, .runstate.is-bad .dot { animation: none; opacity: 1; }
+  /* 不让动也必须看得出“在启动”：留个缺口环，靠文字「启动中」说清楚 */
+  .runstate.is-starting .dot { animation: none; border-top-color: color-mix(in srgb, var(--warning) 32%, transparent); }
 }
 .sep { width: 1px; height: 16px; background: var(--hairline); }
 .kv { font-size: var(--fs-sm); color: var(--muted); }
