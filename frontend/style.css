@@ -271,9 +271,10 @@ code, .mono { font-family: var(--font-mono); }
 /* 数字**左对齐**（紧接自己的箭头）：右对齐时每一位都会跟着位数左右跳，而且归零变“—”
    会躺到槽的右端、离箭头很远。左对齐下起始位固定、只有末尾字符在变 —— 看着才稳。 */
 .traffic-rate b { flex: 1 1 auto; text-align: left; }
-/* 下行用主色（与曲线同色），上行用中性色 —— 曲线里上行也偏中性，两处一致，
-   不拿警告色画数据（警告色在这套界面里有固定含义）。 */
-.traffic-rate b { color: var(--primary); font-weight: 600; }
+/* **上行在上、下行在下**（用户 2026-10-14 要求颠倒）：颜色跟曲线一致 ——
+   下行主色（与曲线同色）、上行中性色，不拿警告色画数据（警告色在这套界面里有固定含义）。 */
+.traffic-rate .tr-up b { color: var(--body); font-weight: 600; }
+.traffic-rate .tr-down b { color: var(--primary); font-weight: 600; }
 .traffic canvas { flex: 1 1 0; min-width: 0; height: 100%; display: block; }
 .statusline { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; }
 .runstate {

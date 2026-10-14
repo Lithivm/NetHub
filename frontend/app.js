@@ -649,10 +649,10 @@ async function loadTraffic() {
     drawTraffic();
     const rate = document.getElementById('trafficRate');
     if (rate) {
-      // 槽内是「箭头列（定宽）+ 数字列（右对齐）」——箭头位置和数字右边缘都不随位数变
-      //（归零时 fmtRate 给“—”也不会把箭头拉过去）
-      rate.innerHTML = '<span><i>↓</i><b>' + fmtRate(trafficLast(v).down) + '</b></span>' +
-                       '<span><i>↑</i><b>' + fmtRate(trafficLast(v).up) + '</b></span>';
+      // 槽内是「箭头列（定宽）+ 数字列（左对齐）」——箭头位置和数字起始位都不随位数变
+      //（归零时 fmtRate 给“—”也不会把箭头往右拉）。**上行在上、下行在下**（用户要求颠倒）。
+      rate.innerHTML = '<span class="tr-up"><i>↑</i><b>' + fmtRate(trafficLast(v).up) + '</b></span>' +
+                       '<span class="tr-down"><i>↓</i><b>' + fmtRate(trafficLast(v).down) + '</b></span>';
     }
   } catch (e) {
     /* 老桥/探针没这个方法：图留白就好，不报错（与 InitialTheme 同样处理） */
