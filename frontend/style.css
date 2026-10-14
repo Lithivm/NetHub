@@ -309,11 +309,18 @@ code, .mono { font-family: var(--font-mono); }
 }
 @keyframes dot-spin { to { transform: rotate(360deg); } }
 
-/* 指示灯呼吸：ready 绿、出错红。做两层——底色淡入淡出 + 一圈向外扩散的光晕，
-   比单纯改透明度更容易在余光里看见（余光对“闪”敏感，对“淡”不敏感）。 */
+/* 指示灯：ready 绿、出错红。
+
+   ⚠ 这里**不能挂 infinite 动画**（2026-10-14 实测，见 KB:产物/nethub/2026-10-14-vs-Proxifier实测对比.md）：
+   只要界面里有任何一个持续动画，Chromium 合成器就会为它每帧出帧 —— 这个 8px 的呼吸动画
+   让**整窗每帧重绘**，渲染进程空转从 ~1% 升到 20~35%（现场那个跑了一段时间的实例 88~113%）。
+   拆过属性：换成只动 opacity 一样贵（31.8%），加 will-change 也没用（19.3%）——
+   **不是 box-shadow 的错，是这个界面上任何持续动画都省不掉**。
+   所以：常态用**稳定色点**（Proxifier 也是这样），只留 is-starting 那个会自己结束的 dot-spin。
+   早先“呼吸/光晕更容易在余光里看见”的考虑仍然成立，但那点观感不值半个核。 */
 .runstate.is-on .dot,
 .runstate.is-bad .dot {
-  animation: dot-breathe 2s ease-in-out infinite;
+  opacity: 1;
 }
 .runstate.is-bad .dot { background: var(--error); color: var(--error); }
 @keyframes dot-breathe {
