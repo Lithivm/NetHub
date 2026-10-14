@@ -15,12 +15,12 @@ import (
 //  3. Copy / Card 要么为空、要么真能用（Copy 有值才出复制按钮；Card 必须是界面上真实存在的锚点）
 func TestNoticesFor(t *testing.T) {
 	// 什么都没有 → 一条都不挂（不能"没装 Clash 也报风险"）
-	if got := noticesFor(false, Coverage{OK: true}, UpdateInfo{}); len(got) != 0 {
+	if got := noticesFor(false, Coverage{OK: true}, UpdateInfo{}, ""); len(got) != 0 {
 		t.Fatalf("没问题时不该有告警，得到 %+v", got)
 	}
 
 	// 两条同时存在
-	drv := noticesFor(true, Coverage{OK: false, Missed: []string{"10.0.0.1", "app.example.com"}}, UpdateInfo{})
+	drv := noticesFor(true, Coverage{OK: false, Missed: []string{"10.0.0.1", "app.example.com"}}, UpdateInfo{}, "")
 	if len(drv) != 2 {
 		t.Fatalf("驱动被拦 + 内网被接管，应当两条都在（取舍是前端按优先级做的，后端不替它选），得到 %d 条", len(drv))
 	}
@@ -79,7 +79,7 @@ func TestNoticesFor(t *testing.T) {
 // 并且它的优先级要低于前两类（驱动/内网是故障，新版本只是信息）。
 func TestNoticeForAvailableUpdate(t *testing.T) {
 	upd := UpdateInfo{Current: "v0.4.2", Latest: "v0.5.0", HasNew: true, Published: "2026-09-28"}
-	got := noticesFor(false, Coverage{OK: true}, upd)
+	got := noticesFor(false, Coverage{OK: true}, upd, "")
 	if len(got) != 1 {
 		t.Fatalf("有新版时应当恰好挂一条，得到 %d 条：%+v", len(got), got)
 	}
@@ -109,9 +109,35 @@ func TestNoticeForAvailableUpdate(t *testing.T) {
 		{"已是最新", UpdateInfo{Current: "v0.4.2", Latest: "v0.4.2"}},
 		{"没查过（零值）", UpdateInfo{}},
 	} {
-		if got := noticesFor(false, Coverage{OK: true}, c.in); len(got) != 0 {
+		if got := noticesFor(false, Coverage{OK: true}, c.in, ""); len(got) != 0 {
 			t.Errorf("%s 不该挂告警，得到 %+v", c.name, got)
 		}
+	}
+}
+
+// TestReadOnlyNotice：只读态必须挂一条**带行动按钮**的告警。
+//
+// 为什么钉它：只读（服务版/另一个实例在跑引擎）时界面能看不能动，以前只有顶栏
+// 一个"只读"胺囊 + 一闪而过的 toast，现场很容易理解成"软件卡住了"（用户 2026-10-13 反馈）。
+// 这条告警就是那个入口，不许退化成"只通知不给出路"。
+func TestReadOnlyNotice(t *testing.T) {
+	got := noticesFor(false, Coverage{OK: true}, UpdateInfo{}, "服务版正在运行")
+	if len(got) != 1 {
+		t.Fatalf("只读态该挂一条告警，实际 %d 条: %+v", len(got), got)
+	}
+	n := got[0]
+	if n.ID != "engine-readonly" || n.Action != "takeover" || n.ActionLabel == "" {
+		t.Fatalf("只读告警少了行动按钮（前端靠 action 映射到函数）: %+v", n)
+	}
+	if !strings.Contains(n.Text, "服务版正在运行") {
+		t.Fatalf("原因要写进正文，别让人去猜: %q", n.Text)
+	}
+	if n.Priority <= prioUpdateAvail {
+		t.Fatal("只读比「有新版本」更该被看到，优先级要更高")
+	}
+	// 恢复正常（why 为空）就不该再挂
+	if again := noticesFor(false, Coverage{OK: true}, UpdateInfo{}, ""); len(again) != 0 {
+		t.Fatalf("不是只读了还在挂告警: %+v", again)
 	}
 }
 

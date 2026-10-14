@@ -859,12 +859,8 @@ async function refreshState() {
   tog.textContent = on ? '停止' : '启动';
   tog.className = on ? 'btn' : 'btn btn-primary';
   document.getElementById('btnRestart').disabled = ro;
-  if (ro && !state.roNotified) {
-    state.roNotified = true;
-    toast('服务版正在运行', '界面以只读方式启动（不碰流量）；要由界面接管，点顶栏「接管引擎」', 'warn');
-  } else if (!ro) {
-    state.roNotified = false;
-  }
+  // 只读态不再弹 toast：后端会给一条**常驻**告警（顶上那条，带「接管引擎」按钮），
+  // 一闪而过的提示反而容易错过 —— 用户 2026-10-13 就把只读理解成了"服务没拉起来"。
 
   document.getElementById('stTotal').textContent = s.totalConns;
   document.getElementById('stActive').textContent = s.activeConns;
@@ -1734,6 +1730,27 @@ function jumpCard(id) {
   c.scrollIntoView({ block: 'center' });
 }
 
+/* 告警条上的「行动按钮」：动作名由**后端**登记（Notice.action），这里映射到前端函数。
+   两边各管各的：后端决定"该不该提示、提示什么"，前端决定"点了做什么"。 */
+const NOTICE_ACTIONS = { takeover: () => doTakeover() };
+
+/* 由本界面接管引擎 —— 只读态（服务版 / 另一个 NetHub 实例正在跑引擎）下的唯一出路。
+   两个入口共用它：顶栏那颗按钮，以及只读告警条上的「接管引擎」（告警来自后端 notices）。
+   必须二次确认：接管会把引擎从正在跑它的那个进程里拿回来，那一瞬间隧道是断的。 */
+async function doTakeover() {
+  if (!await confirmBox('由本界面接管引擎？',
+      '接管会把引擎从正在跑它的那个进程里拿回来（并请对方退出）：\n' +
+      '· Windows 服务版 → 停止服务（注册保留，下次开机仍会自启；不想它自启请用「卸载服务」）\n' +
+      '· 另一个 NetHub 实例 → 走优雅退出（它会先撤掉 hosts 段）\n' +
+      '· 交接期间有几百毫秒空窗，TCP 会重传\n' +
+      '\n确定现在接管吗？', false, '接管')) return;
+  try {
+    const msg = await call('TakeoverEngine');
+    toast('已接管引擎', msg || '', 'success');
+  } catch (e) { fail(e); }
+  await loadService();
+}
+
 /* 画一条告警：优先取 priority 最大的那条（一起喊会互相覆盖）。list 为空 → 隐藏。 */
 function renderNotices(list) {
   const bar = document.getElementById('noticeBar');
@@ -1762,6 +1779,9 @@ function renderNotices(list) {
       try { await navigator.clipboard.writeText(spec.copy); toast('已复制', spec.copy, 'success'); }
       catch (e) { toast('复制失败，请手动复制', spec.copy, 'warn'); }
     }));
+  }
+  if (spec.action && NOTICE_ACTIONS[spec.action]) {
+    bar.appendChild(btn(spec.actionLabel || '处理', 'btn btn-xs', NOTICE_ACTIONS[spec.action]));
   }
   if (spec.card) bar.appendChild(btn('详情', 'btn btn-xs', () => jumpCard(spec.card)));
   const close = btn('×', 'nb-close', () => {
@@ -2370,18 +2390,7 @@ function wire() {
     } catch (e) { fail(e); }
     await loadService();
   };
-  document.getElementById('btnTakeover').onclick = async () => {
-    if (!await confirmBox('由界面版接管引擎？',
-        '会停掉正在运行的 Windows 服务版，然后把引擎交回界面版：\n' +
-        '· 服务注册保留（不卸载）—— 下次开机它仍会自己跑\n' +
-        '· 停机期间有几百毫秒空窗，TCP 会重传\n' +
-        '\n如果你要的是“以后都别再让服务版自己跑”，请用「卸载服务」。', false, '接管')) return;
-    try {
-      const msg = await call('TakeoverEngine');
-      toast('已接管引擎', msg || '', 'success');
-    } catch (e) { fail(e); }
-    await loadService();
-  };
+  document.getElementById('btnTakeover').onclick = () => doTakeover();
   document.getElementById('btnSvcStart').onclick = async () => {
     if (!await confirmBox('交棒给服务版？',
         '把引擎交给 Windows 服务版（无人登录也能跑）：\n' +

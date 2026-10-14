@@ -29,11 +29,19 @@ type Notice struct {
 	CopyLabel string `json:"copyLabel"`
 	// Card 非空 → 「详情」按钮跳到诊断页那张卡的锚点 id（提示与修法放在两个地方会漂移）。
 	Card string `json:"card"`
+	// Action 非空 → 前端给一个**能直接做事**的按钮（ActionLabel 是它的文案）。
+	//
+	// 为什么要它：只读态光挂一条"你在只读"没用 —— 用户要的是"那我该怎么办"，
+	// 而这个"怎么办"（接管引擎）必须先问一句（会让正在跑引擎的那个进程退出），
+	// 所以按钮走前端已有的确认弹窗：动作名在这里登记，前端映射到具体函数。
+	Action      string `json:"action"`
+	ActionLabel string `json:"actionLabel"`
 }
 
 // 优先级（数字之间留空档，方便以后往中间插）。
 const (
 	prioDriverBlocked = 100 // 驱动装不上 = 整个程序不可用
+	prioReadOnly      = 70  // 界面没在管引擎（服务版/另一个实例在跑）：能看不能用
 	prioClashTakeover = 50  // 内网**可能**被交给别的代理（有泄漏风险，但程序还在跑）
 	prioUpdateAvail   = 30  // 有新版本（不是故障，但也不该只留给用户自己发现）
 )
@@ -43,13 +51,14 @@ const (
 // 成本：两个来源都是内存/注册表读（clashCoverage 是纯函数、无网络），
 // 所以可以跟着 GetState 每 1.5 秒算一次 —— 不用再单独开一条 60 秒的轮询。
 func (b *Backend) Notices() []Notice {
-	return noticesFor(b.a.DriverBlocked(), b.clashCoverage(), b.updateInfo())
+	_, roWhy := b.readOnlyState() // 非空即"界面现在管不着引擎"
+	return noticesFor(b.a.DriverBlocked(), b.clashCoverage(), b.updateInfo(), roWhy)
 }
 
 // noticesFor 是 Notices 的纯函数形式（可测：不碰注册表、不碰引擎、不碰网络）。
 // 前端依赖的契约（有测试盯着）：优先级数字、ID 稳定、Copy/Card 指向真实存在的东西。
-func noticesFor(driverBlocked bool, c Coverage, upd UpdateInfo) []Notice {
-	out := make([]Notice, 0, 2)
+func noticesFor(driverBlocked bool, c Coverage, upd UpdateInfo, readOnlyWhy string) []Notice {
+	out := make([]Notice, 0, 3)
 
 	// ① 内核驱动被安全软件拦（2026-09-28 现场踩过：火绒 6.0 的「漏洞驱动拦截」
 	//    按文件把 WinDivert64.sys 判成漏洞驱动在内核层拒加载，报的却是 1450「系统资源不足」，
@@ -88,6 +97,21 @@ func noticesFor(driverBlocked bool, c Coverage, upd UpdateInfo) []Notice {
 	// 为什么值得挂常驻条而不是弹个 toast：现场不会天天点「关于」里那个按钮，
 	// 而“有新版本”这件事一旦错过就永远错过 —— 而且漏更新正好会漏掉我们修过的那些坑。
 	// dev 构建（没有版本号可比）与“查不到”（内网不通）都不挂，不骚扰。
+	// ④ 界面处于只读：引擎在别的进程里（Windows 服务版 / 另一个 NetHub 实例）。
+	//
+	// 为什么必须挂常驻条：这种状态下界面**能看不能动**（启动/停止/重启都不生效），
+	// 以前只有顶栏状态胺囊写个"只读"+ 一条一闪而过的 toast —— 现场极容易理解成
+	// "软件卡住了/服务没拉起来"（用户 2026-10-13 就是这么反馈的）。常驻条 +
+	// 一个带二次确认的按钮，把"为什么、怎么办"一次说完。
+	if readOnlyWhy != "" {
+		out = append(out, Notice{
+			ID: "engine-readonly", Kind: "warn", Priority: prioReadOnly,
+			Title: "界面处于只读：引擎在别的进程里",
+			Text: readOnlyWhy + " —— 这个界面对流量只读（启动/停止/重启都不会生效）。" +
+				"要由这个界面接管引擎，点右边的按钮。",
+			Action: "takeover", ActionLabel: "接管引擎",
+		})
+	}
 	if upd.HasNew {
 		out = append(out, Notice{
 			ID: "update-available", Kind: "info", Priority: prioUpdateAvail,

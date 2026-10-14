@@ -1782,19 +1782,10 @@ func (b *Backend) runSelfTest() {
 							"或者先正常访问一次它的内网目标，之后自检就会自动把它纳入探活。")
 					continue
 				}
-				for _, cand := range cands {
-					ip = cand
-					for _, port := range []uint16{443, 80, 5432, 6446, 5000, 9054, 9056} {
-						conn, derr := dial(ip, port)
-						if derr == nil {
-							conn.Close()
-							hit = int(port)
-							break
-						}
-					}
-					if hit > 0 {
-						break
-					}
+				// 猜出来的端口**并行**试（见 probeGuessedParallel 的注释）：串行时每条链
+				// 能干吃 20~40 秒，而且整轮自检是串行的，后面所有链都被它拖住。
+				if nip, nport, ok := probeGuessedParallel(dial, cands, guessedProbePorts, 8*time.Second); ok {
+					ip, hit, hitIP = nip, int(nport), nip.String()
 				}
 			}
 			if hit > 0 {
