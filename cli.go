@@ -201,7 +201,7 @@ func cmdStatus(cfgPath string) int {
 	doc.Service = serviceState()
 	doc.Tuning = map[string]any{}
 
-	cfg, err := config.Load(cfgPath)
+	cfg, err := config.LoadExisting(cfgPath)
 	if err != nil {
 		doc.ConfigError = err.Error()
 		doc.Notes = append(doc.Notes, "配置无法载入：先用 nethub.exe -check 看逐条错误")
@@ -300,10 +300,12 @@ func cmdStatus(cfgPath string) int {
 // 这里写完会盯着运行实例自报的 configHash 等它变过来 —— 脚本与 agent 需要这个确定结论。
 func cmdApply(srcPath, cfgPath string, force bool) int {
 	if srcPath == "" || cfgPath == "" {
-		fmt.Println("apply: FAIL 用法：nethub.exe -apply <新配置.yaml> [-config <目标配置>] [-apply-force]")
+		// 顺序别写反：Go 的 flag 里 `-apply -apply-force <文件>` 会把 "-apply-force" 当成路径
+		fmt.Println("apply: FAIL 用法：nethub.exe -apply <新配置.yaml> [-config <目标配置>]" +
+			"［要强制覆盖时写 -apply-force -apply <文件>，即选项在前］")
 		return 1
 	}
-	cfg, err := config.Load(srcPath)
+	cfg, err := config.LoadExisting(srcPath)
 	if err != nil {
 		fmt.Println("apply: FAIL 源配置无法载入")
 		for _, line := range strings.Split(err.Error(), "\n") {

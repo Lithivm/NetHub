@@ -67,7 +67,10 @@ func main() {
 	checkFlag := flag.Bool("check", false, "只校验配置文件（逐条列错误，不启动、不改任何东西），随后退出（不需管理员）")
 	statusFlag := flag.Bool("status", false, "打印机器可读的 JSON 现状（版本/服务/链路/规则/开关/运行实例），随后退出（不需管理员）")
 	applyFlag := flag.String("apply", "", "把指定的配置文件应用到正在运行的实例（校验→落盘→热生效），随后退出（不需管理员）")
-	applyForce := flag.Bool("apply-force", false, "配合 -apply：即使目标配置比源文件新也覆盖")
+	// 注意：Go 的 flag 里字符串选项会**吃掉下一个参数**，所以 `-apply -apply-force x.yaml`
+	// 会被当成 `-apply="-apply-force"`（路径变成了选项名）—— 2026-10-14 就这么把一份
+	// “默认模板”写进了用户的真配置。用法一律写成 `-apply-force -apply <文件>` 或 `-apply=<文件>`。
+	applyForce := flag.Bool("apply-force", false, "配合 -apply：即使目标配置比源文件新也覆盖（**写在 -apply 前面**，如 -apply-force -apply x.yaml）")
 	frontendMode := flag.Bool("frontend", false, "内部用：只跑界面（由引擎进程拉起），不碰引擎与配置")
 	themeFlag := flag.String("theme", "", "内部用：界面初始主题（light/dark），避开深色用户看到一闪的浅色")
 	logDirFlag := flag.String("logdir", "", "内部用：界面进程的日志目录（界面不读配置，只要这一个路径）")

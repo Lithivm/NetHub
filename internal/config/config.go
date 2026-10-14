@@ -409,6 +409,27 @@ func Load(path string) (*Config, error) {
 	return &c, nil
 }
 
+// LoadExisting 读一份**已经存在**的配置文件；文件不在就直接报错，
+// 绝不凭空造一份默认的。
+//
+// 为什么必须单独有这个入口（2026-10-14 实测的丢配置事故）：
+// `-apply -apply-force <file>` 在 Go 的 flag 里会被解析成 `-apply="-apply-force"`
+// （字符串 flag 会把下一个参数整个吃掉）—— 那个路径不存在 → Load 静静地造一份
+// 默认配置并返回 → cmdApply 校验、把这份“默认”**写进了真正的目标配置**：
+// 用户的 5 条链 / 7 条规则被打成 1 条示例链 proxy-a、0 条规则。
+// 凡是“路径来自命令行参数”的入口（-apply / -check / -status）一律走这里。
+func LoadExisting(path string) (*Config, error) {
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("配置文件不存在：%s\n"+
+				"（路径打错了吗？本命令不会新建配置；顺带一提：选项要写全，"+
+				"如 `-apply <文件>`，写成 `-apply -apply-force <文件>` 会被当成路径）", path)
+		}
+		return nil, err
+	}
+	return Load(path)
+}
+
 // Normalize 就地整理全部规则，让 v1/手写配置也符合 Proxifier 形状：
 // v1 的 `target:` 并进 `targets:`、目标归一化成 CIDR、组内去重、清掉两侧空白。
 // 返回是否改动过（调用方据此决定要不要写回文件）。
