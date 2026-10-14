@@ -253,7 +253,9 @@ code, .mono { font-family: var(--font-mono); }
 .traffic {
   flex: 0 1 var(--traffic-w);
   align-self: stretch;              /* 撑满顶栏内容高度（顶栏是 align-items: center） */
-  display: flex; align-items: center; gap: var(--s2);
+  /* 与顶栏的 gap 同值（--s4）：这样「活跃 ↔ 流量」与「流量 ↔ 曲线」「曲线 ↔ 读数」
+     三段的间距完全一致（用户 2026-10-14 提的：标签与曲线的间距要跟标签与活跃的一致）。 */
+  display: flex; align-items: center; gap: var(--s4);
   min-width: 300px; max-width: var(--traffic-w);
 }
 .traffic-label { font-size: var(--fs-xs); color: var(--muted); white-space: nowrap; }
