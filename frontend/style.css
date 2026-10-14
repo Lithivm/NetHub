@@ -327,6 +327,17 @@ code, .mono { font-family: var(--font-mono); }
 .runstate.is-bad .dot {
   animation: dot-breathe 2s ease-in-out infinite;
 }
+
+/* 托盘冻结：界面收进托盘时，**由我们自己**声明（html.is-tray），不留任何会出帧的东西。
+   为什么不能等浏览器的 visibilitychange：实测把宿主窗口隐藏（Wails 的 WindowHide）
+   不会让 WebView2 里的页面变成 hidden —— 它照旧每帧出帧（同机同托盘态：界面进程树 68.8% 单核）。
+   一律 animation:none（包括 is-starting 的 spinner 与 toast）—— 托盘里本来就没人看。 */
+html.is-tray *,
+html.is-tray *::before,
+html.is-tray *::after {
+  animation: none !important;
+  transition: none !important;
+}
 .runstate.is-bad .dot { background: var(--error); color: var(--error); }
 @keyframes dot-breathe {
   0%, 100% {

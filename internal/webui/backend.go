@@ -1271,6 +1271,23 @@ func (b *Backend) noteUIHidden(hidden bool) {
 			b.a.Bus.Info("界面已显示（拉回来时会跟着露出来）")
 		}
 	}
+	// 通知界面“该冻结 / 该解冻了”—— 界面收到后停轮询、呙动画、丢推送事件。
+	//
+	// 为什么由这里发（不让界面自己判断）：收起的路径有三条 —— 托盘菜单、窗口的关闭键、
+	// **系统的关闭路径（Alt+F4 / 任务栏关闭，走界面进程的 OnBeforeClose）**；
+	// 最后那条界面根本不知道自己是被藏了还是被关了。而三条都收敛到 noteUIHidden，
+	// 所以在这一处发最省事也最全。
+	//
+	// 也**不能**用浏览器的 document.hidden 兜底：实测把宿主窗口隐藏（WindowHide）
+	// 并不会让 WebView2 里的页面变成 hidden —— 页面照旧每帧出帧、定时器照旧全速跑
+	// （同机同托盘态实测：界面进程树 68.8% 单核）。台架里页面真 hidden 时 Chromium 才节流。
+	if changed {
+		if hidden {
+			b.emit("hidden", nil)
+		} else {
+			b.emit("shown", nil)
+		}
+	}
 }
 
 // ───────────────────────── 链路（≈ Proxifier 的 Proxy Servers）─────────────────────────

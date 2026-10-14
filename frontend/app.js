@@ -2515,6 +2515,69 @@ async function resetSettings() {
 
 /* ═══════════════ 启动 ═══════════════ */
 
+/* ═══════════ 托盘冻结：收进托盘就不出帧、不轮询（打开时一次性补齐）═══════════
+
+   为什么要自己做（不能靠浏览器通知）：实测在真机上把宿主窗口隐藏
+   （Wails 的 WindowHide）**并不会**让 WebView2 里的页面变成 hidden ——
+   页面照旧每帧出帧、定时器照旧全速跑。同机同托盘态实测：
+   界面进程树 **68.8% 单核**（带那个常驻呼吸动画）→ 1.6%（只关动画）。
+   而台架里页面真 hidden 时 Chromium 会节流（同一个动画只花 0.2%）——
+   差别就在“没人告诉 WebView2 停”。
+
+   所以：收进托盘 = 我们自己声明（加 is-tray 类 + 停全部轮询 + 丢掉推送事件）；
+   露出来 = 一次性补齐（复用 showPage 那份“切到这一页要拉什么”的清单，
+   不在本地再维护第二份 —— 两份清单必然有一天不一致）。
+   判据与实测：KB:产物/nethub/2026-10-14-vs-Proxifier实测对比.md 第十节。 */
+let trayFrozen = false;
+
+/* 接管 setInterval：所有周期任务都登记在案，好一次性停掉。
+   为什么接管而不是逐个改调用点：**漏掉一处就等于没做** —— 那种“以为停了其实还在跑”
+   的 bug 最难查。返回的是条目本身，clearInterval 也一并接管了（下面那个 404 行的
+   更新进度 tick 就是这么用的）。
+   ⚠ 以后新增周期任务照常用 setInterval 就行（会被自动接管）；
+     但**别把它写成递归 setTimeout** —— 那种接管不到。 */
+const _rawSetInterval = window.setInterval.bind(window);
+const _rawClearInterval = window.clearInterval.bind(window);
+const _loops = [];   // {fn, ms, id}，id=null 表示当前是停的
+window.setInterval = function (fn, ms, ...rest) {
+  const d = { fn: fn, ms: ms, id: null };
+  if (!trayFrozen) d.id = _rawSetInterval(fn, ms, ...rest);
+  _loops.push(d);
+  return d;
+};
+window.clearInterval = function (d) {
+  if (d && typeof d === 'object' && 'id' in d) {
+    if (d.id !== null) { _rawClearInterval(d.id); d.id = null; }
+    return;
+  }
+  return _rawClearInterval(d);
+};
+
+function pauseLoops() { for (const d of _loops) if (d.id !== null) { _rawClearInterval(d.id); d.id = null; } }
+function resumeLoops() { for (const d of _loops) if (d.id === null) d.id = _rawSetInterval(d.fn, d.ms); }
+
+/* 收进托盘：停轮询 + 冻动画（动画靠 html.is-tray 那条 CSS）。 */
+function freezeForTray() {
+  if (trayFrozen) return;
+  trayFrozen = true;
+  document.documentElement.classList.add('is-tray');
+  pauseLoops();
+}
+
+/* 露出界面：解冻 → 一次性补齐 → 再恢复轮询。
+   顺序不能反：先补齐再恢复轮询，否则“补齐还没回来、轮询又冲一次”。 */
+async function thawFromTray() {
+  if (!trayFrozen) return;
+  trayFrozen = false;
+  document.documentElement.classList.remove('is-tray');
+  try { await refreshState(); } catch (e) {}
+  try { await loadTraffic(); } catch (e) {}
+  // 当前页一次性补齐：showPage 里本来就有“切到这一页要拉什么”
+  const cur = document.querySelector('.tab.is-active, .tab-top.is-active');
+  if (cur) { try { showPage(cur.dataset.page); } catch (e) {} }
+  resumeLoops();
+}
+
 function wire() {
   // 窗口按钮
   document.getElementById('winMin').onclick = () => R().WindowMinimise();
@@ -2861,15 +2924,28 @@ function wire() {
     if (e.key === 'Escape' && document.getElementById('modalBackdrop').classList.contains('is-open')) modal.close();
   });
 
-  // 事件订阅
-  R().EventsOn('log', l => pushLog(l));
-  R().EventsOn('notify', n => toast(n.title, n.text, n.kind === 'error' ? 'error' : n.kind === 'warn' ? 'warn' : 'success'));
+  // 事件订阅。
+  //
+  // ⚠ 冻着（收在托盘里）的时候**一律不碰 DOM**：引擎的日志/通知事件照样在推，
+  // 而 pushLog 每行都要“插 DOM → 读 scrollHeight（强制同步布局）→ 写 scrollTop”，
+  // 光停轮询挡不住它 —— 那正是“托盘里还在烧”的另一半。露出时由 thawFromTray 一次性重取。
+  R().EventsOn('log', l => { if (trayFrozen) return; pushLog(l); });
+  R().EventsOn('notify', n => {
+    if (trayFrozen) return;   // toast 本来就是 4.2 秒的瞬态；真状态由 thaw 后的 refreshState 兜住
+    toast(n.title, n.text, n.kind === 'error' ? 'error' : n.kind === 'warn' ? 'warn' : 'success');
+  });
   R().EventsOn('selftest', p => {
+    if (trayFrozen) return;
     const text = p.ok ? ('自检通过：' + p.target + ':' + p.port) : ('自检失败：' + p.target + ' ' + (p.err || ''));
     pushLog({ time: now(), level: p.ok ? 'INFO' : 'ERROR', text });
   });
   // 自检的整体结果：直接渲染在「链路自检」框里（不用回日志里找）
-  R().EventsOn('selftest-report', r => renderSelfTest(r));
+  R().EventsOn('selftest-report', r => { if (trayFrozen) return; renderSelfTest(r); });
+
+  // 冻结/解冻由后端发（见 Backend.noteUIHidden 那段注释：收起的路径有三条，
+  // 其中系统关闭那条界面根本不知道自己被藏了还是被关了）。
+  R().EventsOn('hidden', () => freezeForTray());
+  R().EventsOn('shown', () => { thawFromTray(); });
 }
 
 /* 自检结果渲染到诊断页的输出框（原样列出每条链，方便整段复制给 agent）。 */
@@ -2980,6 +3056,12 @@ async function boot() {
   let bootTheme = 'light';
   try { bootTheme = (await B().InitialTheme()) || 'light'; } catch (e) { /* 老桥/探针没这个方法 */ }
   applyTheme(bootTheme);
+
+  // 启动时如果界面本来就是收着的（引擎按上次的状态带 -hidden 把界面拉起来），
+  // 那就必须在**注册周期任务之前**把冻结标志立起来 —— 否则那些轮询会先全速跑一遍。
+  // 为什么问后端而不是看 document.hidden：隐藏宿主窗口不会让 WebView2 里的页面变成 hidden（实测）。
+  try { trayFrozen = !!(await call('UIHidden')); } catch (e) {}
+  if (trayFrozen) document.documentElement.classList.add('is-tray');
 
   // 状态轮询【先注册】：任何面板加载失败都不能让状态栏冻在启动前的快照上。
   // 告警条也跟着它走（后端在 GetState 里算好），所以不再单开一条 60 秒的横幅轮询。
