@@ -620,6 +620,138 @@ function setTargetProbing(on, count) {
   }
 }
 
+/* ═══════════════ 顶栏实时流量图 ═══════════════ */
+
+/* 数据来自**引擎进程**每秒采样好的 60 秒窗口（后端 GetTraffic，见 internal/webui/traffic.go）。
+   采样不在前端：界面切页、被现场启动器杀掉重开之后，曲线不会断 —— 回来时拿到的还是完整 60 秒。
+
+   画法上的三个决定（都是为了“一眼看出现在忙不忙”）：
+   · 上下行**共用一根纵轴**（Clash 也是这样）：上行通常小一个量级，会贴着零轴 ——
+     所以右边那串数字是必需品，别指望从线上读上行。
+   · 纵轴按窗口峰值自适应，但有 64 KB/s 的地板：否则空转时几 KB 的噪声会被放大成“很忙”。
+   · 新的一格永远贴右边（右对齐）：格子从空到满时曲线不会横向伸缩。
+
+   与“累计/活跃”的口径差异（量纲不同）：那两个是**连接条数**，这里是**字节/秒**。
+   两条口径口径都在界面上写明（顶栏 title + 连接页的「i」）。 */
+const TRAFFIC_FLOOR = 64 * 1024; // 纵轴下限（64 KB/s）
+let trafficView = null;
+let trafficBusy = false;
+
+async function loadTraffic() {
+  if (trafficBusy) return; // 上一拍还没回来就跳过这一拍，不排队
+  const cv = document.getElementById('trafficCanvas');
+  if (!cv) return;
+  trafficBusy = true;
+  try {
+    const v = await call('GetTraffic');
+    if (!v) return;
+    trafficView = v;
+    drawTraffic();
+    const rate = document.getElementById('trafficRate');
+    if (rate) {
+      // 两个槽各自定宽（.traffic-rate span）——文本长短变了布局也不动
+      // fmtRate(0) 给“—”：0 与“刚起来还没采到样”在这里是一回事
+      rate.innerHTML = '<span><b>↓ ' + fmtRate(trafficLast(v).down) + '</b></span>' +
+                       '<span>↑ ' + fmtRate(trafficLast(v).up) + '</span>';
+    }
+  } catch (e) {
+    /* 老桥/探针没这个方法：图留白就好，不报错（与 InitialTheme 同样处理） */
+  } finally {
+    trafficBusy = false;
+  }
+}
+
+/* 一格在界面上的口径：走链路的 + （开了「直连流量统计」时的）直连。
+   
+   为什么整窗都按当前开关算、而不是“只影响新增的那几秒”：那个开关是**全局口径**，
+   关掉时列表里直连的行立即消失；图上如果还留着刚过去 60 秒的直连，就是自相矛盾
+   （AGENTS.md：“开关类设置改完要立刻重画受影响的视图”）。所以后端把两份都发过来，
+   这里按开关现算。 */
+function trafficPoint(p, countDirect) {
+  return {
+    up: (p.tunUp || 0) + (countDirect ? (p.dirUp || 0) : 0),
+    down: (p.tunDown || 0) + (countDirect ? (p.dirDown || 0) : 0),
+  };
+}
+
+/* 窗口最后一格（当前速率）。后端只发分项，合计在界面算 —— 口径只有一个地方定。 */
+function trafficLast(v) {
+  const s = (v && v.series) || [];
+  if (!s.length) return { up: 0, down: 0 };
+  return trafficPoint(s[s.length - 1], !!v.countDirect);
+}
+
+/* 主题色现读：切主题后不用特意重画，下一秒那一帧就是新颜色。 */
+function trafficColor(name, fallback) {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback;
+}
+
+function drawTraffic() {
+  const cv = document.getElementById('trafficCanvas');
+  const v = trafficView;
+  if (!cv || !v) return;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (!w || !h) return; // 顶栏还没布局出来（很短的启动窗口）
+  const dpr = window.devicePixelRatio || 1;
+  const pw = Math.round(w * dpr), ph = Math.round(h * dpr);
+  if (cv.width !== pw || cv.height !== ph) { cv.width = pw; cv.height = ph; }
+  const g = cv.getContext('2d');
+  if (!g) return;
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+
+  const colLine = trafficColor('--hairline', '#ddd');
+  const colDown = trafficColor('--primary', '#3a7bd5');
+  const colUp = trafficColor('--muted', '#8a8f98');
+
+  // 零线：没有流量时能看出“基线在哪”，不然空图就是一片空白
+  g.strokeStyle = colLine; g.lineWidth = 1;
+  g.beginPath(); g.moveTo(0, h - 0.5); g.lineTo(w, h - 0.5); g.stroke();
+
+  const pts = (v.series || []).map((p) => trafficPoint(p, !!v.countDirect));
+  if (pts.length < 2) return; // 刚起来：只有零线
+
+  const slots = Math.max(Number(v.window) || pts.length, 2);
+  const step = w / (slots - 1);
+  let max = TRAFFIC_FLOOR;
+  for (const p of pts) {
+    if (p.up > max) max = p.up;
+    if (p.down > max) max = p.down;
+  }
+  const xOf = (i) => w - (pts.length - 1 - i) * step;
+  const yOf = (val) => h - 1 - Math.min(Number(val) || 0, max) / max * (h - 3);
+
+  function line(key, color, alpha) {
+    g.beginPath();
+    for (let i = 0; i < pts.length; i++) {
+      const x = xOf(i), y = yOf(pts[i][key]);
+      if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+    }
+    g.strokeStyle = color; g.lineWidth = 1.4; g.lineJoin = 'round'; g.lineCap = 'round';
+    g.stroke();
+    if (alpha) {
+      // 面积用 globalAlpha 变淡，不另外写一个半透明色值：改色只改 :root（见 style.css 头）
+      g.lineTo(xOf(pts.length - 1), h);
+      g.lineTo(xOf(0), h);
+      g.closePath();
+      g.globalAlpha = alpha; g.fillStyle = color; g.fill(); g.globalAlpha = 1;
+    }
+  }
+  line('up', colUp, 0);     // 先画上行（在下面），下行盖在上面
+  line('down', colDown, 0.22);
+}
+
+/* 顶栏尺寸变了（窗口缩放/页签变动）就重画一帧：不重画的话画布会被拉变形。 */
+(function () {
+  if (typeof ResizeObserver === 'undefined') return;
+  const ro = new ResizeObserver(() => { if (trafficView) drawTraffic(); });
+  window.addEventListener('load', () => {
+    const el = document.getElementById('trafficCanvas');
+    if (el) ro.observe(el);
+  });
+})();
+
 /* ═══════════════ 连接列表 ═══════════════ */
 
 /* 字节数的人类可读写法（与后端 humanBytes 对齐）。 */
@@ -2852,6 +2984,10 @@ async function boot() {
   // 状态轮询【先注册】：任何面板加载失败都不能让状态栏冻在启动前的快照上。
   // 告警条也跟着它走（后端在 GetState 里算好），所以不再单开一条 60 秒的横幅轮询。
   setInterval(refreshState, 1500);
+  // 顶栏流量图：1 秒一拍（后端就是 1 秒一格，见 traffic.go）。
+  // 它不分页 —— 图是全居的，在规则页/诊断页也该看得到“现在有没有在跑”。
+  loadTraffic();
+  setInterval(loadTraffic, 1000);
   // 连接列表只看当前页：不在这一页就不拉，省得白跑
   setInterval(() => {
     const p = document.getElementById('page-conn');
@@ -2934,6 +3070,9 @@ async function loadQuicBlock() {
    1.5 秒/5 秒的轮询延迟会让界面短暂地自相矛盾（用户报的“开关改了、列表没同步”）。 */
 async function refreshAfterToggle() {
   await loadConns();
+  // 顶栏流量图也是被这两个开关直接决定的视图：直连统计一关，窗口里那段直连要立刻消失
+  // （不然要等 60 秒慢慢退掉，看着就像开关没生效 —— 与列表里直连行立刻消失同一口径）。
+  await loadTraffic();
   const diag = document.getElementById('page-diag');
   if (diag && diag.classList.contains('is-active')) await loadRuntimeStatus();
 }
@@ -2945,6 +3084,8 @@ async function loadCountDirect() {
   try { v = await call('GetCountDirect'); } catch (e) { return; }
   if (!v) return;
   cb.checked = !!v.on;
+  // 口径变了：图的整段窗口要按新口径重画（拿到的 countDirect 也一起变了）
+  await loadTraffic();
   const info = document.getElementById('countDirectInfo');
   if (info) {
     info.textContent = v.on

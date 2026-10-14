@@ -71,6 +71,9 @@ type Backend struct {
 	clashMu   sync.Mutex
 	clashSeen Coverage
 
+	// 顶栏实时流量图：每秒一格的 60 秒窗口（trafficWatch 写，GetTraffic 读）。
+	traffic trafficRing
+
 	// 只读态：引擎锁被别的进程（服务版/另一实例）拿着，本界面**不跑引擎**、
 	// 只展示状态，等用户点「接管」再抢回来。
 	//
@@ -127,6 +130,9 @@ func (b *Backend) Bootstrap() {
 	// 后台巡检 Clash 绕过覆盖：内网被交给 Clash 是红线（DNS 外泄/封号风险），
 	// 不能只靠用户打开界面才发现 —— 每 60 秒查一次（只读注册表，不发网络请求）
 	go b.clashWatch()
+
+	// 顶栏实时流量图：每秒取一格（引擎侧采样，界面切页/重开都不断），见 traffic.go。
+	go b.trafficWatch()
 
 	// 自动检查更新：启动后几秒查一次，之后每 6 小时一次；有新版本就挂**常驻告警条**。
 	// 以前只有用户点「关于」那个按钮才查 —— 现场多半不点，于是永远没人知道有新版本。
@@ -2109,8 +2115,13 @@ type CountDirectView struct {
 
 // GetCountDirect 当前是否统计直连流量。
 func (b *Backend) GetCountDirect() CountDirectView {
-	return CountDirectView{On: b.a.Cfg.CountDirectEnabled()}
+	return CountDirectView{On: b.countDirect()}
 }
+
+// countDirect 「也统计直连流量」开关的当前值。
+//
+// 抽成小方法是因为顶栏流量图也要读它（决定整窗算不算直连那部分，见 traffic.go）。
+func (b *Backend) countDirect() bool { return b.a.Cfg.CountDirectEnabled() }
 
 // SetCountDirect 开关直连统计。
 //

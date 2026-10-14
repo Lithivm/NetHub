@@ -23,6 +23,17 @@
   --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px;
 
   --titlebar-h: 36px;
+  /* 顶栏（状态 · 累计/活跃 · 流量图 · 操作）高度。为什么比页签带(54px)高、比标题栏更高：
+     顶栏是"现在什么状态 + 能做什么"，信息密度最高，图要占满它的内容高度才看得清
+     （见 KB:决策/实时流量图放顶栏不放在页签带.md）。改这个值前先看一眼 .toolbar 的 padding。 */
+  --toolbar-h: 64px;
+  /* 顶栏流量图的宽度上限。不铺满整条顶栏：右边那截要留给操作按钮，
+     图的左边缘又必须紧跟着"累计/活跃"（同一类信息）—— 所以是定宽、不是 flex:1。 */
+  --traffic-w: 500px;
+  /* 流量图右侧两个速率数字的槽宽（每个一个槽，定宽右对齐）。
+     不定宽的话数字位数一变（— / 8.8 KB/s / 166.0 KB/s）就会挤着画布一起
+     变宽变窄 —— 曲线和数字都在抖（2026-10-14 用户报的）。 */
+  --traffic-num-w: 76px;
   /* --ease 是整条 transition 值（时长+曲线），只能整条用；
      需要自定义时长时必须用下面这条纯曲线，否则写成 `x .2s var(--ease)`
      会变成「200ms 时长 + 140ms 延迟」—— 动画看起来发僵，其实是慢半拍。 */
@@ -213,10 +224,50 @@ code, .mono { font-family: var(--font-mono); }
 .toolbar {
   flex: 0 0 auto;
   display: flex; align-items: center; gap: var(--s4);
-  padding: var(--s3) var(--s4);
+  /* 必须是**定高**，不能写 min-height：里面的流量图是 align-self: stretch + canvas height:100%，
+     而 canvas 的固有高度是 150px —— 定高才把内容盒锁成 64-8-8-1=47px，图的 100% 才有确定的值，
+     否则会反着把顶栏撑高到 176px（2026-10-14 实测踩到）。
+     改高度只改 --toolbar-h。 */
+  height: var(--toolbar-h);
+  padding: var(--s2) var(--s4);
   border-bottom: 1px solid var(--hairline);
   background: var(--canvas);
 }
+
+/* 顶栏内的元素比正文稍微大一点：顶栏加高到 64px 后，原来的 12px 字 / 31px 按钮
+   会显得缩在中间（2026-10-14 用户要求"顶栏内元素也相应稍微增大一点"）。
+   只作用于 .toolbar，不动卡片里的按钮 —— 那些在密集表格里，变大反而更挤。 */
+.toolbar .btn { padding: 10px var(--s4); font-size: var(--fs); }
+/* 图标按钮要**把 padding 抢回来**：上面那条 .toolbar .btn 与 .btn-icon 同为两级选择器、
+   但写在后面会赢，于是 38px 宽的图标按钮内容盒被削成 38-16-16=6px，16px 的齿轮被挤成一小点
+   （2026-10-14 自己踩的：用户报“设置图标小到几乎看不见”）。这条必须排在 .toolbar .btn 之后。 */
+.toolbar .btn-icon { width: 38px; height: 38px; padding: 0; }
+.toolbar .runstate { font-size: var(--fs); padding: 4px 12px 4px 9px; }
+.toolbar .kv { font-size: var(--fs); }
+.toolbar .kv b { font-size: var(--fs-sm); }
+.toolbar .sep { height: 20px; }
+
+/* 顶栏实时流量图：**占满顶栏内容高度、宽度有上限**（用户 2026-10-14 明确要求）。
+   数据与画法见 internal/webui/traffic.go + app.js 的 drawTraffic。 */
+.traffic {
+  flex: 0 1 var(--traffic-w);
+  align-self: stretch;              /* 撑满顶栏内容高度（顶栏是 align-items: center） */
+  display: flex; align-items: center; gap: var(--s2);
+  min-width: 300px; max-width: var(--traffic-w);
+}
+.traffic-label { font-size: var(--fs-xs); color: var(--muted); white-space: nowrap; }
+/* 速率读数：两个数字各占一个定宽槽（右对齐）——画布宽度、数字位置都不会跟着位数变。 */
+.traffic-rate {
+  flex: 0 0 auto;
+  display: inline-flex; align-items: baseline; gap: var(--s2);
+  font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--muted);
+  white-space: nowrap;
+}
+.traffic-rate span { display: inline-block; width: var(--traffic-num-w); text-align: right; }
+/* 下行用主色（与曲线同色），上行用中性色 —— 曲线里上行也偏中性，两处一致，
+   不拿警告色画数据（警告色在这套界面里有固定含义）。 */
+.traffic-rate b { color: var(--primary); font-weight: 600; }
+.traffic canvas { flex: 1 1 0; min-width: 0; height: 100%; display: block; }
 .statusline { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; }
 .runstate {
   display: inline-flex; align-items: center; gap: var(--s2);

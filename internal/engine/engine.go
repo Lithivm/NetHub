@@ -509,8 +509,22 @@ type Engine struct {
 	statPerRule map[string]uint64
 	// rateUp/rateDown：全表速率合计（字节/秒，出/入方向），由 rateLoop 每秒更新。
 	// 界面顶栏/连接页汇总量每次轮询直接读，不必自己遍历连接表。
+	//
+	// ⚠ 它只算**当前还开着**的连接（已结束的会被归零）——所以不能拿来画历史曲线：
+	// 一个 200ms 就结束的 HTTP 请求，在下一秒采样时已经不在了，图上就是 0
+	// （2026-10-14 实测：curl 跑了 6 轮，Rates() 一直是 0）。画图请用下面的字节总数做差。
 	rateUp   atomic.Uint64
 	rateDown atomic.Uint64
+
+	// 字节总数（自本次运行起，走链路的 / 直连的分开记）—— 顶栏流量图的数据源，
+	// sampler 每秒读一次做差就是“这一秒传了多少”。
+	//
+	// 与 rateUp/rateDown 的关键区别：**累计量**。短连接结束后它的字节仍然留在总数里，
+	// 所以历史曲线不会被瞬时归零吞掉；代价是只能看到“每秒多少”，看不出逐连接速率。
+	tunUp   atomic.Uint64
+	tunDown atomic.Uint64
+	dirUp   atomic.Uint64
+	dirDown atomic.Uint64
 
 	// probing 正在飞的探测（链名 → 在飞次数）；probeRound 正在跑的探测轮数。
 	//
@@ -719,6 +733,12 @@ func (e *Engine) Start() error {
 	// 托盘与界面都有“停止 → 启动”这条路径，不重置的话新协程会立刻读到已关闭的 done。
 	e.done = make(chan struct{})
 	e.stopped = false
+	// 字节总数也归零：顶栏流量图靠**两拍做差**，跨运行不清就会把上一轮的
+	// 字节数算成“这一秒突然涨了多少”（重启瞬时出现一个巨大的假尖峰）。
+	e.tunUp.Store(0)
+	e.tunDown.Store(0)
+	e.dirUp.Store(0)
+	e.dirDown.Store(0)
 	// 清掉上一轮遗留的连接表与活跃计数（句柄、relay 都是新的）
 	e.conns = map[uint16]*connState{}
 	e.notices = nil
@@ -1494,8 +1514,8 @@ func (e *Engine) handleConn(c net.Conn) {
 	// 也跟 Proxifier “一条连接一行”的粒度对得上，不再把日志刷成三段。
 
 	done := make(chan struct{}, 2)
-	go func() { copyAndClose(up, c, &st.up); done <- struct{}{} }()
-	go func() { copyAndClose(c, up, &st.down); done <- struct{}{} }()
+	go func() { copyAndClose(up, c, &st.up, e.tunTotal(st, true)); done <- struct{}{} }()
+	go func() { copyAndClose(c, up, &st.down, e.tunTotal(st, false)); done <- struct{}{} }()
 	<-done
 
 	e.finish(st)
@@ -1532,16 +1552,27 @@ func (e *Engine) connInfo(self bool, format string, a ...any) {
 }
 
 // copyAndClose 单向拷贝并在结束后关闭写端（半关闭，双向都能正常收尾）。
-func copyAndClose(dst, src net.Conn, counter *atomic.Uint64) {
+//
+// counter = 这条连接的字节数（界面按连接显示）；total = 走链路的字节总数
+// （顶栏流量图，见 engine 的 tunUp/tunDown 注释）。两个都要加：前者是“一条多少”，
+// 后者是“一共多少”——短连接结束时前者就没人看了，后者才是曲线的基础。
+// total 可以是 nil：我们自己的探针不计入总量（见 tunTotal）。
+func copyAndClose(dst, src net.Conn, counter, total *atomic.Uint64) {
 	buf := make([]byte, 32*1024)
+	add := func(n int) {
+		counter.Add(uint64(n))
+		if total != nil {
+			total.Add(uint64(n))
+		}
+	}
 	for {
 		n, err := src.Read(buf)
 		if n > 0 {
 			if _, werr := dst.Write(buf[:n]); werr != nil {
-				counter.Add(uint64(n))
+				add(n)
 				break
 			}
-			counter.Add(uint64(n))
+			add(n)
 		}
 		if err != nil {
 			break
@@ -1771,6 +1802,7 @@ func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}, kind loopKind)
 			st.touch()
 			st.packets.Add(1)
 			st.down.Add(uint64(len(pkt)))
+			e.dirDown.Add(uint64(len(pkt))) // 顶栏流量图的直连口径（开关关掉时不进表，也就不会到这里）
 		}
 		e.cap.note(pkt)
 		if _, err := h.Send(pkt, addr); err != nil {
@@ -3097,6 +3129,7 @@ func (e *Engine) passThrough(h *divert.Handle, pkt []byte, addr *divert.Address,
 		st.packets.Add(1)
 		if act == rules.ActionDirect {
 			st.up.Add(uint64(len(pkt)))
+			e.dirUp.Add(uint64(len(pkt))) // 同上：直连口径
 		}
 		if flags&0x05 != 0 { // FIN 或 RST：连接收了
 			e.finish(st)
@@ -3191,7 +3224,35 @@ func perSecond(now, prev uint64, dt float64) uint64 {
 }
 
 // Rates 全表速率合计（字节/秒，出/入方向）。
+//
+// 只对**当前开着的连接**有意义（已结束的被归零），是给连接列表那种“这一行还在不在传”用的。
+// 画历史曲线不要用它，用 TrafficTotals 做差 —— 见 tunUp 上面的注释。
 func (e *Engine) Rates() (up, down uint64) { return e.rateUp.Load(), e.rateDown.Load() }
+
+// TrafficTotals 自本次运行起的字节总数：走链路的（tunneled）与直连的（direct）分开。
+//
+// 分开是为了界面上那个「也统计直连流量」开关：关着时直连的包根本不进连接表、
+// 这两个数也不会涨（见 handleInbound/handleOutbound 里的 ActionDirect 分支），
+// 所以调用方按开关挑口径即可 —— 开关一改，整个 60 秒窗口的表现跟着改，不会出现
+// “刚关掉但图上还留着一段直连”的自相矛盾。
+func (e *Engine) TrafficTotals() (tunUp, tunDown, dirUp, dirDown uint64) {
+	return e.tunUp.Load(), e.tunDown.Load(), e.dirUp.Load(), e.dirDown.Load()
+}
+
+// tunTotal 这条连接该记进哪个全局计数器；我们自己的探针返回 nil（不计）。
+//
+// 与“探针不进连接列表、不计速率”是同一条原则（见 selfconn.go）：共存检测、自检
+// 都是直接 dial 内网目标的，它们走的是**同一条 relay**，不注意就把几 KB 的探针流量
+// 画进顶栏的曲线里了 —— 用户看到“没人用的时候图上有流量”。
+func (e *Engine) tunTotal(st *connState, up bool) *atomic.Uint64 {
+	if st == nil || st.self {
+		return nil
+	}
+	if up {
+		return &e.tunUp
+	}
+	return &e.tunDown
+}
 
 // janitor 定期清理已经没人用的连接条目（已结束的留得短一些）。
 func (e *Engine) janitor() {

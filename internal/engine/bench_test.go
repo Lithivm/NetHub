@@ -179,15 +179,15 @@ func BenchmarkRelayCopy(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		var counter atomic.Uint64
+		var counter, grand atomic.Uint64
 		var wg sync.WaitGroup
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			copyAndClose(app, up, &counter) // ← relay 里真正用的实现
+			copyAndClose(app, up, &counter, &grand) // ← relay 里真正用的实现
 		}()
 		wg.Wait()
-		if counter.Load() != total {
+		if counter.Load() != grand.Load() {
 			b.Fatalf("搬运不完整：%d / %d", counter.Load(), total)
 		}
 	}
@@ -226,7 +226,7 @@ func BenchmarkRelayPerConn(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		var counter atomic.Uint64
-		copyAndClose(app, up, &counter)
+		var counter, grand atomic.Uint64
+		copyAndClose(app, up, &counter, &grand)
 	}
 }

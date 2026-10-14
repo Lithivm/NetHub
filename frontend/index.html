@@ -29,6 +29,17 @@
     <span class="kv">累计 <b id="stTotal">0</b></span>
     <span class="kv">活跃 <b id="stActive">0</b></span>
   </div>
+  <!-- 实时流量图（顶栏右侧的另一半空白）。
+       为什么放这里、不放页签带：见 KB:决策/实时流量图放顶栏不放在页签带.md —— 一句话是
+       它跟"累计/活跃"回答同一个问题（现在忙不忙），而页签宽度会随徽章数字变，图的左边缘会跟着横move。
+       title 里把口径说清楚：图是**字节/秒**，旁边那两个数字是**连接条数**，量纲不同。 -->
+  <div class="traffic" id="traffic"
+       title="最近 60 秒的合计速率（每秒一格）：含走链路的流量，以及开了「直连流量统计」时的直连流量；我们自己的探针不算。&#10;那个开关一改，整段窗口立即按新口径重画（与连接列表里直连行立即消失同一口径）。&#10;纵轴按窗口内峰值自适应，最低以 64 KB/s 撑住 —— 免得空转时几 KB 的噪声被放大成“很忙”。&#10;上下行共用一根纵轴，所以上行小的时段那条线会贴着零轴，以右边数字为准。">
+    <span class="traffic-label">流量</span>
+    <canvas id="trafficCanvas" aria-label="实时流量曲线"></canvas>
+    <!-- 两个槽各占一个定宽（右对齐）：数字位数变化不会带动画布宽度（见 .traffic-rate 的注释） -->
+    <span class="traffic-rate" id="trafficRate"><span>↓ —</span><span>↑ —</span></span>
+  </div>
   <div class="actions">
     <!-- 只读态（服务版在跑）时显示：点一下就把引擎从服务版手里抢回界面 -->
     <button class="btn" id="btnTakeover" style="display:none" title="停掉正在运行的 Windows 服务版，把引擎交回界面版（服务注册保留）">接管引擎</button>

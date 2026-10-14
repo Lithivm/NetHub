@@ -147,3 +147,27 @@ func TestSelfProbeConnLogOnlyInVerboseTier(t *testing.T) {
 		t.Errorf("应用流量的连接必须在 normal 档可见：%q", got)
 	}
 }
+
+// 我们自己的探针（自检 / 共存检测的 DialSelf 连接）不记进全局字节总数。
+//
+// 它们走的是同一条 relay，字节数会顺理成章地加进顶栏流量图里 —— 表现是
+// "没人用的时候图上有几 KB 的流量"，而且会周期性出现（共存检测每次开界面都做）。
+// 与"探针不进连接列表、不计速率"同一条原则（见 selfconn.go）。
+func TestTunTotalSkipsSelfProbes(t *testing.T) {
+	e := newTestEngine()
+	if got := e.tunTotal(&connState{}, true); got != &e.tunUp {
+		t.Errorf("普通连接应当记进全局上行总数")
+	}
+	if got := e.tunTotal(&connState{}, false); got != &e.tunDown {
+		t.Errorf("普通连接应当记进全局下行总数")
+	}
+	if got := e.tunTotal(&connState{self: true}, true); got != nil {
+		t.Errorf("自己的探针不该记进全局总数（上行）")
+	}
+	if got := e.tunTotal(&connState{self: true}, false); got != nil {
+		t.Errorf("自己的探针不该记进全局总数（下行）")
+	}
+	if got := e.tunTotal(nil, true); got != nil {
+		t.Errorf("nil 连接不该崩")
+	}
+}
