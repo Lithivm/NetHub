@@ -45,6 +45,7 @@ function toast(title, text, kind = 'info') {
   host.appendChild(t);
   setTimeout(() => t.classList.add('is-out'), 4000);
   setTimeout(() => t.remove(), 4300);
+  return t;   // 调用方可能要晚一点补正文（见 saveSettings）
 }
 
 function fail(e) {
@@ -1178,10 +1179,37 @@ function logNode(l) {
   return row;
 }
 
+/* 日志：**攒一批再动 DOM**。
+
+   为什么不能每行都动（2026-10-14 实测结论）：原来每行都是
+   「插 DOM → 读 scrollHeight（**强制同步布局**）→ 写 scrollTop」，
+   一行一次 → 日志一刷屏（现场开 verbose/debug 时每秒几百行）就是每行一次整页布局。
+   改成合并：一帧只读一次 scrollHeight、一次 documentFragment 插入
+   （一次布局而不是 N 次）。观感无差别 —— 最多晚 120ms 出现。
+
+   注意 logBox 的内容**没有**任何地方去读（只有 replaceChildren 清空），
+   所以批量化不会让“复制/导出日志”拿到旧内容。 */
+let logPending = [];
+let logTimer = null;
+
 function pushLog(l) {
+  logPending.push(l);
+  if (logTimer) return;            // 已经排好了一次刷写，继续攒
+  logTimer = setTimeout(flushLogBatch, 120);
+}
+
+function flushLogBatch() {
+  logTimer = null;
   const box = document.getElementById('logBox');
+  if (!box) { logPending = []; return; }
+  if (!logPending.length) return;
+  const batch = logPending;
+  logPending = [];
+  // 一批只读一次（读在写之前，语义与原来一致：判断“插之前是不是贴在底部”）
   const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
-  box.appendChild(logNode(l));
+  const frag = document.createDocumentFragment();
+  for (const l of batch) frag.appendChild(logNode(l));
+  box.appendChild(frag);
   while (box.childElementCount > MAXLOG) box.removeChild(box.firstChild);
   if (nearBottom) scrollLogToEnd();
 }
@@ -1194,9 +1222,16 @@ function scrollLogToEnd() {
 async function loadLogs() {
   const box = document.getElementById('logBox');
   box.replaceChildren();
+  logPending = [];   // 整段重读，攒着的那批不要了（否则会和重读的内容重一遍）
   let list = [];
   try { list = await call('GetLogs'); } catch (_) {}
-  list.forEach(l => box.appendChild(logNode(l)));
+  // 只留最后 MAXLOG 行 —— 与 pushLog 同一个口径。
+  // 以前这里**不截断**：后端环形缓冲是 2000 行、一行 4 个节点 → 常态 6000~8000 个 DOM 节点，
+  // 而它们每一次整窗重算都要参与（托盘冻结那件事已经证明这个界面上“每帧都重算”很贵）。
+  if (list.length > MAXLOG) list = list.slice(list.length - MAXLOG);
+  const frag = document.createDocumentFragment();
+  for (const l of list) frag.appendChild(logNode(l));   // 一次插入 = 一次布局
+  box.appendChild(frag);
   scrollLogToEnd();
 }
 
@@ -2462,10 +2497,28 @@ async function saveSettings() {
       return Number.isFinite(n) && n >= 0 ? n : 2;
     })(),
   };
+  const btn = document.getElementById('btnSaveSettings');
+  const btnText = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '保存中…'; }
   try {
     await call('SaveSettings', payload);
-    toast('设置已保存', '主机 hosts、中转端口、DNS 接管的改动需要重启才生效' + await saveNote(), 'success');
-  } catch (e) { fail(e); }
+    if (btn) { btn.disabled = false; btn.textContent = btnText; }
+    // 回执**先弹**，再补“哪些改动还没生效”那句。
+    // 为什么不能像以前那样把 saveNote() 拼进正文里一起弹：那是**第二次 IPC**，
+    // 而后端保存路径上确实有慢活（实测一次保存会跑约 5.6 秒的 schtasks，
+    // 那是另一个 bug，已单独修），弹窗会被无条件推后。
+    // 拆开之后：人看到的是即时的“设置已保存”，补充说明晚一点贴上去。
+    const t = toast('设置已保存', '主机 hosts、中转端口、DNS 接管的改动需要重启才生效', 'success');
+    saveNote().then(note => {
+      if (note && t && t.isConnected) {
+        const p = t.querySelector('p');
+        if (p) p.textContent += note;
+      }
+    });
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = btnText; }
+    fail(e);
+  }
 }
 
 // 恢复设置：把设置页上的每一项都填回内置默认值并落盘。

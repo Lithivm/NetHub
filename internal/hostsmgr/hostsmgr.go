@@ -101,8 +101,68 @@ func splitLines(full string) []string {
 }
 
 // Read 返回 (块内的行, 块是否存在, 整个文件内容, 错误)。
+// ───────── Read 的缓存 ─────────
+//
+// 为什么要有它（2026-10-14）：Read() 被 GetState 调用，而 GetState 被界面每 1.5 秒调一次
+// （DESIGN.md 自己那条纪律：「轮询路径里不许跑外部进程，查询结果必须缓存」——
+// 这条精神在这里一直没守）。原来是每次都 os.ReadFile + 逐行解析，
+// 于是只要界面开着就一直每 1.5 秒读一次盘。
+//
+// 失效判据用 mtime+size：任何人改了（手工编辑 hosts、别的程序）都会被看见。
+// 写入路径另外**显式**失效（见 writeFile）—— 不能只靠 mtime：
+// 同一个时钟刻度内连写两次会读到旧的，而“刚写进去却读到旧的”是最难查的一类 bug。
+var (
+	cacheMu     sync.Mutex
+	cacheOK     bool
+	cachePath   string
+	cacheMTime  time.Time
+	cacheSize   int64
+	cacheBlock  []string
+	cacheExists bool
+	cacheFull   string
+)
+
+// invalidateCache 让下一次 Read 重新读盘。**任何写 hosts 的路径都必须调它。**
+func invalidateCache() {
+	cacheMu.Lock()
+	cacheOK = false
+	cacheMu.Unlock()
+}
+
+// Read 读我们的标记块（带缓存，理由见上面那段）。
 func Read() (block []string, exists bool, full string, err error) {
-	b, err := os.ReadFile(Path())
+	p := Path()
+	var mtime time.Time
+	var size int64
+	if fi, e := os.Stat(p); e == nil {
+		mtime, size = fi.ModTime(), fi.Size()
+		cacheMu.Lock()
+		hit := cacheOK && cachePath == p && cacheMTime.Equal(mtime) && cacheSize == size
+		if hit {
+			// 拷一份再给调用方：缓存的切片不能让外部改（否则缓存本身会被改脏）。
+			// 代价是一次几元素的小拷贝，比“每次读一遍盘 + 解析”便宜得多。
+			block = append([]string(nil), cacheBlock...)
+			exists, full = cacheExists, cacheFull
+		}
+		cacheMu.Unlock()
+		if hit {
+			return block, exists, full, nil
+		}
+	}
+	block, exists, full, err = readFileBlock(p)
+	if err != nil {
+		return nil, false, "", err
+	}
+	cacheMu.Lock()
+	cacheOK, cachePath, cacheMTime, cacheSize = true, p, mtime, size
+	cacheBlock, cacheExists, cacheFull = append([]string(nil), block...), exists, full
+	cacheMu.Unlock()
+	return block, exists, full, nil
+}
+
+// readFileBlock 真的读盘并解析（原 Read 的正文）。
+func readFileBlock(p string) (block []string, exists bool, full string, err error) {
+	b, err := os.ReadFile(p)
 	if err != nil {
 		return nil, false, "", err
 	}
@@ -309,12 +369,16 @@ func writeFile(p, content string) error {
 	var lastErr error
 	for i := 0; i < 5; i++ {
 		if err := os.Rename(tmp, p); err == nil {
+			// 写成功了：显式让 Read 的缓存失效。
+			// 不能只靠 mtime —— 同一个时钟刻度内连写两次会读到旧的。
+			invalidateCache()
 			return nil
 		}
 		lastErr = err
 		time.Sleep(time.Duration(50*(i+1)) * time.Millisecond)
 	}
 	_ = os.Remove(tmp)
+	invalidateCache() // 写失败也失效：不差这一次读盘，差的是“读到旧的还以为写成了”
 	return fmt.Errorf("替换 hosts 失败（可能被其他程序/杀软占用，已重试 5 次）: %w", lastErr)
 }
 

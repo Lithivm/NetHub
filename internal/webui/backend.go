@@ -1604,6 +1604,8 @@ func (b *Backend) applyBatEntries(got []gostbat.BatEntry) (*ImportResult, error)
 
 func (b *Backend) SaveSettings(s SettingsView) error {
 	cfg := b.a.Cfg
+	// 记录改之前的自启延迟 —— 下面要靠“变没变”决定要不要重建计划任务。
+	oldAutoDelay := int(cfg.AutostartDelayDur() / time.Second)
 	// 不动 cfg.Relay：界面上没有这个字段，前端不会传。
 	// （之前这里写 cfg.Relay = s.Relay，前端不传时会被清成空串，直接校验失败）
 	var entries []string
@@ -1645,8 +1647,16 @@ func (b *Backend) SaveSettings(s SettingsView) error {
 	b.afterSave(res, "设置已保存")
 	// 计划任务的“登录后延迟”是写死在任务 XML 里的 —— 已经装了就必须重建任务才生效。
 	// 放在 SaveConfig **之后**：配置先落盘，重建任务失败也不会丢掉用户刚改的设置。
-	if s.AutostartDelay != nil && autostart.Enabled() {
-		if err := autostart.Enable(int(cfg.AutostartDelayDur() / time.Second)); err != nil {
+	//
+	// ⚠ 只在**延迟真的变了**的时候才重建（2026-10-14：用户报“保存后提示弹窗要等很久”）。
+	// 前端是无条件把 autostartDelay 传上来的，所以这里不比较的话**每次点保存**都要跑：
+	//   Enabled()  → schtasks /query   （本机实测 1.42 s）
+	//   Enable()   → schtasks /create  （同量级）
+	//   refreshAutostart() → 又是 Enabled + Detail 两次查询（实测 ~2.8 s）
+	// 合计约 **5.6 秒的外部进程**，而实际需要的只有“延迟变了”这一种情况。
+	// （s.AutostartDelay == nil 时配置根本没改，old/new 相等，自动跳过。）
+	if newAutoDelay := int(cfg.AutostartDelayDur() / time.Second); newAutoDelay != oldAutoDelay && autostart.Enabled() {
+		if err := autostart.Enable(newAutoDelay); err != nil {
 			return err
 		}
 		b.refreshAutostart()
