@@ -201,6 +201,12 @@ code, .mono { font-family: var(--font-mono); }
 }
 .winbtn:hover { background: var(--card-strong); color: var(--ink); }
 .winbtn-close:hover { background: var(--error); color: #fff; }
+/* 三个字形在字面上的视觉大小并不一致：─ 只占一条线、□ 只占半个字身、✕ 接近满字身。
+   用同一个 font-size 出来就是"中间的方框偏小、三者不协调"（用户 2026-10-14 反馈）。
+   按字形各自的占位补齐字号，让三个形状看起来一样重。 */
+#winMin { font-size: 15px; }
+#winMax { font-size: 19px; }
+#winClose { font-size: 12px; }
 
 /* ═══════════════ 状态条 ═══════════════ */
 
@@ -567,6 +573,11 @@ code, .mono { font-family: var(--font-mono); }
 /* 业务目标巡检表 */
 .target-grid { grid-template-columns: minmax(150px, 1.2fr) 110px 80px 90px 110px; }
 /* 只读解释输出（“这个目标怎么走” / 配置体检） */
+/* 可点开的报错（见 showEvidence）：悬停只当提示，想看全文/复制得左键点开 */
+.resolve-bad { cursor: pointer; }
+.runstate.is-clickable { cursor: pointer; }
+.evidence-actions { display: flex; gap: var(--s2); justify-content: flex-end; margin-top: var(--s3); }
+
 .explain-out {
   margin: 0; padding: var(--s3); background: var(--canvas-soft);
   border-radius: var(--r-input); font-size: var(--fs-xs); line-height: 1.75;

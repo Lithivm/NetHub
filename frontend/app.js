@@ -81,6 +81,23 @@ const modal = {
   error(msg) { document.getElementById('modalErr').textContent = msg; }
 };
 
+/* 报错详情：左键点开一个弹窗，里面是**完整原文** + 一键复制。
+   用户 2026-10-14 要求：界面上这类"一句话说不清"的报错不能只靠悬停 title ——
+   悬停既看不全、也选不中，而现场是要把原文发给别人（贴群、发工单）的。 */
+function showEvidence(title, text) {
+  const pre = el('pre', 'explain-out mono');
+  pre.textContent = text || '（没有更多信息）';
+  const copy = btn('复制全文', 'btn btn-primary', async () => {
+    try { await navigator.clipboard.writeText(text || ''); toast('已复制', '原文已复制到剪贴板', 'success'); }
+    catch (e) { toast('复制失败', '请手动选中复制（Ctrl+C）', 'warn'); }
+  });
+  const row = el('div', 'evidence-actions');
+  row.appendChild(copy);
+  modal.open(title, [pre, row], null);   // null = 纯说明弹窗，「确定」即关闭
+  // 只读弹窗留个「取消」会让人以为点了会回滚什么 —— 藏掉，只留「确定」（= 关闭）
+  document.getElementById('modalCancel').style.display = 'none';
+}
+
 function confirmBox(title, text, danger, okText) {
   return new Promise(res => {
     const p = el('p', null, text);
@@ -853,6 +870,9 @@ async function refreshState() {
   // 五态：Ready（绿，呼吸）/ 启动中（琥珀，转圈）/ Error（红，呼吸）/ 只读（琥珀，静止）/ 未启动（灰）
   document.getElementById('runStateText').textContent =
     ro ? '只读' : (starting ? '启动中' : (on ? 'Ready' : (bad ? 'Error' : '未启动')));
+  // 出错时点一下看全文并复制（跟规则页那条解析提示一个套路）
+  rs.classList.toggle('is-clickable', bad);
+  rs.onclick = bad ? () => showEvidence('运行错误 · NetHub', s.error) : null;
   // 出错原因平时不占位置，悬停能看；内部中转端口同样只在悬停里出现
   rs.title = ro
     ? (s.readOnlyWhy || '服务版正在运行') + ' —— 点「接管引擎」可切回界面版'
@@ -1459,11 +1479,21 @@ function targetsCell(list, ports, shadowed, localNets, inactive, apps, resolves,
       ? el('span', 'resolve-bad', '  ⚠ ' + hr.host + ' 解析不到')
       : el('span', 'dim', '  → ' + (hr.ips || []).join(','));
     s.title = hr.failed
-      ? hr.host + ' 现在解析不到，这条规则暂不匹配任何流量。\n原因：' + (hr.lastErr || '未知') +
-        '\n修法：确认本机 DNS 能解析这个名字（内网域名通常只有客户网内的 DNS 才解得开），' +
-        '或者在「设置 → 系统 hosts 接管」里写一条 IP 域名映射。'
+      // 别再断言"不匹配任何流量"：应用**按域名**连的时候，我们会在 DNS 阶段接管这个名字
+      // （回假 IP），规则照样命中 —— 实测过。只有它直接连 IP 时才漏。
+      // 用户 2026-10-14 反馈这条措辞把人吓着了（看着像规则坏了）。
+      ? hr.host + ' 本机 DNS 解析不到这个域名。\n原因：' + (hr.lastErr || '未知') +
+        '\n影响：如果应用是先解析域名再连（我们会在 DNS 阶段把它接管回假 IP），这条规则照样命中；' +
+        '只有它直接连 IP 时才漏。\n' +
+        '修法：① 确认本机 DNS 能解析这个名字（内网域名通常只有客户网内的 DNS 解得开）；' +
+        '② 或者在「设置 → 系统 hosts 接管」里写一条 IP 域名映射。\n' +
+        '（左键点这里可以看全文并复制）'
       : hr.host + ' 解析到 ' + (hr.ips || []).join(', ') +
         (hr.age ? '（' + hr.age + ' 前解析' + (hr.stale ? '，已过期，正在刷新' : '') + '）' : '');
+    if (hr.failed) {
+      // 左键点开：悬停看不全、选不中，现场要的是能复制的原文
+      s.onclick = () => showEvidence('域名解析提示 · ' + hr.host, s.title);
+    }
     c.appendChild(s);
   }
   // 通配域名（*.his.com）/ 中间带星（db-*.his.com）：显示这条规则现在**真的在管什么**。
