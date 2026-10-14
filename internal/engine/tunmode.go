@@ -37,7 +37,39 @@ func (r TunReport) Active() bool { return len(r.Reasons) > 0 }
 func (r TunReport) Summary() string { return strings.Join(r.Reasons, "；") }
 
 // tunDeviceHints 虚拟网卡名的识别关键词（全小写比较）。
-var tunDeviceHints = []string{"mihomo", "clash", "utun", "singbox", "sing-box", "tun"}
+//
+// 2026-10-14 收紧：以前把裸 "tun" 当子串匹配，于是 "Tunnel adapter Teredo…"、
+// 各类 VPN 的 "…Tunnel" 网卡都算「有 TUN 模式的代理在接管流量」—— 误报的代价不只是吓人：
+// 我们会**真的让路**（DNS 接管不启动），域名类规则随之失效。
+// 现在的判据分两类：
+//   - 有明确归属的栈名（wintun/mihomo/clash/singbox/utun/tun2socks）：出现即算
+//   - 裸 "tun"：必须是**独立词**（tun / tun0 / "tun (…)"），不能是 tunnel 的一部分
+var tunDeviceHints = []string{"mihomo", "clash", "singbox", "sing-box", "utun", "wintun", "tun2socks"}
+
+// looksLikeTunDevice 判断一个网卡名是不是“TUN 类”（Clash/mihomo/sing-box 那一类）。
+//
+// 宁可漏报（漏了还有②的 Clash 配置检查和③的 DNS 检查兜底），不要误报。
+func looksLikeTunDevice(name string) bool {
+	n := strings.ToLower(strings.TrimSpace(name))
+	if n == "" {
+		return false
+	}
+	for _, hint := range tunDeviceHints {
+		if strings.Contains(n, hint) {
+			return true
+		}
+	}
+	// 裸 tun：按非字母数字切开后必须是 "tun" 或 "tun" + 序号
+	// （tun0 → "tun0" 去掉末尾数字 = "tun" ✓；tunnel → "tunnel" ✗）
+	for _, seg := range strings.FieldsFunc(n, func(r rune) bool {
+		return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'))
+	}) {
+		if strings.TrimRight(seg, "0123456789") == "tun" {
+			return true
+		}
+	}
+	return false
+}
 
 // detectTun 做全套检测。任何一步失败都不算命中（宁可漏报，不要误报说“你开了 TUN”）。
 func detectTun() TunReport {
@@ -46,18 +78,15 @@ func detectTun() TunReport {
 	// ① 网卡
 	if ifaces, err := net.Interfaces(); err == nil {
 		for _, in := range ifaces {
-			name := strings.ToLower(in.Name)
-			for _, hint := range tunDeviceHints {
-				if !strings.Contains(name, hint) {
-					continue
-				}
-				if in.Flags&net.FlagUp == 0 {
-					continue // 网卡存在但没启用：不算接管
-				}
-				r.TunDevice = in.Name
-				r.Reasons = append(r.Reasons, fmt.Sprintf("发现启用的虚拟网卡 %q", in.Name))
-				break
+			if !looksLikeTunDevice(in.Name) {
+				continue
 			}
+			if in.Flags&net.FlagUp == 0 {
+				continue // 网卡存在但没启用：不算接管
+			}
+			r.TunDevice = in.Name
+			r.Reasons = append(r.Reasons, fmt.Sprintf("发现启用的虚拟网卡 %q", in.Name))
+			break
 		}
 	}
 

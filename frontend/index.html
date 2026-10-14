@@ -139,6 +139,19 @@
           <button class="info-btn" id="btnHelpConn" title="列表口径与操作">i</button>
         </div>
         <div class="table" id="connTable"></div>
+
+        <!-- 历史连接：上面那张表只显示“现在还在的”（已结束的 15 秒就消失），
+             而诊断时最常问的是“刚才那批连到哪儿去了、为什么失败”。按需展开、按需拉取。 -->
+        <div class="hist-bar">
+          <button class="btn btn-sm" id="btnConnHist">▸ 历史连接</button>
+          <span class="hint" id="connHistHint">看“刚才那批连到哪儿去了、为什么失败”（已结束的连接）</span>
+          <span class="hint" id="connHistCount"></span>
+          <span class="flex-1"></span>
+          <input class="input input-sm" id="connHistFilter" placeholder="按目标/进程过滤" hidden>
+          <button class="btn btn-sm" id="btnConnHistRefresh" hidden>刷新</button>
+          <button class="btn btn-sm" id="btnConnHistClear" hidden>清空</button>
+        </div>
+        <div class="table" id="connHistTable" hidden></div>
       </div>
 
       <div class="card">

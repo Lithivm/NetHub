@@ -431,6 +431,15 @@ code, .mono { font-family: var(--font-mono); }
 .card-head h2 { font-size: var(--fs-lg); }
 .card-head .hint { font-size: var(--fs-xs); color: var(--muted); }
 .card-head .spacer { flex: 1; }
+/* 连接页的历史连接条：贴着列表下方，不抢卡片头的位置 */
+.hist-bar { display: flex; align-items: center; gap: var(--s2);
+  padding: var(--s3) var(--s4) var(--s2); border-top: 1px solid var(--hairline-soft); }
+.hist-bar .flex-1 { flex: 1; }
+/* 过滤框别跟着拉满（.input 在 flex 行里会吃掉整行宽 —— 截图里一眼就看出来了） */
+.hist-bar .input { flex: 0 0 auto; width: 220px; }
+/* 历史行的字比“当前连接”淡一档：它是回看用的，不是正在发生的事 */
+.hist-row { color: var(--muted); }
+.hist-row .strong { color: var(--body); }
 .card-body { padding: var(--s3) var(--s4) var(--s4); overflow: auto; }
 .card-body.form { display: flex; flex-direction: column; gap: var(--s3); overflow: visible; }
 

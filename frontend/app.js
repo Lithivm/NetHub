@@ -761,6 +761,133 @@ async function loadConnsOnce() {
   });
 }
 
+/* ═══════════ 连接页：历史连接（已结束连接的存档） ═══════════
+
+   为什么要这块：上面那张表只显示“现在还在的” —— 已结束的 15 秒就从列表消失
+   （引擎里最多留 2 分钟，janitor 就物理删除）。而诊断时最常问的一句是
+   “刚才那批连到哪儿去了、为什么失败”，从发现异常到切过来看常常已经过去一两分钟。
+
+   存档在引擎侧是定长环形（最近 300 条，见 internal/engine/connhist.go）；
+   这里**按需拉取**：不参与 1.5 秒轮询，只在展开后最多每 3 秒刷一次。 */
+let histOpen = false;
+let histRows = null;   // null = 还没拉过
+let histKeep = 0;      // 存档上界（只在提示里写明“只留最近 N 条”）
+let histAt = 0;        // 上次拉取时刻（节流用）
+let histLoading = false;
+
+async function loadConnsHistory() {
+  if (histLoading) return;
+  histLoading = true;
+  try {
+    const d = await call('GetConnsHistory');
+    histRows = (d && d.list) || [];
+    histKeep = (d && d.keep) || 0;
+    histAt = Date.now();
+  } catch (e) {
+    // 静默：这是诊断辅助区，不值得每 3 秒弹一次错
+  } finally {
+    histLoading = false;
+  }
+  renderConnsHistory();
+}
+
+function histDur(sec) {
+  const s = Number(sec) || 0;
+  if (s < 1) return '<1s';
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm' + String(s % 60).padStart(2, '0') + 's';
+  return Math.floor(s / 3600) + 'h' + String(Math.floor((s % 3600) / 60)).padStart(2, '0') + 'm';
+}
+
+function histAgo(sec) {
+  const s = Number(sec) || 0;
+  if (s < 60) return s + ' 秒';
+  if (s < 3600) return Math.floor(s / 60) + ' 分钟';
+  return Math.floor(s / 3600) + ' 小时';
+}
+
+function histMatches(rec) {
+  const box = document.getElementById('connHistFilter');
+  const q = (box && box.value ? box.value : '').trim().toLowerCase();
+  if (!q) return true;
+  // 目标 / 进程 / 链 / 规则名都算 —— 排查时想到哪个就输哪个
+  return [rec.target, rec.proc, rec.chain, rec.ruleName, rec.state]
+    .some(v => (v || '').toLowerCase().includes(q));
+}
+
+function setConnHistOpen(open) {
+  histOpen = open;
+  const btn = document.getElementById('btnConnHist');
+  const hint = document.getElementById('connHistHint');
+  const tbl = document.getElementById('connHistTable');
+  if (btn) btn.textContent = open ? '▾ 历史连接' : '▸ 历史连接';
+  ['connHistFilter', 'btnConnHistRefresh', 'btnConnHistClear'].forEach(id => {
+    const x = document.getElementById(id);
+    if (x) x.hidden = !open;
+  });
+  if (tbl) tbl.hidden = !open;
+  if (hint) hint.hidden = open;   // 展开后不必再占位置
+  if (open) {
+    if (histRows === null) loadConnsHistory();   // 第一次展开才去拉
+    else renderConnsHistory();
+  }
+}
+
+function renderConnsHistory() {
+  const t = document.getElementById('connHistTable');
+  if (!t || !histOpen) return;
+  const cnt = document.getElementById('connHistCount');
+  const all = histRows || [];
+  const rows = all.filter(histMatches);
+  if (cnt) {
+    cnt.textContent = histRows === null ? '' :
+      ('共 ' + all.length + ' 条' +
+        (rows.length !== all.length ? '（筛出 ' + rows.length + ' 条）' : '') +
+        (histKeep ? ' · 只留最近 ' + histKeep + ' 条' : ''));
+  }
+  t.replaceChildren();
+  if (histRows === null) {
+    t.appendChild(el('div', 'empty dim', '正在读历史…'));
+    return;
+  }
+  if (!all.length) {
+    t.appendChild(emptyState(ICON_LINK, '还没有结束的连接',
+      '连接一结束就会归档到这里，方便回头看“刚才那批”。', null, null));
+    return;
+  }
+  if (!rows.length) {
+    t.appendChild(emptyState(ICON_LINK, '没有匹配的记录',
+      '换个关键词（目标 / 进程 / 链 / 规则名）。', null, null));
+    return;
+  }
+  // 列与「当前连接」对齐（同一套 conn-grid），只是“速率”换成了“结束时刻”
+  const head = el('div', 'trow thead conn-grid');
+  ['端口', '进程', '目标', '动作', '链', '时长', '↑ 发送', '↓ 接收', '结束', '状态'].forEach(h =>
+    head.appendChild(el('div', 'cell', h)));
+  t.appendChild(head);
+  rows.forEach(rec => {
+    const row = el('div', 'trow conn-grid hist-row');
+    row.title = rec.target + '\n' +
+      '开始 ' + (rec.started || '?') + ' → 结束 ' + (rec.ended || '?') +
+      '（' + histAgo(rec.agoSec) + '前）\n本地端口 ' + (rec.sport || '?') +
+      (rec.ruleName ? '\n规则 ' + rec.ruleName : '') +
+      (rec.err ? '\n失败原因：' + rec.err : '');
+    row.appendChild(el('div', 'cell mono dim', String(rec.sport || '')));
+    row.appendChild(el('div', 'cell' + (rec.proc ? '' : ' dim'), rec.proc || '未知'));
+    row.appendChild(el('div', 'cell mono strong', rec.target || ''));
+    row.appendChild(el('div', 'cell' + (rec.action === '阻断' ? ' dim' : ''), rec.action || ''));
+    row.appendChild(el('div', 'cell dim', rec.chain || '—'));
+    row.appendChild(el('div', 'cell dim', histDur(rec.durSec)));
+    row.appendChild(el('div', 'cell mono dim', '↑ ' + fmtBytes(rec.up)));
+    row.appendChild(el('div', 'cell mono dim', '↓ ' + fmtBytes(rec.down)));
+    row.appendChild(el('div', 'cell dim mono', rec.ended || ''));
+    const st = el('div', 'cell' + (rec.state === '失败' ? ' strong' : ' dim'), rec.state || '');
+    if (rec.err) st.title = rec.err;
+    row.appendChild(st);
+    t.appendChild(row);
+  });
+}
+
 /* ═══════════ 连接列表：同目标合并 + 点开看每条 ═══════════
 
    为什么合并：这页叫「连接」不是「进程」—— 一个 magic-api 页面就会对同一目标
@@ -2355,6 +2482,28 @@ function wire() {
 
   // 连接页
   document.getElementById('btnConnRefresh').onclick = () => loadConns();
+  // ── 历史连接（展开区） ──
+  const histBtn = document.getElementById('btnConnHist');
+  if (histBtn) histBtn.onclick = () => setConnHistOpen(!histOpen);
+  const histRf = document.getElementById('btnConnHistRefresh');
+  if (histRf) histRf.onclick = () => loadConnsHistory();
+  const histFilt = document.getElementById('connHistFilter');
+  if (histFilt) histFilt.oninput = () => renderConnsHistory();   // 纯前端过滤，不用再拉一次
+  const histCl = document.getElementById('btnConnHistClear');
+  if (histCl) histCl.onclick = async () => {
+    // 只用一次确认：存档清掉不影响任何实际链路，但误点会让“刚才那批”没了
+    const yes = await confirmBox('清空历史连接？',
+      '只清掉这份“已结束连接”的存档（当前连接列表与各处统计不受影响）。\n' +
+      '常用法：先清空，再做一次你想观察的动作，这样展开区里剩下的就全是那一次留下的。',
+      false, '清空');
+    if (!yes) return;
+    try {
+      await call('ClearConnsHistory');
+      histRows = [];
+      renderConnsHistory();
+      toast('已清空', '历史连接存档已清空', 'success');
+    } catch (e) { fail(e); }
+  };
   document.getElementById('setCountDirect').onchange = async (ev) => {
     try {
       await call('SetCountDirect', ev.target.checked);
@@ -2700,7 +2849,12 @@ async function boot() {
   // 连接列表只看当前页：不在这一页就不拉，省得白跑
   setInterval(() => {
     const p = document.getElementById('page-conn');
-    if (p && p.classList.contains('is-active')) { loadConns(); loadQuicBlock(); }
+    if (p && p.classList.contains('is-active')) {
+      loadConns();
+      loadQuicBlock();
+      // 历史连接展开着就顺手刷一下（节流：最多 3 秒一次，它不走 1.5 秒那条轮询）
+      if (histOpen && Date.now() - histAt > 3000) loadConnsHistory();
+    }
   }, 1500);
   // 链路页的上游健康：只在这一页时刷新
   setInterval(() => {

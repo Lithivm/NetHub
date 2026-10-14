@@ -21,8 +21,12 @@ import (
 // 而启动时恰恰有一批失败探测）。
 
 // MarkSelfPort 登记一个“这是我们自己发起的连接”的本地端口。
+//
+// 接收者可能是 nil（`nethub.exe -clash-check`/`-status` 这类命令行入口没有引擎实例）：
+// 那时没有连接表可登记，直接当无事发生 —— 以前这里直接 panic（2026-10-14 实测
+// `-clash-check` 崩在 MarkSelfPort(0x0)，命令行诊断整个不可用）。
 func (e *Engine) MarkSelfPort(port uint16) {
-	if port == 0 {
+	if e == nil || port == 0 {
 		return
 	}
 	e.mu.Lock()
@@ -35,6 +39,9 @@ func (e *Engine) MarkSelfPort(port uint16) {
 
 // UnmarkSelfPort 取消登记（挑好的端口被别人抢走时用）。
 func (e *Engine) UnmarkSelfPort(port uint16) {
+	if e == nil {
+		return
+	}
 	e.mu.Lock()
 	delete(e.selfPorts, port)
 	e.mu.Unlock()
@@ -57,7 +64,14 @@ func (e *Engine) SelfPortCount() int {
 // 直接报 WSAEINVAL（实测 2026-10-09，连 bind 先占一个端口也被拒）——
 // 所以反过来：先用 Listen 拿一个空闲端口、关掉、登记，再带 LocalAddr 去连。
 // 中间那个“可能被抢”的窗口极小，抢到就换一个重试。
+//
+// e 为 nil（命令行诊断入口）时退化成一次普通 dial：没有连接表可登记，
+// 但探针本身该照常跑（那条连接会以 nethub.exe 的名义出现在**运行实例**的连接表里 ——
+// 两个进程，登记不了；PrintClashCheck 会把这句话打给用户看）。
 func (e *Engine) DialSelf(network, addr string, timeout time.Duration) (net.Conn, error) {
+	if e == nil {
+		return net.DialTimeout(network, addr, timeout)
+	}
 	var lastErr error
 	for i := 0; i < 3; i++ {
 		port, err := freeLocalPort()

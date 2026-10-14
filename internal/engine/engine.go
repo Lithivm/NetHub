@@ -175,6 +175,9 @@ func (e *Engine) finish(st *connState) {
 	if !st.ended.CompareAndSwap(false, true) {
 		return // 已经结束过了，别重复扣活跃数
 	}
+	// 历史存档：只留界面看得见的这段时间之外的“刚刚那批”
+	// （「当前连接」15 秒就不显示了，janitor 2 分钟物理删 —— 诊断常常来不及看）
+	e.noteHistory(st)
 	// 只有建条目时**真的加过**活跃数的那条才扣：
 	// 直连/阻断的条目以前不加只扣（用了 block 规则后，界面“活跃”会被持续偷走）。
 	if !st.counted {
@@ -296,17 +299,7 @@ func (e *Engine) Conns(limit int, withProc bool) []ConnView {
 		if st.statsOnly && !countDirect {
 			continue
 		}
-		state := "进行中"
-		switch {
-		case st.unrelayed.Load():
-			state = "未送达中转"
-		case st.action == rules.ActionBlock:
-			state = "已阻断"
-		case st.err() != "":
-			state = "失败"
-		case st.ended.Load():
-			state = "已结束"
-		}
+		state := connStateName(st)
 		end := now
 		if t := st.endTime(); !t.IsZero() {
 			end = t
@@ -542,6 +535,11 @@ type Engine struct {
 	// 建条目时靠它认出“这不是应用流量”。同一个锁保护。
 	selfPorts map[uint16]time.Time
 
+	// hist / histMu：连接历史存档（见 connhist.go）。
+	// 定长环形，不参与热路径锁；界面「历史连接」展开区按需拉。
+	histMu sync.Mutex
+	hist   []ConnHist
+
 	// startMu 串行化 Start/Stop：两者都要能在同一个 Engine 上反复调用
 	// （托盘“停止 → 启动”、界面重启都会走到），且不能互相插队。
 	startMu sync.Mutex
@@ -725,6 +723,11 @@ func (e *Engine) Start() error {
 	e.conns = map[uint16]*connState{}
 	e.notices = nil
 	e.statActive = 0
+	// 历史存档也清：它记的是“这次运行发生过什么”，跨运行混在一起看时间会误导
+	// （界面上是先入托盘重启、再打开看的那种用法很常见）。
+	e.histMu.Lock()
+	e.hist = nil
+	e.histMu.Unlock()
 	// 动态过滤器也要清：旧句柄已在 Stop 里关了，如果不清 dynFilter，
 	// 重启后 rebuildDynFilter 会因为“过滤器字符串没变”直接 return，
 	// 于是通配域名的第二只句柄永远建不起来（静默失效）。

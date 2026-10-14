@@ -66,6 +66,11 @@ type Backend struct {
 	autoEnabled bool
 	autoDetail  string
 
+	// 别的代理绕过覆盖的最后**确认**结果（clashWatch 后台刷新，界面只读结论）。
+	// 界面不现读的理由：GetState 每 1.5 秒调一次，现读会把注册表重写中的裸值挂成告警条。
+	clashMu   sync.Mutex
+	clashSeen Coverage
+
 	// 只读态：引擎锁被别的进程（服务版/另一实例）拿着，本界面**不跑引擎**、
 	// 只展示状态，等用户点「接管」再抢回来。
 	//
@@ -787,23 +792,56 @@ type ConnList struct {
 
 // GetConns 返回连接表快照（界面上每 1.5 秒拉一次，只统计当前页可见时）。
 func (b *Backend) GetConns() ConnList {
-	total, _ := b.a.Engine.Stats()
-	rateUp, rateDown := b.a.Engine.Rates()
+	e := b.a.Engine
+	if e == nil { // 只读态（引擎在别的进程/没接上）：给空列表，不是崩溃
+		return ConnList{List: nil}
+	}
+	total, _ := e.Stats()
+	rateUp, rateDown := e.Rates()
 	return ConnList{
-		List:  b.a.Engine.Conns(150, true),
+		List:  e.Conns(150, true),
 		Total: total,
 		// Active 用界面口径（含直连/阻断的进行中行），见 Engine.ConnsActive
-		Active:   b.a.Engine.ConnsActive(),
-		PerChain: b.a.Engine.ChainCounts(),
+		Active:   e.ConnsActive(),
+		PerChain: e.ChainCounts(),
 		RateUp:   rateUp,
 		RateDown: rateDown,
+	}
+}
+
+// ConnHistList 历史连接快照（界面「历史连接」展开区）。
+type ConnHistList struct {
+	List []engine.ConnHist `json:"list"`
+	// Keep 存档条数上界——界面上要写明“只留最近 N 条”，否则看着像丢数据。
+	Keep int `json:"keep"`
+}
+
+// GetConnsHistory 已结束连接的存档（新的在前）。
+//
+// 为什么单独一个接口、不塞进 GetConns：它只在用户展开那个区块时才要看，
+// 而 GetConns 每 1.5 秒跑一次 —— 不该把 300 条存档每轮都搬一遍。
+func (b *Backend) GetConnsHistory() ConnHistList {
+	e := b.a.Engine
+	if e == nil {
+		return ConnHistList{Keep: engine.ConnHistKeep}
+	}
+	return ConnHistList{List: e.ConnsHistory(0), Keep: engine.ConnHistKeep}
+}
+
+// ClearConnsHistory 清空存档（界面上「清空」：做一次动作后只看新增的）。
+func (b *Backend) ClearConnsHistory() {
+	if e := b.a.Engine; e != nil {
+		e.ClearConnsHistory()
 	}
 }
 
 // ProcPath 某个 PID 的完整路径（连接页点进程名看“到底是谁”）。
 // 拿不到时返回空串（受保护进程/已退出）。
 func (b *Backend) ProcPath(pid uint32) string {
-	return b.a.Engine.ProcPath(pid)
+	if e := b.a.Engine; e != nil {
+		return e.ProcPath(pid)
+	}
+	return ""
 }
 
 // ───────────────────── 规则智能 / 体检 / 备份 / 诊断 ─────────────────────

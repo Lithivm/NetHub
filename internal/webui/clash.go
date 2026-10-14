@@ -52,10 +52,37 @@ import (
 // ProxyMode 系统代理模式（只从注册表读，不涉及任何匹配语义）。
 type ProxyMode struct {
 	Mode        string // none | system | pac
+	Enable      bool   // ProxyEnable == 1（“开关”那一位，不代表真的配了代理地址）
 	Server      string // 显式系统代理的地址
 	PacURL      string // PAC 地址
 	BypassCount int    // 绕过条目数
 	BypassRaw   string // 绕过列表原值（用于本地匹配）
+}
+
+// WouldProxy 系统代理此刻**真的**会把请求交给某个代理服务器吗？
+//
+// 为什么必须单独问这一句（2026-10-14 用户报“判定太宽松、有短暂误报”）：
+//   - ProxyEnable=1 但 ProxyServer 为空/写坏（Clash 正在重写设置、或工具退出时只清了地址）：
+//     这种状态下系统不会把任何请求交给代理，“内网可能被接管”是纯假警报。
+//   - PAC 模式：ProxyOverride（绕过列表）**根本不参与**判定 —— PAC 脚本自己按请求
+//     决定走不走代理。拿它算“缺条目”必然误报，所以这里也不认（那张红/绿由
+//     ClashCheck 的实测结论来说，它能看真实走向）。
+func (pm ProxyMode) WouldProxy() bool {
+	return pm.Mode == "system" && pm.Enable && strings.TrimSpace(pm.Server) != ""
+}
+
+// notProxyingNote 说明“为什么这次不按绕过列表下结论”（给界面/命令行看，不能含糊）。
+func (pm ProxyMode) notProxyingNote() string {
+	switch {
+	case pm.Mode == "none":
+		return "没开系统代理：内网不会被别的代理抢走"
+	case pm.Mode == "pac":
+		return "系统代理是 PAC（自动配置脚本）模式：绕过列表不参与判定，能不能共存只能看实测结果"
+	case strings.TrimSpace(pm.Server) == "":
+		return "系统代理开关开着，但没有代理服务器地址：实际不会转发任何请求"
+	default:
+		return "系统代理未生效"
+	}
 }
 
 func readProxyMode() ProxyMode {
@@ -77,6 +104,7 @@ func readProxyMode() ProxyMode {
 		m.Server = s
 	}
 	if en, _, err := k.GetIntegerValue("ProxyEnable"); err == nil && en == 1 {
+		m.Enable = true
 		if m.Mode == "" {
 			m.Mode = "system"
 		}
@@ -124,6 +152,10 @@ type Coverage struct {
 	Checked []string `json:"checked"`
 	Missed  []string `json:"missed"`
 	OK      bool     `json:"ok"`
+
+	// Note 为什么这次没按绕过列表算（PAC 模式 / 代理地址为空 / 没开代理）——
+	// 空字符串 = 正常按绕过列表算过了。有这个字段才不会把“没算”装成“算过且没问题”。
+	Note string `json:"note,omitempty"`
 }
 
 // ClashCheckView 给前端的检测结果。
@@ -318,19 +350,61 @@ func wildcardMatch(ent, s string) bool {
 	return strings.HasSuffix(s, last)
 }
 
-// clashCoverage 轻量巡检：只读注册表 + 本地匹配，**不发任何网络请求**，
-// 所以可以高频跑（后台每 60 秒一次）。
+// clashCoverage 界面/通知用的判定：**已确认**的那份（由 clashWatch 后台刷新）。
+//
+// 为什么不在这里现读（2026-10-14 修用户报的“短暂误报”）：
+// 它会随 GetState 每 1.5 秒被调一次，现读就会把“Clash 正在重写注册表”那一瞬间的裸值
+// 直接挂成常驻告警条 —— 一闪一闪的假警报。确认窗口与“引擎没在跑就不告警”的判断
+// 都放在后台巡检里（见 clashWatch）；这里只读结论，顺手把巡检没起来的情况补上。
 func (b *Backend) clashCoverage() Coverage {
-	return coverageFor(b.a.Cfg, readProxyMode())
+	b.clashMu.Lock()
+	c := b.clashSeen
+	b.clashMu.Unlock()
+	if c.Checked == nil && c.Missed == nil && c.Note == "" {
+		return b.coverageForUI() // 巡检还没跑过第一轮（启动/命令行）：现算一次
+	}
+	return c
+}
+
+// coverageForUI 现算一次（带确认窗口）。界面卡片与命令行入口用它：
+// 卡片自己会做联网实测，结论不该因为“巡检刚好还没跑”而空着。
+func (b *Backend) coverageForUI() Coverage {
+	return confirmedCoverage(b.a.Cfg, readProxyMode, time.Sleep)
+}
+
+// clashConfirmWait 判定“缺条目”要观察多久才算数。
+//
+// 现场踩过（2026-10-14 用户报“短暂的误报”）：代理工具重写系统代理时是先写 ProxyEnable、
+// 后写 ProxyOverride，中间那个（几十毫秒到几秒的）窗口里我们读到的是
+// “代理开着、但没有绕过列表” —— 那一刻报“内网可能被其他代理接管”是假的。
+const clashConfirmWait = 3 * time.Second
+
+// confirmedCoverage 带确认窗口的判定：读到“缺条目”先不当真，隔 clashConfirmWait 再读一次，
+// 还缺才算。read/wait 可注入，便于测试（测试里 wait 传空函数）。
+func confirmedCoverage(cfg *config.Config, read func() ProxyMode, wait func(time.Duration)) Coverage {
+	c := coverageFor(cfg, read())
+	if c.OK {
+		return c
+	}
+	wait(clashConfirmWait)
+	if c2 := coverageFor(cfg, read()); c2.OK {
+		return c2 // 刚才那次落在竞态窗口里，静默丢弃
+	} else {
+		return c2
+	}
 }
 
 // coverageFor 是 clashCoverage 的纯函数形式（测试用：不碰真实注册表）。
 //
-// 重要：本机**根本没开系统代理**（没装 Clash、或装了但没开）时 Mode=="none"，
-// 直接返回 OK ——— 不报错、不打日志、不挂横幅。不能把“没装 Clash”也当成风险。
+// 什么时候**不下结论**（都返回 OK + Note，见 WouldProxy/notProxyingNote）：
+//   - 没开系统代理（没装 Clash、或装了但没开）；
+//   - 开了开关但没有代理服务器地址；
+//   - PAC 模式（绕过列表不参与判定）。
+//
+// 这三种都不是“风险”，拿它们报红线就是假警报。
 func coverageFor(cfg *config.Config, pm ProxyMode) Coverage {
-	if pm.Mode == "none" {
-		return Coverage{OK: true} // 没开系统代理 = 没有泄漏面
+	if !pm.WouldProxy() {
+		return Coverage{OK: true, Note: pm.notProxyingNote()}
 	}
 	var c Coverage
 	for _, t := range clashTargets(cfg) {
@@ -409,16 +483,28 @@ func firstUsableHost(cidr string) string {
 	return net.IP(buf).String()
 }
 
-// clashWatch 后台巡检：绕过覆盖丢失就立即告警，不等用户打开界面。
+// clashWatch 后台巡检：绕过覆盖丢失就告警，不等用户打开界面。
 //
-// 只读注册表 + 本地匹配，成本极低（每 60 秒一次）；只在状态变化时告警，不刷屏。
+// 只读注册表 + 本地匹配，成本极低；只在状态**变化**时告警，不刷屏。
+// 三条纪律（每条都是现场踩出来的）：
+//   - 判定要过确认窗口（confirmedCoverage）：不然 Clash 重写设置的那一秒就是一条假警报；
+//   - 引擎没在跑就不告警：没有隧道可被绕过（“没运行”本身有单独一条通知）；
+//   - 结论写进 clashSeen 供界面读（界面不现读，就不会一闪一闪）。
 func (b *Backend) clashWatch() {
 	wasOK := true
-	tick := time.NewTicker(60 * time.Second)
+	// 5 秒一轮：判定本身零成本，快点轮是为了让用户改完绕过列表后告警很快消失
+	// （以前 60 秒，改完还得盯一分钟才看到变化，像没生效）。
+	tick := time.NewTicker(5 * time.Second)
 	defer tick.Stop()
 
 	check := func() {
-		c := b.clashCoverage()
+		c := confirmedCoverage(b.a.Cfg, readProxyMode, time.Sleep)
+		if !c.OK && !b.a.Running() {
+			c = Coverage{OK: true, Note: "引擎未运行：现在没有隧道会被绕过"}
+		}
+		b.clashMu.Lock()
+		b.clashSeen = c
+		b.clashMu.Unlock()
 		if c.OK == wasOK {
 			return
 		}
@@ -581,7 +667,7 @@ func (b *Backend) ClashCheck() ClashCheckView {
 			unreachable = append(unreachable, it.Host)
 		}
 	}
-	cov := b.clashCoverage()
+	cov := b.coverageForUI() // 卡片自己实测，结论不该因为“巡检还没跑完第一轮”而空着
 	v.Coverage = cov
 
 	switch {
@@ -630,7 +716,6 @@ func shortErr(err error) string {
 func PrintClashCheck(cfg *config.Config) {
 	b := &Backend{a: &app.App{Cfg: cfg}}
 	v := b.ClashCheck()
-
 	modeName := map[string]string{
 		"none":   "未开启系统代理",
 		"system": "普通系统代理",
@@ -638,6 +723,12 @@ func PrintClashCheck(cfg *config.Config) {
 	}[v.Mode]
 
 	fmt.Println("=== 共存检测：内网数据会走哪 + 走得对不对 ===")
+	// 命令行与运行实例是两个进程：探针没法登记成“自己人”（见 engine.DialSelf），
+	// 所以运行实例的连接列表里会冒出几条 nethub.exe 的连接 —— 先说明，别让人当成应用流量。
+	if _, ok := app.ReadRuntime(); ok {
+		fmt.Println("  （注意：本命令的探测连接会以 nethub.exe 的名义出现在运行实例的连接列表里；" +
+			"要看干净的结果请在界面 → 诊断页看那张卡）")
+	}
 	fmt.Printf("  系统代理: %s", modeName)
 	if v.Server != "" {
 		fmt.Printf("  %s", v.Server)
