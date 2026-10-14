@@ -309,18 +309,23 @@ code, .mono { font-family: var(--font-mono); }
 }
 @keyframes dot-spin { to { transform: rotate(360deg); } }
 
-/* 指示灯：ready 绿、出错红。
+/* 指示灯：ready 绿、出错红 —— **保留无限呼吸动画（2026-10-14 用户拍板）**。
 
-   ⚠ 这里**不能挂 infinite 动画**（2026-10-14 实测，见 KB:产物/nethub/2026-10-14-vs-Proxifier实测对比.md）：
-   只要界面里有任何一个持续动画，Chromium 合成器就会为它每帧出帧 —— 这个 8px 的呼吸动画
-   让**整窗每帧重绘**，渲染进程空转从 ~1% 升到 20~35%（现场那个跑了一段时间的实例 88~113%）。
-   拆过属性：换成只动 opacity 一样贵（31.8%），加 will-change 也没用（19.3%）——
-   **不是 box-shadow 的错，是这个界面上任何持续动画都省不掉**。
-   所以：常态用**稳定色点**（Proxifier 也是这样），只留 is-starting 那个会自己结束的 dot-spin。
-   早先“呼吸/光晕更容易在余光里看见”的考虑仍然成立，但那点观感不值半个核。 */
+   权衡记录（别再反复）：这个 8px 的呼吸动画在窗口**可见**时吃 15.6% 单核
+   （真机 WebView2 上量到 47.8%）；而窗口**隐藏/最小化**时 Chromium 会把页面置为
+   `hidden` 并节流渲染，只花 **0.2~0.5%**。没人盯着看的时候它几乎不花钱，
+   而偶尔有人打开界面时观感值这点代价 —— 所以留。
+
+   ⚠ 这个决定**建立在一个前提上**：“托盘态必须真的停帧”。
+   若哪天发现托盘里它还在烧，那不是删动画就行了 —— 是托盘路径的 bug，
+   而且界面上所有持续工作（1.5 秒的 GetState 轮询、日志页每行一次同步布局）
+   都会跟着一直付费。判据与验证方法见 DESIGN.md 硬规则第 9 条。
+
+   做过的优化尝试（都不采用，因为省不掉）：只动 opacity 更贵（31.8%）、
+   加 will-change 无效（19.3%）—— 在这个界面上任何持续动画都会让整窗每帧重绘。 */
 .runstate.is-on .dot,
 .runstate.is-bad .dot {
-  opacity: 1;
+  animation: dot-breathe 2s ease-in-out infinite;
 }
 .runstate.is-bad .dot { background: var(--error); color: var(--error); }
 @keyframes dot-breathe {
