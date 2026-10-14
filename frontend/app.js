@@ -1993,6 +1993,12 @@ function renderClash(v) {
     det.appendChild(t);
   }
 
+  if (v.coverage && v.coverage.note) {
+    // 没按绕过列表算（没开代理 / 没有代理地址 / PAC 模式）时把原因显出来：
+    // 不然这里什么都不显示，看着像“查过且没问题”。PAC 下绕过列表压根不参与判定，
+    // 结论只能看上面对每条目标的实测。
+    det.appendChild(el('div', 'hint', v.coverage.note));
+  }
   if (v.coverage && v.coverage.checked && v.coverage.checked.length) {
     const missed = v.coverage.missed || [];
     const hit = v.coverage.checked.length - missed.length;
