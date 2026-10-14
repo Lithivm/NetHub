@@ -117,3 +117,33 @@ func TestHitText(t *testing.T) {
 		}
 	}
 }
+
+// 我们自己的探针（自检 / 共存检测走的 DialSelf 连接）在 normal 档**一行都不许写**：
+// 它们是仪器不是应用流量 —— 与「不进连接列表、不计累计」同一条原则。
+//
+// 2026-10-14 用户报“一启动就打印了这么多日志”：开机那串 `proc=nethub.exe` 的
+// intercept/relay.done 就是它们（界面一加载就做一次共存检测），
+// 日志里看不出“这是我们自己发的”，看着像应用在连。
+func TestSelfProbeConnLogOnlyInVerboseTier(t *testing.T) {
+	e := newTestEngine()
+	n := len(e.bus.Snapshot())
+
+	e.connInfo(true, "intercept: chain=sjy target=10.100.100.99:443 action=relay")
+	e.connInfo(true, "relay.done: chain=sjy target=10.100.100.99:443 up=0 B down=0 B")
+	if got := newLines(e.bus, n); got != "" {
+		t.Fatalf("normal 档不该写自己的探针连接：%q", got)
+	}
+
+	e.bus.SetLevel(logbus.LevelVerbose)
+	e.connInfo(true, "intercept: chain=sjy target=10.100.100.99:443 action=relay")
+	if got := newLines(e.bus, n); !strings.Contains(got, "intercept: chain=sjy target=10.100.100.99:443") {
+		t.Errorf("verbose 档要能看到探针（否则自检排查没线索）：%q", got)
+	}
+
+	// 真实应用流量照旧：normal 档必须可见
+	n = len(e.bus.Snapshot())
+	e.connInfo(false, "relay.done: chain=etyy target=172.30.4.217:443 up=1 B down=2 B")
+	if got := newLines(e.bus, n); !strings.Contains(got, "relay.done: chain=etyy") {
+		t.Errorf("应用流量的连接必须在 normal 档可见：%q", got)
+	}
+}

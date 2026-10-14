@@ -1509,10 +1509,26 @@ func (e *Engine) handleConn(c net.Conn) {
 			e.mu.Unlock()
 		}
 	}
-	e.bus.Info("relay.done: chain=%s%s target=%s:%d up=%s down=%s tc_ms=%d ms=%d", st.chain,
+	e.connInfo(st.self, "relay.done: chain=%s%s target=%s:%d up=%s down=%s tc_ms=%d ms=%d", st.chain,
 		connLogCtx(st.ruleNo, st.ruleName, st.procName, st.pid), dialDst, st.dport,
 		humanBytes(st.up.Load()), humanBytes(st.down.Load()),
 		dialMs, time.Since(st.start).Milliseconds())
+}
+
+// connInfo 连接类日志的分流：真实应用流量走 normal，**我们自己的探针走 verbose**。
+//
+// 为什么（2026-10-14 用户报“一启动就打印这么多日志”）：自检/共存检测会直接 dial 内网目标
+// （DialSelf，见 selfconn.go）—— 它们已经不在连接列表、不计入统计了，但日志还是逐条按 normal 打，
+// 于是每次开机都有一串 `proc=nethub.exe` 的“连接”，看日志的人会以为是应用在连。
+// 原则与“自己的探针不当应用流量”一致：那是仪器，不是业务（要看它们就切 verbose）。
+func (e *Engine) connInfo(self bool, format string, a ...any) {
+	if self {
+		if e.bus.Verbose() {
+			e.bus.Info(format, a...)
+		}
+		return
+	}
+	e.bus.Info(format, a...)
 }
 
 // copyAndClose 单向拷贝并在结束后关闭写端（半关闭，双向都能正常收尾）。
@@ -2982,12 +2998,12 @@ func (e *Engine) rewriteOutbound(h *divert.Handle, pkt []byte, addr *divert.Addr
 			if e.isFakeIP(dst) {
 				if n, ok := e.nameOf(dst); ok {
 					st.fakeName = n
-					e.bus.Info("intercept: chain=%s%s target=%s fake_ip=%s port=%d action=relay", chain, ctx, n, dst, dport)
+					e.connInfo(st.self, "intercept: chain=%s%s target=%s fake_ip=%s port=%d action=relay", chain, ctx, n, dst, dport)
 				} else {
-					e.bus.Info("intercept: chain=%s%s target=%s:%d action=relay fake_ip=unmapped", chain, ctx, dst, dport)
+					e.connInfo(st.self, "intercept: chain=%s%s target=%s:%d action=relay fake_ip=unmapped", chain, ctx, dst, dport)
 				}
 			} else {
-				e.bus.Info("intercept: chain=%s%s target=%s:%d action=relay", chain, ctx, dst, dport)
+				e.connInfo(st.self, "intercept: chain=%s%s target=%s:%d action=relay", chain, ctx, dst, dport)
 			}
 		}
 	} else if st := e.flow(sport); st != nil {
