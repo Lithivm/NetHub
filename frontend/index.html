@@ -37,8 +37,9 @@
        title="最近 60 秒的合计速率（每秒一格）：含走链路的流量，以及开了「直连流量统计」时的直连流量；我们自己的探针不算。&#10;那个开关一改，整段窗口立即按新口径重画（与连接列表里直连行立即消失同一口径）。&#10;纵轴按窗口内峰值自适应，最低以 64 KB/s 撑住 —— 免得空转时几 KB 的噪声被放大成“很忙”。&#10;上下行共用一根纵轴，所以上行小的时段那条线会贴着零轴，以右边数字为准。">
     <span class="traffic-label">流量</span>
     <canvas id="trafficCanvas" aria-label="实时流量曲线"></canvas>
-    <!-- 两个槽各占一个定宽（右对齐）：数字位数变化不会带动画布宽度（见 .traffic-rate 的注释） -->
-    <span class="traffic-rate" id="trafficRate"><span>↓ —</span><span>↑ —</span></span>
+    <!-- 读数**上下两行**（下 / 上），每行 =「箭头列 + 左对齐的数字列」
+         —— 数字位数变化（含归零成 —）时箭头不滑、数字起始位不动；并排会在两槽之间留一大片空 -->
+    <span class="traffic-rate" id="trafficRate"><span><i>↓</i><b>—</b></span><span><i>↑</i><b>—</b></span></span>
   </div>
   <div class="actions">
     <!-- 只读态（服务版在跑）时显示：点一下就把引擎从服务版手里抢回界面 -->

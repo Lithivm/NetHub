@@ -649,10 +649,10 @@ async function loadTraffic() {
     drawTraffic();
     const rate = document.getElementById('trafficRate');
     if (rate) {
-      // 两个槽各自定宽（.traffic-rate span）——文本长短变了布局也不动
-      // fmtRate(0) 给“—”：0 与“刚起来还没采到样”在这里是一回事
-      rate.innerHTML = '<span><b>↓ ' + fmtRate(trafficLast(v).down) + '</b></span>' +
-                       '<span>↑ ' + fmtRate(trafficLast(v).up) + '</span>';
+      // 槽内是「箭头列（定宽）+ 数字列（右对齐）」——箭头位置和数字右边缘都不随位数变
+      //（归零时 fmtRate 给“—”也不会把箭头拉过去）
+      rate.innerHTML = '<span><i>↓</i><b>' + fmtRate(trafficLast(v).down) + '</b></span>' +
+                       '<span><i>↑</i><b>' + fmtRate(trafficLast(v).up) + '</b></span>';
     }
   } catch (e) {
     /* 老桥/探针没这个方法：图留白就好，不报错（与 InitialTheme 同样处理） */

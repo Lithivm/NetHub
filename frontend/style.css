@@ -30,10 +30,11 @@
   /* 顶栏流量图的宽度上限。不铺满整条顶栏：右边那截要留给操作按钮，
      图的左边缘又必须紧跟着"累计/活跃"（同一类信息）—— 所以是定宽、不是 flex:1。 */
   --traffic-w: 500px;
-  /* 流量图右侧两个速率数字的槽宽（每个一个槽，定宽右对齐）。
-     不定宽的话数字位数一变（— / 8.8 KB/s / 166.0 KB/s）就会挤着画布一起
-     变宽变窄 —— 曲线和数字都在抖（2026-10-14 用户报的）。 */
-  --traffic-num-w: 76px;
+  /* 流量图右侧两个速率数字的槽宽（每个一个槽）。
+     槽内再分两列：固定的箭头列 + 右对齐的数字列 —— 不定宽的话数字位数一变（— / 8.8 KB/s），
+     不只是画布宽度在抖，**箭头自己也会跟着滑**（2026-10-14 用户连着报的两次）。 */
+  --traffic-num-w: 88px;
+  --traffic-arrow-w: 13px;
   /* --ease 是整条 transition 值（时长+曲线），只能整条用；
      需要自定义时长时必须用下面这条纯曲线，否则写成 `x .2s var(--ease)`
      会变成「200ms 时长 + 140ms 延迟」—— 动画看起来发僵，其实是慢半拍。 */
@@ -256,14 +257,20 @@ code, .mono { font-family: var(--font-mono); }
   min-width: 300px; max-width: var(--traffic-w);
 }
 .traffic-label { font-size: var(--fs-xs); color: var(--muted); white-space: nowrap; }
-/* 速率读数：两个数字各占一个定宽槽（右对齐）——画布宽度、数字位置都不会跟着位数变。 */
+/* 速率读数：**上下两行**（下、上），每行都是「箭头列（定宽）+ 数字列（左对齐）」。
+   为什么不是并排：两个定宽槽并排放会在箭头和下一个数字之间留出一大片空，很松散。
+   竖排后读数只占一个槽宽（多出来的宽度全给曲线），箭头/数字的起始位也仍然固定。 */
 .traffic-rate {
   flex: 0 0 auto;
-  display: inline-flex; align-items: baseline; gap: var(--s2);
+  display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
   font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--muted);
   white-space: nowrap;
 }
-.traffic-rate span { display: inline-block; width: var(--traffic-num-w); text-align: right; }
+.traffic-rate span { display: inline-flex; width: var(--traffic-num-w); }
+.traffic-rate i { flex: 0 0 auto; width: var(--traffic-arrow-w); font-style: normal; }
+/* 数字**左对齐**（紧接自己的箭头）：右对齐时每一位都会跟着位数左右跳，而且归零变“—”
+   会躺到槽的右端、离箭头很远。左对齐下起始位固定、只有末尾字符在变 —— 看着才稳。 */
+.traffic-rate b { flex: 1 1 auto; text-align: left; }
 /* 下行用主色（与曲线同色），上行用中性色 —— 曲线里上行也偏中性，两处一致，
    不拿警告色画数据（警告色在这套界面里有固定含义）。 */
 .traffic-rate b { color: var(--primary); font-weight: 600; }
