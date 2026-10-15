@@ -3,7 +3,6 @@ package webui
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -108,7 +107,10 @@ func (b *Backend) CheckUpdate() UpdateInfo {
 	}
 	latest, published, err := latestRelease()
 	if err != nil {
-		info.Note = "查不到最新版本（" + err.Error() + "）—— 内网可能连不上 github.com，可直接打开下载页看看。"
+		// 把"走没走代理"写进结论：现场最常见的失败就是"只有 Clash 的【系统代理】能出公网"，
+		// 一句"网络不通"没法让人知道下一步该点哪里（2026-10-16 用户报的）。
+		info.Note = fmt.Sprintf("查不到最新版本（%s）。更新请求走的是：%s —— 需要代理才能上外网时，"+
+			"请在 Clash 里打开「系统代理」后重试；也可以直接打开下载页手动取包。", err.Error(), proxyNote())
 		return info
 	}
 	info.Latest, info.Published = latest, published
@@ -121,45 +123,16 @@ func (b *Backend) CheckUpdate() UpdateInfo {
 	return info
 }
 
-// latestRelease 调 GitHub API 拿最新 Release 的标签与时间。
-// 为什么不用"看 Release 页面 HTML"：HTML 会变，API 稳定且能拿到 tag。
+// latestRelease 查最新版本号（检查更新用）：先走零配额的 302，失败再用 API 保底。
 func latestRelease() (tag, published string, err error) {
-	const api = "https://api.github.com/repos/Lithivm/NetHub/releases/latest"
-	req, err := http.NewRequest(http.MethodGet, api, nil)
-	if err != nil {
-		return "", "", err
+	if tag, err = latestTagViaRedirect(); err == nil {
+		return tag, "", nil // 302 这条路拿不到发布时间（界面不显示，不凑）
 	}
-	// GitHub 要求带 User-Agent，否则 403
-	req.Header.Set("User-Agent", "NetHub/"+Version)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	cl := &http.Client{Timeout: 10 * time.Second}
-	resp, err := cl.Do(req)
-	if err != nil {
-		return "", "", fmt.Errorf("网络不通")
+	rel, apiErr := latestReleaseByAPI()
+	if apiErr != nil {
+		return "", "", apiErr // 错误直接透出：外层会配上"走的是哪条路"
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return "", "", fmt.Errorf("读取失败")
-	}
-	var out struct {
-		TagName     string `json:"tag_name"`
-		PublishedAt string `json:"published_at"`
-		Draft       bool   `json:"draft"`
-	}
-	if err := json.Unmarshal(body, &out); err != nil {
-		return "", "", fmt.Errorf("响应看不懂")
-	}
-	if out.TagName == "" || out.Draft {
-		return "", "", fmt.Errorf("没有正式版本")
-	}
-	if len(out.PublishedAt) >= 10 {
-		out.PublishedAt = out.PublishedAt[:10]
-	}
-	return out.TagName, out.PublishedAt, nil
+	return rel.TagName, rel.PublishedAt, nil
 }
 
 // cmpVersion 比版本号：返回 a>b ? 1 : a<b ? -1 : 0。
@@ -328,7 +301,9 @@ func (b *Backend) DownloadAndUpdate() error {
 			updMu.Unlock()
 		})
 		if err != nil {
-			setUpdErr(err)
+			// 更新链路的失败文案必须带"这次走的是哪条路"：现场第一步要判断的就是
+			// "是我没配代理，还是代理那边出了问题"（2026-10-16 用户报的）。
+			setUpdErr(fmt.Errorf("%v（这次更新请求走的是：%s）", err, proxyNote()))
 			return
 		}
 		if v == "" {
@@ -374,10 +349,11 @@ func (b *Backend) RollbackUpdate() error {
 // ───────── GitHub 细节 ─────────
 
 type ghRelease struct {
-	TagName string    `json:"tag_name"`
-	HTMLURL string    `json:"html_url"`
-	Assets  []ghAsset `json:"assets"`
-	Draft   bool      `json:"draft"`
+	TagName     string    `json:"tag_name"`
+	HTMLURL     string    `json:"html_url"`
+	Assets      []ghAsset `json:"assets"`
+	Draft       bool      `json:"draft"`
+	PublishedAt string    `json:"published_at"` // 只有 API 那条路有（302/HTML 拿不到）
 }
 
 type ghAsset struct {
@@ -390,39 +366,8 @@ type ghAsset struct {
 }
 
 func latestReleaseFull() (ghRelease, error) {
-	const api = "https://api.github.com/repos/Lithivm/NetHub/releases/latest"
-	var rel ghRelease
-	req, err := http.NewRequest(http.MethodGet, api, nil)
-	if err != nil {
-		return rel, err
-	}
-	req.Header.Set("User-Agent", "NetHub/"+Version)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	cl := &http.Client{Timeout: 15 * time.Second}
-	resp, err := cl.Do(req)
-	if err != nil {
-		return rel, fmt.Errorf("连不上 github.com（客户内网可能不让出网；有 Clash 的话确认它在跑）")
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return rel, fmt.Errorf("GitHub 返回 HTTP %d", resp.StatusCode)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return rel, err
-	}
-	if err := json.Unmarshal(body, &rel); err != nil {
-		return rel, fmt.Errorf("看不懂 GitHub 的响应")
-	}
-	if rel.TagName == "" || rel.Draft {
-		return rel, fmt.Errorf("还没有正式发布的版本")
-	}
-	for i := range rel.Assets {
-		if d := rel.Assets[i].Digest; strings.HasPrefix(d, "sha256:") {
-			rel.Assets[i].SHA256 = strings.TrimPrefix(d, "sha256:")
-		}
-	}
-	return rel, nil
+	// 走哪条路、为什么这么排，见 release_fetch.go（零配额优先，API 只作保底）
+	return fetchLatestRelease()
 }
 
 // pickAsset 选更新包：优先 NetHub.zip，其次任意 zip。
@@ -447,10 +392,10 @@ func downloadWithProgress(url, dst string, progress func(stage, text string, pct
 		return err
 	}
 	req.Header.Set("User-Agent", "NetHub/"+Version)
-	cl := &http.Client{Timeout: 10 * time.Minute}
+	cl := updateClient(10 * time.Minute)
 	resp, err := cl.Do(req)
 	if err != nil {
-		return fmt.Errorf("下载失败：%w", err)
+		return fmt.Errorf("下载失败（这次走的是：%s）：%w", proxyNote(), err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {

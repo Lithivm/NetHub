@@ -144,6 +144,9 @@ type statusDoc struct {
 	Hosts       hostsDoc       `json:"hosts"`
 	Tuning      map[string]any `json:"tuning"`
 	Wildcards   []string       `json:"wildcardTargets"`
+	// UpdateProxy 一键更新的请求会走哪条网络路径（系统代理 / 直连）。
+	// 现场排查"更新按钮点了没反应"第一句就问这个：只读注册表，不发请求。
+	UpdateProxy string `json:"updateProxy"`
 	// Runtime 运行实例的自报（runtime.json）：不在跑就没有这个字段。
 	Runtime *runtimeDoc `json:"runtime,omitempty"`
 	Notes   []string    `json:"notes,omitempty"`
@@ -198,6 +201,7 @@ func cmdStatus(cfgPath string) int {
 		cfgPath = config.DefaultPath()
 	}
 	doc := statusDoc{Version: webui.Version, ConfigPath: cfgPath}
+	doc.UpdateProxy = webui.UpdateProxyNote()
 	doc.Service = serviceState()
 	doc.Tuning = map[string]any{}
 
