@@ -116,7 +116,7 @@ func main() {
 	if *doQuit {
 		if webui.RequestQuit() {
 			fmt.Println("已请求正在运行的 NetHub 退出（等服务真正停稳再启动下一个）")
-		} else if winsvc.State() == "RUNNING" {
+		} else if winsvc.State() == "running" {
 			fmt.Println("没有界面版在跑；Windows 服务正在运行，请用 nethub.exe -service-stop 或 net stop " + winsvc.Name)
 		} else {
 			fmt.Println("没有在运行的 NetHub")

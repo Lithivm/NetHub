@@ -12,6 +12,7 @@ package winsvc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -82,16 +83,11 @@ func (h *handler) Execute(args []string, r <-chan svc.ChangeRequest, changes cha
 
 // Installed 服务是否已安装。
 func Installed() bool {
-	m, err := mgr.Connect()
+	s, err := openSvcForQuery()
 	if err != nil {
 		return false
 	}
-	defer m.Disconnect()
-	s, err := m.OpenService(Name)
-	if err != nil {
-		return false
-	}
-	s.Close()
+	windows.CloseServiceHandle(s)
 	return true
 }
 
@@ -172,32 +168,48 @@ func Uninstall() error {
 
 // State 服务的当前状态（没装就是 "not installed"）。只读，不需要管理员。
 func State() string {
-	m, err := mgr.Connect()
+	s, err := openSvcForQuery()
 	if err != nil {
+		// 两种“打不开”必须分开说：没权限（unknown）不等于没装（not installed）。
+		// 混成一个值就是老毛病：告诉人“没装”，而服务其实在跑。
+		if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+			return "not installed"
+		}
 		return "unknown"
 	}
-	defer m.Disconnect()
-	s, err := m.OpenService(Name)
-	if err != nil {
-		return "not installed"
-	}
-	defer s.Close()
-	st, err := s.Query()
-	if err != nil {
+	defer windows.CloseServiceHandle(s)
+	var st windows.SERVICE_STATUS
+	if err := windows.QueryServiceStatus(s, &st); err != nil {
 		return "unknown"
 	}
-	switch st.State {
-	case svc.Running:
+	switch st.CurrentState {
+	case windows.SERVICE_RUNNING:
 		return "running"
-	case svc.Stopped:
+	case windows.SERVICE_STOPPED:
 		return "stopped"
-	case svc.StartPending:
+	case windows.SERVICE_START_PENDING:
 		return "starting"
-	case svc.StopPending:
+	case windows.SERVICE_STOP_PENDING:
 		return "stopping"
 	default:
 		return "other"
 	}
+}
+
+// openSvcForQuery 只为**查状态/判存在**打开服务，用最小权限。
+//
+// 为什么不用 svc/mgr：它 Connect/OpenService 请求的是 ALL_ACCESS，普通用户（非提权）
+// 一定被拒 —— 于是 -status 在最常见的「服务模式 + 普通用户」组合下一直报
+// “没装 / unknown”，而服务跑得好好的（2026-10-15 实测踩到：Get-Service 明明 Running）。
+// 服务默认安全描述符允许 Users 查询状态，所以 SC_MANAGER_CONNECT + SERVICE_QUERY_STATUS
+// 这一对在非提权下就能用。
+func openSvcForQuery() (windows.Handle, error) {
+	scm, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
+	if err != nil {
+		return 0, err
+	}
+	defer windows.CloseServiceHandle(scm)
+	return windows.OpenService(scm, windows.StringToUTF16Ptr(Name), windows.SERVICE_QUERY_STATUS)
 }
 
 // Start/Stop 供界面按钮用。
