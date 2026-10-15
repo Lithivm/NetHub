@@ -33,7 +33,7 @@ func (e *Engine) DumpState(reason string) {
 	// ① 锁内抄快照（未启动的引擎字段可能还没建，所以先看跑没跑，再取其它东西）
 	e.mu.RLock()
 	running := e.run
-	mainOn, dynOn := e.handle != nil, e.dynHandle != nil
+	mainOn, dynOn := len(e.handles) > 0, e.dynHandle != nil
 	dnsInjectOn, sockOn, reflectOn := e.injector != nil, e.sockH != nil, e.reflectH != nil
 	mainFilter, dynFilter := e.mainFilter, e.dynFilter
 	perRule := make(map[string]uint64, len(e.statPerRule))

@@ -447,14 +447,23 @@ type Engine struct {
 	rules atomic.Pointer[rules.Set]
 	cfg   *config.Config
 
-	mu     sync.RWMutex
-	handle *divert.Handle
-	// mainStop 主句柄的停止信号：热重载要换主句柄，靠它区分“我们在换”与“过滤器出错”。
-	// mainFilter 当前主过滤器原文：重载时比对，没变就不折腾句柄（省一次开/关）。
-	mainStop   chan struct{}
+	mu sync.RWMutex
+	// handles 主过滤器的**分片**句柄（N 份，见 buildMainFilters 的注释）。
+	//
+	// 为什么要 N 个而不是 1 个：实测（2026-10-15）单线程每包 44 µs，其中 43 µs 花在
+	// `h.Send()` 的内核往返上，而引擎**只吃 0.70 个核** —— 瓶颈是串行等待，不是算力。
+	// N 个句柄 + N 个循环把这份等待摊到多核上（每包只落进一个句柄，互不相交）。
+	handles []*divert.Handle
+	// mainStops 与 handles 一一对应：热重载 / 停止时靠它告诉对应循环
+	// “不是在出错，是我们在换 / 停”（否则会被当成过滤器失效去重建）。
+	mainStops []chan struct{}
+	// mainFilter 主过滤器**未分片**的原文：只用于「过滤器没变就不折腾句柄」的比较
+	// 与诊断显示（分片后每份都不同，逐份比对没有意义）。
 	mainFilter string
 	// mainRanges 主过滤器里的地址区间数（诊断页“接管状态”卡直显，不用重算）
 	mainRanges int
+	// shards 分片数（1 = 不分片，行为与改造前一致）。默认按核数自动算，见 defaultShards。
+	shards int
 	// dynHandle 第二只句柄：只装「通配域名当前覆盖到的 IP」。
 	// 通配域名没法主动解析，只能等观察到应用的 DNS 应答才知道 IP，
 	// 所以它必须可热替换（先开新的、再关旧的，中间不丢包）。
@@ -565,6 +574,8 @@ type Engine struct {
 
 	// loop 环路检测（A14）：与其它代理共存时发现自己打转
 	loop *loopGuard
+	// perf 性能实验探针（见 perf.go）：默认全关，包路径上只剩一次 bool 判断。
+	perf *perfProbe
 
 	// unrelayedNotified 上次因“包没送到 relay”弹应用内提示的时间（节流用）
 	unrelayedNotified time.Time
@@ -621,8 +632,33 @@ func New(bus *logbus.Bus, rs *rules.Set, cfg *config.Config) *Engine {
 		quicNotices: map[string]time.Time{},
 	}
 	e.rules.Store(rs)
+	// 性能探针先起来：它的 perf.cfg 里可以强制分片数（shards=N），
+	// 改造成败的对比实验靠这一项把“改造后”退回到“改造前”（N=1）。
+	e.perf = newPerfProbe(bus)
+	e.shards = e.perf.effectiveShards(defaultShards())
 	return e
 }
+
+// maxShards 分片数上限（通过 perf.cfg 打开时才用得着）。
+//
+// 实测瓶颈是“每包一次内核往返”的串行等待，理论上限就是核数；而现场机器多是 2~4 核，
+// 再多分片只会抢 CPU。
+const maxShards = 4
+
+// defaultShards 默认分片数：**1（不分片，行为与改造前完全一致）**。
+//
+// 为什么做完又默认关掉（2026-10-15）：
+//
+//	· 分片只对“同时有多条**大流量**连接”有用（台架实测 8 连接 × 16 MB：15.5 → 27 MB/s，+76%）
+//	· 而现场的业务连接是 **1.1 KB 级**（日志里 6178 条 `down=1.1 KB`，见 KB 的基准文档），
+//	  吞吐从来不是瓶颈 —— 一次请求的耗时由**上游 RTT**（几十 ms）主导；
+//	  多路大流量下载在内网场景几乎不存在
+//	· 而代价是真实的：每包成本 45 → 60~90 µs（4 片时翻倍），因为 WinDivert 对
+//	  **每个句柄都要评估一遍 filter**；单连接还会略慢 5~8%
+//
+// 所以分片留成**可选开关**（perf.cfg 写 `shards=2..4`）而不是默认行为。
+// 实现保留、有测试、默认关闭即零风险；将来真有批量传输场景，改一个数就能开。
+func defaultShards() int { return 1 }
 
 // ruleSet 当前生效的规则集（永不为 nil，New 已装入；ReloadRules 只换非 nil 的）。
 func (e *Engine) ruleSet() *rules.Set { return e.rules.Load() }
@@ -753,7 +789,7 @@ func (e *Engine) Start() error {
 	// 于是通配域名的第二只句柄永远建不起来（静默失效）。
 	e.dynHandle, e.dynStop, e.dynFilter, e.dynAt = nil, nil, "", time.Time{}
 	// 主过滤器同理：句柄与过滤器原文一起重置，否则重启后主句柄的字段指向旧句柄。
-	e.mainStop, e.mainFilter = nil, ""
+	e.mainStops, e.mainFilter = nil, ""
 	e.mu.Unlock()
 	e.sniffMu.Lock()
 	e.sniffClosing, e.sniffHandles = false, nil
@@ -806,8 +842,8 @@ func (e *Engine) Start() error {
 	}
 
 	// 2) 用规则区间拼内核过滤器（直连规则的目标不进过滤器，见 rules.FilterRanges）
-	filter, nrange := e.buildMainFilter(e.ruleSet(), port)
-	if filter == "" {
+	base, shards, nrange := e.buildMainFilters(e.ruleSet(), port, e.shards)
+	if len(shards) == 0 {
 		ln.Close()
 		return fmt.Errorf("没有需要拦截的规则（只填了直连规则时无事可做）")
 	}
@@ -821,18 +857,27 @@ func (e *Engine) Start() error {
 	// 普通模式下需要知道的是“内核收了哪些网段/多少个区间/包不包 QUIC”，
 	// 排查“某个包到没到我们手上”时才需要完整条件 —— 所以拆两层：
 	// normal 给数据，debug 给原文。
-	e.bus.Info("filter.main: rules=%d ranges=%d tcp_clause=1 udp_quic=%v relay_port=%d bytes=%d",
-		len(e.ruleSet().List()), nrange, e.cfg.QuicBlockEnabled(), port, len(filter))
+	e.bus.Info("filter.main: rules=%d ranges=%d tcp_clause=%d udp_quic=%v relay_port=%d bytes=%d",
+		len(e.ruleSet().List()), nrange, len(shards), e.cfg.QuicBlockEnabled(), port, len(base))
 
-	// 3) 打开 WinDivert（含首次安装驱动的重试）
-	h, err := openDivert(e.bus, filter)
-	if err != nil {
-		ln.Close()
-		return fmt.Errorf("WinDivert 打开失败: %w", err)
+	// 3) 打开 WinDivert（含首次安装驱动的重试）：**每片一个句柄** ——
+	// 这是把“每包一次 Send 的串行等待”摊到多核上的地方，所以句柄数 == 分片数。
+	handles := make([]*divert.Handle, 0, len(shards))
+	stops := make([]chan struct{}, 0, len(shards))
+	for i, f := range shards {
+		h, herr := openDivert(e.bus, f)
+		if herr != nil {
+			for _, hh := range handles {
+				hh.Close()
+			}
+			ln.Close()
+			return fmt.Errorf("WinDivert 打开失败（分片 %d/%d）: %w", i+1, len(shards), herr)
+		}
+		handles = append(handles, h)
+		stops = append(stops, make(chan struct{}))
 	}
 	e.mu.Lock()
-	stop := make(chan struct{})
-	e.ln, e.relay, e.handle, e.mainStop, e.mainFilter, e.mainRanges, e.run = ln, relay, h, stop, filter, nrange, true
+	e.ln, e.relay, e.handles, e.mainStops, e.mainFilter, e.mainRanges, e.run = ln, relay, handles, stops, base, nrange, true
 	e.startedAt = time.Now()
 	e.mu.Unlock()
 
@@ -845,7 +890,20 @@ func (e *Engine) Start() error {
 	}
 
 	e.startLoop("acceptLoop", e.acceptLoop)
-	e.startLoop("packetLoop", func() { e.packetLoop(h, stop, loopMain) })
+	// 每片一个包循环：它们只看自己那一段本地端口，互不相交（故不需要跨线程共拿连接表锁）。
+	for i := range handles {
+		hh, ss := handles[i], stops[i]
+		e.startLoop(fmt.Sprintf("packetLoop%d", i), func() { e.packetLoop(hh, ss, loopMain, i) })
+	}
+	if len(handles) > 1 {
+		// 分片是**非默认**状态（默认单句柄）：开着的时候值得在 normal 档说一声 ——
+		// 否则现场看到“多核都吃满”会以为是别的东西。
+		e.bus.Info("engine.shards: %d 个包循环（每片一个句柄；改回单线程：perf.cfg 写 shards=1）", len(handles))
+	}
+	// 性能探针（perf.cfg 打开时才真的做事）：分层读数的输出循环 + 只读嗅探句柄。
+	// 放这里是因为嗅探要**复用主过滤器** —— 它必须和主句柄看同一批包，否则那一组数不对应。
+	e.perf.ticker(e.done)
+	e.startSniffers(base)
 	e.startLoop("janitor", e.janitor)
 	e.startLoop("relayWatch", e.relayWatch)
 	e.startLoop("nameLoop", e.nameLoop)
@@ -953,8 +1011,8 @@ func (e *Engine) Stop() {
 		return // 已经停过了
 	}
 	e.stopped = true
-	h, ln, run := e.handle, e.ln, e.run
-	mainStop := e.mainStop
+	handles, ln, run := e.handles, e.ln, e.run
+	mainStops := e.mainStops
 	dyn, dynStop := e.dynHandle, e.dynStop
 	inj := e.injector
 	sockH, reflectH := e.sockH, e.reflectH
@@ -964,8 +1022,8 @@ func (e *Engine) Stop() {
 	for c := range e.relayConns {
 		running = append(running, c)
 	}
-	e.handle, e.ln, e.run = nil, nil, false
-	e.mainStop = nil
+	e.handles, e.ln, e.run = nil, nil, false
+	e.mainStops = nil
 	e.dynHandle, e.dynStop = nil, nil
 	e.injector = nil
 	e.mu.Unlock()
@@ -978,11 +1036,15 @@ func (e *Engine) Stop() {
 	if done != nil {
 		close(done)
 	}
-	if mainStop != nil {
-		close(mainStop) // 同上：让主句柄的循环知道“不是出错，是我们在停”
+	for _, st := range mainStops {
+		if st != nil {
+			close(st) // 同上：让各片的循环知道“不是出错，是我们在停”
+		}
 	}
-	if h != nil {
-		h.Close() // 让 packetLoop 的 Recv 立刻返回错误
+	for _, h := range handles {
+		if h != nil {
+			h.Close() // 让 packetLoop 的 Recv 立刻返回错误
+		}
 	}
 	if inj != nil {
 		inj.Close()
@@ -1052,11 +1114,11 @@ func (e *Engine) ReloadRules(ns *rules.Set) error {
 		return ErrNotRunning
 	}
 	// 用当前**真实** relay 端口算新过滤器（配置里可能是 0=自动分配）
-	newFilter, nrange := e.buildMainFilter(ns, portOf(e.relay))
-	changed := newFilter != "" && newFilter != e.mainFilter
+	newBase, newShards, nrange := e.buildMainFilters(ns, portOf(e.relay), e.shards)
+	changed := len(newShards) > 0 && newBase != e.mainFilter
 	e.mu.Unlock()
 
-	if newFilter == "" {
+	if len(newShards) == 0 {
 		// 新规则一条都不需要拦（全改成直连/全停用）：规则换掉，旧句柄留着。
 		// 旧句柄上还会来包，但已匹配不到任何规则 → packetLoop 原样放回，不影响流量。
 		e.rules.Store(ns)
@@ -1069,34 +1131,54 @@ func (e *Engine) ReloadRules(ns *rules.Set) error {
 		return nil
 	}
 
-	// 先开新句柄：开不了就当这次重载没发生（绝不半生效 —— 规则换了但包拦不到
+	// 先开齐新句柄：开不了就当这次重载没发生（绝不半生效 —— 规则换了但包拦不到
 	// 是最坏的结果：新网段的流量会静默直连出去）。
-	nh, err := openDivert(e.bus, newFilter)
-	if err != nil {
-		return fmt.Errorf("新过滤器打开失败（规则未生效，仍在用旧规则）: %w", err)
+	// 能开齐再换，也是“先接后判”的同一套做法：中间不丢包。
+	nhs := make([]*divert.Handle, 0, len(newShards))
+	for i, f := range newShards {
+		nh, err := openDivert(e.bus, f)
+		if err != nil {
+			for _, hh := range nhs {
+				hh.Close()
+			}
+			return fmt.Errorf("新过滤器打开失败（分片 %d/%d，规则未生效，仍在用旧规则）: %w", i+1, len(newShards), err)
+		}
+		nhs = append(nhs, nh)
 	}
 
 	e.mu.Lock()
 	if !e.run { // 刚好在这中间被停了
 		e.mu.Unlock()
-		nh.Close()
+		for _, hh := range nhs {
+			hh.Close()
+		}
 		return ErrNotRunning
 	}
-	oldH, oldStop := e.handle, e.mainStop
-	stop := make(chan struct{})
+	oldHs, oldStops := e.handles, e.mainStops
+	stops := make([]chan struct{}, len(nhs))
+	for i := range stops {
+		stops[i] = make(chan struct{})
+	}
 	e.rules.Store(ns)
-	e.handle, e.mainStop, e.mainFilter, e.mainRanges = nh, stop, newFilter, nrange
-	e.wg.Add(1) // 在锁内 Add：Stop 要先拿 startMu，所以不会与 wg.Wait() 并发
+	e.handles, e.mainStops, e.mainFilter, e.mainRanges = nhs, stops, newBase, nrange
+	e.wg.Add(len(nhs)) // 在锁内 Add：Stop 要先拿 startMu，所以不会与 wg.Wait() 并发
 	e.mu.Unlock()
 
-	go e.guard("packetLoop", func() { e.packetLoop(nh, stop, loopMain) })
-	if oldStop != nil {
-		close(oldStop)
+	for i := range nhs {
+		hh, ss := nhs[i], stops[i]
+		go e.guard(fmt.Sprintf("packetLoop%d", i), func() { e.packetLoop(hh, ss, loopMain, i) })
 	}
-	if oldH != nil {
-		oldH.Close()
+	for _, st := range oldStops {
+		if st != nil {
+			close(st)
+		}
 	}
-	e.bus.Info("rules.reload: rules=%d ranges=%d filter.changed=true", rulesN, nrange)
+	for _, h := range oldHs {
+		if h != nil {
+			h.Close()
+		}
+	}
+	e.bus.Info("rules.reload: rules=%d ranges=%d filter.changed=true shards=%d", rulesN, nrange, len(nhs))
 	return nil
 }
 
@@ -1596,7 +1678,7 @@ func copyAndClose(dst, src net.Conn, counter, total *atomic.Uint64) {
 //
 // 退避 1s/2s/5s/10s/30s（共 ~48 秒）；期间一旦收到停止信号就立即退出。
 // 新句柄先建好、再把旧句柄关掉（防止关完到重建成功这段空窗期里包没人接）。
-func (e *Engine) recoverHandle(kind loopKind, stop chan struct{}) (*divert.Handle, error) {
+func (e *Engine) recoverHandle(kind loopKind, stop chan struct{}, shard int) (*divert.Handle, error) {
 	backoff := []time.Duration{time.Second, 2 * time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second}
 	var lastErr error
 	for i, wait := range backoff {
@@ -1612,7 +1694,7 @@ func (e *Engine) recoverHandle(kind loopKind, stop chan struct{}) (*divert.Handl
 			case <-time.After(wait):
 			}
 		}
-		filter, ferr := e.handleFilter(kind)
+		filter, ferr := e.handleFilter(kind, shard)
 		if ferr != nil {
 			return nil, ferr // 过滤器都不在了（停止过程中）→ 不必再试
 		}
@@ -1633,7 +1715,15 @@ func (e *Engine) recoverHandle(kind loopKind, stop chan struct{}) (*divert.Handl
 			}
 			e.dynHandle, e.dynFilter = nh, filter
 		} else {
-			old, e.handle = e.handle, nh
+			// 只换坏的那一片：其它分片的句柄不动（它们各自在自己的循环里跑）。
+			// 下标越界 = 这中间热重载把分片换过了 → 直接放弃这只（外面会重新读 e.handles）。
+			if shard < 0 || shard >= len(e.handles) {
+				nh.Close()
+				e.mu.Unlock()
+				return nil, fmt.Errorf("分片 %d 已不在当前句柄表里（可能刚热重载过）", shard)
+			}
+			old = e.handles[shard]
+			e.handles[shard] = nh
 		}
 		e.mu.Unlock()
 		if old != nil {
@@ -1646,8 +1736,9 @@ func (e *Engine) recoverHandle(kind loopKind, stop chan struct{}) (*divert.Handl
 	return nil, lastErr
 }
 
-// handleFilter 重建句柄时用哪份过滤器：主句柄按当前规则集重算，动态句柄用记着的那份。
-func (e *Engine) handleFilter(kind loopKind) (string, error) {
+// handleFilter 重建句柄时用哪份过滤器：主句柄按当前规则集重算（取第 shard 片），
+// 动态句柄用记着的那份。
+func (e *Engine) handleFilter(kind loopKind, shard int) (string, error) {
 	if kind == loopDyn {
 		e.mu.RLock()
 		f := e.dynFilter
@@ -1657,11 +1748,14 @@ func (e *Engine) handleFilter(kind loopKind) (string, error) {
 		}
 		return f, nil
 	}
-	filter, _ := e.buildMainFilter(e.ruleSet(), portOf(e.RelayAddr()))
-	if filter == "" {
+	_, shards, _ := e.buildMainFilters(e.ruleSet(), portOf(e.RelayAddr()), e.shards)
+	if len(shards) == 0 {
 		return "", fmt.Errorf("主过滤器为空（规则集为空？）")
 	}
-	return filter, nil
+	if shard < 0 || shard >= len(shards) {
+		return "", fmt.Errorf("分片索引 %d 超范围（共 %d 片）", shard, len(shards))
+	}
+	return shards[shard], nil
 }
 
 // loopKind 说明这只句柄是谁的 —— 决定 Recv 出错时怎么处理（这两类差别很大，
@@ -1673,7 +1767,8 @@ const (
 	loopDyn                  // 动态过滤器（通配域名）：出错只是这部分不再接管
 )
 
-func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}, kind loopKind) {
+// shard 本循环负责的分片号（loopDyn 传 -1）：句柄出错重建时要按它只换自己那一片。
+func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}, kind loopKind, shard int) {
 	defer e.wg.Done()
 
 	buf := make([]byte, divert.MTUMax)
@@ -1682,7 +1777,14 @@ func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}, kind loopKind)
 	relayPort := portOf(e.RelayAddr())
 
 	for {
+		var pt perfTimes
+		if e.perf.on {
+			pt.enter = time.Now()
+		}
 		n, err := h.Recv(buf, addr)
+		if e.perf.on {
+			pt.recv = time.Now()
+		}
 		if err != nil {
 			select {
 			case <-e.done:
@@ -1699,7 +1801,7 @@ func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}, kind loopKind)
 				e.mu.Lock()
 				e.dynHandle, e.dynStop, e.dynFilter = nil, nil, ""
 				e.mu.Unlock()
-				if nh, rerr := e.recoverHandle(kind, stop); rerr == nil {
+				if nh, rerr := e.recoverHandle(kind, stop, shard); rerr == nil {
 					h = nh
 					continue
 				}
@@ -1711,7 +1813,7 @@ func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}, kind loopKind)
 			// = 全部不通），而进程还活着、界面还是绿的，只有人工重启才能恢复。
 			// 实测触发过：驱动被卸、被安全软件拦、句柄失效。
 			// 所以按退避重建；连续多次不行才判“已中断”。
-			nh, rerr := e.recoverHandle(kind, stop)
+			nh, rerr := e.recoverHandle(kind, stop, shard)
 			if rerr == nil {
 				h = nh
 				continue
@@ -1733,15 +1835,20 @@ func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}, kind loopKind)
 		}
 
 		src, dst, ihl, proto, ok := parseIPv4(pkt)
+		if e.perf.on {
+			pt.parsed = time.Now()
+		}
 		// QUIC（UDP 443）：这条包能到我们手上，说明它的目标落在“该走隧道”的网段里
 		// （过滤器只装了那些范围的 UDP 443，直连目标的 QUIC 根本不经过我们）。
 		// UDP 走不了隧道 —— 以前是静默直连漏出，现在丢掉并记一行（回 ICMP 是尽力而为）。
 		if ok && proto == 17 {
 			e.blockQUIC(h, pkt, addr, src, dst, ihl)
+			e.perf.record(&pt, n, pkOther, shard)
 			continue
 		}
 		if !ok || proto != 6 || len(pkt) < ihl+20 {
 			_, _ = h.Send(pkt, addr)
+			e.perf.record(&pt, n, pkOther, shard)
 			continue
 		}
 		t := ihl
@@ -1753,7 +1860,14 @@ func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}, kind loopKind)
 		// （应用不可能正好用着 relay 占着的那个端口）。先判它，
 		// 否则“只按进程”的规则会把回来的包也当出站命中。
 		if sport == relayPort {
+			if e.perf.on {
+				pt.decided = time.Now() // 入方向没有判定面，这一段直接进改写+注入
+			}
 			e.rewriteInbound(h, pkt, addr, t, dport)
+			if e.perf.on {
+				pt.sent = time.Now()
+			}
+			e.perf.record(&pt, n, pkIn, shard)
 			continue
 		}
 
@@ -1780,12 +1894,21 @@ func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}, kind loopKind)
 				name = n
 			}
 		}
-		if chain, act, ruleNo, ruleName, hit := e.ruleSet().MatchNameRule(name, dst, dport, procName); hit {
+		chain, act, ruleNo, ruleName, hit := e.ruleSet().MatchNameRule(name, dst, dport, procName)
+		if e.perf.on {
+			pt.decided = time.Now()
+		}
+		if hit {
 			switch act {
 			case rules.ActionDirect, rules.ActionBlock:
 				e.passThrough(h, pkt, addr, t, src, dst, sport, dport, flags, act, ruleNo, ruleName, procName, procPID, false)
+				e.perf.record(&pt, n, pkOther, shard)
 			default:
 				e.rewriteOutbound(h, pkt, addr, t, src, dst, sport, dport, flags, chain, relayIP, relayPort, ruleNo, ruleName, procName, procPID)
+				if e.perf.on {
+					pt.sent = time.Now()
+				}
+				e.perf.record(&pt, n, pkOut, shard)
 			}
 			continue
 		}
@@ -1808,6 +1931,7 @@ func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}, kind loopKind)
 		if _, err := h.Send(pkt, addr); err != nil {
 			e.bus.Throttle("inject.fail", time.Minute, "注入失败: %v（1 分钟内的重复不再逐条记）", err)
 		}
+		e.perf.record(&pt, n, pkOther, shard)
 	}
 }
 
@@ -2143,7 +2267,7 @@ func (e *Engine) rebuildDynFilter() {
 	e.wg.Add(1)
 	e.mu.Unlock()
 
-	go e.guard("dynPacketLoop", func() { e.packetLoop(nh, stop, loopDyn) })
+	go e.guard("dynPacketLoop", func() { e.packetLoop(nh, stop, loopDyn, -1) })
 	if oldH != nil {
 		if oldStop != nil {
 			close(oldStop)
@@ -3415,7 +3539,32 @@ func (e *Engine) checkUnrelayed() {
 // 抽出来是为了让**启动**与**热重载**走同一条装配路径 —— 两处各写一遍必然漂移
 // （最典型的漂移就是漏掉假 IP 段，表现为“接管之后应用连不上假 IP”）。
 // 返回 (过滤器原文, 区间数)；返回空串表示“没有需要拦截的规则”（调用方决定怎么报）。
+// buildMainFilter 只要**未分片**的原文（诊断 / 老测试用）。
+// 真实启动走的是 buildMainFilters（每片一份）。
 func (e *Engine) buildMainFilter(s *rules.Set, relayPort uint16) (string, int) {
+	base, _, n := e.buildMainFilters(s, relayPort, 1)
+	return base, n
+}
+
+// buildMainFilters 生成本过滤器：**未分片**的原文（比对 / 诊断用）+ N 份互不相交的分片。
+//
+// 为什么要分片（2026-10-15 实测结论）：单线程每包 44 µs，其中 43 µs 是 `h.Send()` 的
+// 内核往返，而引擎**只吃 0.70 个核** —— 瓶颈是串行等待。N 个句柄 + N 个循环把这份
+// 等待摊到多核上（每包只落进一个句柄）。
+//
+// 分片键是**客户端本地端口**（同一条连接的出 / 入方向都用它）：
+//
+//	· 出方向（应用 → 目标）：`tcp.SrcPort` = 应用端口
+//	· 入方向（relay → 应用）：`tcp.SrcPort` = relay 端口，但 `tcp.DstPort` = 应用端口
+//
+// 这样同一条连接的两个方向**必然落在同一片**上 —— 否则连接状态就得跳线程共享。
+//
+// 踩过的坑：WinDivert 的 filter 语言**不支持 `%` 取模**（写上去句柄直接打不开），
+// 分片只能写区间比较。
+func (e *Engine) buildMainFilters(s *rules.Set, relayPort uint16, n int) (string, []string, int) {
+	if n < 1 {
+		n = 1
+	}
 	rs := s.FilterRanges(e.cfg.CountDirectEnabled())
 	var fake *rules.Range
 	if e.fake != nil {
@@ -3428,26 +3577,91 @@ func (e *Engine) buildMainFilter(s *rules.Set, relayPort uint16) (string, int) {
 		}
 	}
 	if len(rs) == 0 {
-		return "", 0
+		return "", nil, 0
 	}
-	filter := buildFilter(rs, relayPort)
+	base := buildFilter(rs, relayPort)
 
 	// UDP 侧（QUIC 阻断）：只拿“走链 / 阻断”的区间 ——
 	// **直连目标不进来**，它们的 QUIC 我们一个包也不该碰；
 	// 勾了“不拦 QUIC”（allow_quic）的规则同样不进来（见 rules.QUICFilterRanges）。
 	// 假 IP 段要带上：应用拿着假 IP 去连 QUIC，那边根本没人在听，
 	// 回个 ICMP 让它回落 TCP（真 IP 由 TCP 那条路换回来）。
+	quicClause := ""
 	if e.cfg.QuicBlockEnabled() {
 		urs := rules.RangesForPort(s.QUICFilterRanges(), quicPort)
 		if fake != nil {
 			urs = append(urs, *fake)
 		}
 		if len(urs) > 0 {
-			filter += fmt.Sprintf(" or (outbound and udp and udp.DstPort == %d and (%s))",
-				quicPort, rangeClause(urs))
+			quicClause = rangeClause(urs)
+			base += fmt.Sprintf(" or (outbound and udp and udp.DstPort == %d and (%s))", quicPort, quicClause)
 		}
 	}
-	return filter, len(rs)
+
+	shards := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		lo, hi := shardRange(i, n)
+		f := buildFilterShard(rs, relayPort, lo, hi)
+		if quicClause != "" {
+			// UDP 没有“连接”，按源端口分片就够（同一个应用的 QUIC 包落同一片）。
+			f += fmt.Sprintf(" or (outbound and udp and udp.DstPort == %d and (%s) and udp.SrcPort >= %d and udp.SrcPort <= %d)",
+				quicPort, quicClause, lo, hi)
+		}
+		shards = append(shards, f)
+	}
+	// 把分片区间写进日志（debug 档）：现场若发现“只有一片在忙”，第一眼看这里
+	// ——动态端口范围被改过的机器上，分片会偏。
+	e.bus.Debug("filter.shards: n=%d %s", n, shardSpanText(n))
+	return base, shards, len(rs)
+}
+
+// shardSpanText 列出各片覆盖的本地端口区间（日志/诊断用）。
+func shardSpanText(n int) string {
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		lo, hi := shardRange(i, n)
+		if i > 0 {
+			b.WriteString(" ")
+		}
+		fmt.Fprintf(&b, "[%d:%d..%d]", i, lo, hi)
+	}
+	return b.String()
+}
+
+// dynPortLo 客户端临时端口的起点（Windows 7+ 默认 49152，共 16384 个）。
+// 分片必须对齐它，见 shardRange。
+const dynPortLo = 49152
+
+// shardRange 第 i 片（共 n 片）覆盖的本地端口区间。
+//
+// ⚠ **不能对 0..65535 平均分**：Windows 客户端的临时端口几乎全在 49152-65535，
+// 平均分四段的话四条连接会**全落在最后一段**（49152-65535），其余三片空转 ——
+// 分片等于没分，而现象很像“多线程改造根本没效果”。
+//
+// 做法：把动态范围 N 等分，**第 0 片额外把 0..49151 也包进来**（那是显式固定
+// 本地端口的应用，量极小）。区间连续、比较运算即可表达，且 100% 覆盖 0..65535
+// （分片漏一个端口 = 那个端口的包没人收 = 静默漏出，绝不能出现）。
+func shardRange(i, n int) (int, int) {
+	if n <= 1 {
+		return 0, 65535
+	}
+	span := (65536 - dynPortLo) / n
+	lo := dynPortLo + i*span
+	hi := lo + span - 1
+	if i == 0 {
+		lo = 0 // 第 0 片从 0 起：把“非动态端口”那一段也收进来
+	}
+	if i == n-1 {
+		hi = 65535
+	}
+	return lo, hi
+}
+
+// buildFilterShard 单片过滤器：TCP 两个方向各带一条本地端口区间条件。
+func buildFilterShard(rs []rules.Range, relayPort uint16, lo, hi int) string {
+	return fmt.Sprintf("(outbound and tcp and (%s) and tcp.SrcPort >= %d and tcp.SrcPort <= %d) or "+
+		"(outbound and tcp and tcp.SrcPort == %d and tcp.DstPort >= %d and tcp.DstPort <= %d)",
+		rangeClause(rs), lo, hi, relayPort, lo, hi)
 }
 
 func buildFilter(rs []rules.Range, relayPort uint16) string {

@@ -112,7 +112,7 @@ type ChainSummary struct {
 func (e *Engine) RuntimeStatus() RuntimeStatus {
 	e.mu.RLock()
 	running := e.run
-	mainOn, dynOn := e.handle != nil, e.dynHandle != nil
+	mainOn, dynOn := len(e.handles) > 0, e.dynHandle != nil
 	injectOn, sockOn, reflectOn := e.injector != nil, e.sockH != nil, e.reflectH != nil
 	mainFilter, mainRanges := e.mainFilter, e.mainRanges
 	started := e.startedAt
