@@ -1,7 +1,7 @@
 ---
 version: 2.0
 name: NetHub-design
-description: NetHub 内网隧道代理的设计系统。明暗两套:浅色=中性(白底+深蓝主色#1e3a8a,产品感高对比),深色=暖黑画布+提亮蓝主色。载体是 Wails v2 + WebView2 + 手写 HTML/CSS/JS,故圆角/阴影/字体栈/动画全部原生支持。token 与 frontend/style.css 保持同步,style.css 是唯一事实来源,本文件为阅读型规范。
+description: NetHub 内网隧道代理的设计系统。主题三档:跟随系统(默认,读 Windows 的深/浅色设置)\浅色=中性(白底+深蓝主色#1e3a8a,产品感高对比),深色=暖黑画布+提亮蓝主色。载体是 Wails v2 + WebView2 + 手写 HTML/CSS/JS,故圆角/阴影/字体栈/动画全部原生支持。token 与 frontend/style.css 保持同步,style.css 是唯一事实来源,本文件为阅读型规范。
 source: v1.1 移植自 另一个内部项目的 DESIGN.md；v2.0 随界面栈换成 Web 而重写载体章节
 ---
 

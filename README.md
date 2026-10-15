@@ -28,7 +28,9 @@
   旧 gost 的 `.bat` 可以在界面里直接导入（只取其中的上游地址）
 - **口令是明文**（和 gost 脚本一样）—— `config.yaml` 里直接写账号口令，不加密；
   发配置给别人看用「导出配置（抹掉口令）」。**不要把 config.yaml 提交进 git 或发到群里**
-- **界面**（Wails + WebView2）—— 实时日志、链路自检、与 Clash 共存检测、深/浅主题、托盘常驻
+- **界面**（Wails + WebView2）—— 实时日志、链路自检、与 Clash 共存检测、**跟随系统**的深/浅主题（可手动锁定）、托盘常驻
+- **该出声时出声** —— 「内网域名可能被别的代理接管」这类**不看界面就无从得知**的风险，
+  会发一条 Windows 系统通知（**只在 GUI 形态有效**：服务形态跑在 Session 0，通知到不了用户桌面）
 - **不抢设置** —— 不改系统代理、不动路由表，和 Clash / v2rayN 这类工具共存
 - **改完不用重启** —— 规则 / 链路 / 上游/ 拨号参数保存即生效（不断已有连接）；
   CLI 用 `nethub.exe -apply` 改完能等到“运行实例真的吃进去了”才返回
@@ -69,12 +71,23 @@ nethub.exe -service-install      # 装成 Windows 服务（开机即启、无人
 nethub.exe -service-uninstall    # 卸载服务
 nethub.exe -service-state        # 打印服务状态
 nethub.exe -quit                 # 让正在运行的实例优雅退出
+nethub.exe -autostart            # 装成计划任务开机自启（GUI 形态用，登录后延迟启动）
 nethub.exe -clash-check          # 只检测系统代理会不会把内网送进代理
 nethub.exe -test-upstream        # 直接实测上游链路（不经 gost）
 nethub.exe -import-bats <目录>    # 从 gost 的 .bat 目录导入链路配置
 nethub.exe -rollback             # 回滚到上一版本（一键更新出问题时用）
 nethub.exe -version              # 打印版本号
 ```
+
+> **一种形态只装一种自启，别混装**（2026-10-15 现场踩到）：
+>
+> - **有人在用的机器** → **GUI 形态**：双击 `nethub.exe` + `-autostart`（计划任务，**登录后**延迟启动，
+>   有托盘、有系统通知）。登录后延迟默认 20 秒，改成别的值在界面「设置」里（`autostart_delay`）。
+> - **服务器 / 无人登录** → **服务形态**：`-service-install`（开机即启、不看登录；**没有**托盘和系统通知）。
+>
+> 两个都装在同一台机器上的后果：服务在**开机**时先拿到引擎，登录后才起来的计划任务界面版
+> 只能当「只读失败者」——**没托盘、没通知、还会刷一串权限报错**（看着像 bug，其实是装重复了）。
+> 纠正：桌面机装错的 → `-service-uninstall` 再 `-autostart`；服务器装错的 → 去掉计划任务。
 
 改动配置的标准流程（人、脚本、agent 都一样）：
 
