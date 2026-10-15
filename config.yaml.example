@@ -67,7 +67,7 @@ patrol:
   interval: "off"           # 业务目标巡检，**默认关闭**。需要时写 5m / 30s；只探“最近真被访问过”的目标
 
 ui:
-  theme: light              # light | dark
+  theme: system             # system | light | dark（默认 system = 跟随 Windows 的深/浅色设置）
   # 日志档位：normal（默认）| verbose | debug —— 运行日志页右上的滑块改的就是它。
   # 三档的语义照抄 Proxifier：
   #   normal  = 连接开/关、启停、状态翻转、错误（现场一眼能读完）

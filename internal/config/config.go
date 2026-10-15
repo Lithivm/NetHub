@@ -302,7 +302,7 @@ type HostsCfg struct {
 
 // UICfg 界面相关设置。
 type UICfg struct {
-	Theme string `yaml:"theme"` // light | dark
+	Theme string `yaml:"theme"` // system | light | dark
 
 	// LogLevel 日志档位：normal（默认）| verbose | debug。
 	//
@@ -371,7 +371,7 @@ func Default() *Config {
 		// 两者都在设置里一键可开，默认值不替用户做主。
 		Patrol: Patrol{Interval: "off"},
 		Hosts:  HostsCfg{Manage: false},
-		UI:     UICfg{Theme: "dark"}, // 默认深色：这程序多数时间在盯日志/连接表，深色看久了不刺眼
+		UI:     UICfg{Theme: "system"}, // 默认跟随系统：Windows 自己管深/浅色，用户在那里改一次比在我们这里改一次更自然
 	}
 }
 
@@ -397,8 +397,10 @@ func Load(path string) (*Config, error) {
 	if c.Relay == "" {
 		c.Relay = "127.0.0.1:0"
 	}
-	if c.UI.Theme != "dark" {
-		c.UI.Theme = "light"
+	// 非法值一律回 "system"（默认值）——"跟随系统"在任何机器上都不会错，
+	// 而错认成 light/dark 会在与系统相反的机器上“一装上就刺眼”。
+	if c.UI.Theme != "dark" && c.UI.Theme != "light" {
+		c.UI.Theme = "system"
 	}
 	if _, err := c.Normalize(); err != nil { // 旧写法/手写配置也安全进来
 		return nil, err
@@ -2400,17 +2402,18 @@ func (c *Config) HostsCopy() HostsCfg {
 	return c.Hosts
 }
 
-// SetTheme 修改界面主题（只存 "dark"/"light"）。
+// SetTheme 修改界面主题偏好（存 "system"/"light"/"dark"）。
+// 注意这里存的是**偏好**，不是生效值：system 要由界面层读系统设置再解析。
 func (c *Config) SetTheme(mode string) {
-	if mode != "dark" {
-		mode = "light"
+	if mode != "dark" && mode != "light" {
+		mode = "system"
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.UI.Theme = mode
 }
 
-// Theme 界面主题快照。
+// Theme 界面主题**偏好**快照（system | light | dark）。
 func (c *Config) Theme() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

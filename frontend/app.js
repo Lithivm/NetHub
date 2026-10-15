@@ -11,7 +11,7 @@
 const B = () => window.go.webui.Bridge;   // 每次取，避免绑定还没注入时抓到 undefined
 const R = () => window.runtime;
 
-let state = { theme: 'light' };
+let state = { theme: 'light', themePref: 'system' };
 let chains = [];
 let chainHealth = {};   // 链名 → 上游健康快照
 let routes = [];
@@ -113,22 +113,35 @@ function confirmBox(title, text, danger, okText) {
 
 /* ═══════════════ 主题 ═══════════════ */
 
+// applyTheme 只管**生效**主题（后端解析完的 light/dark）。
+// "偏好"（系统/浅色/深色）是另一件事，由 applyThemePref 画 —— 两者分开的原因：
+// 选了"系统"时，生效色取决于 Windows 设置，只有后端知道答案。
 function applyTheme(mode) {
   state.theme = mode === 'dark' ? 'dark' : 'light';
   document.documentElement.dataset.theme = state.theme;
-  // 两段式滑块：滑块位置看容器上的 data-theme，文字选中态看按钮的 is-active
-  const seg = document.getElementById('themeSeg');
-  if (seg) seg.dataset.theme = state.theme;
-  document.querySelectorAll('#themeSeg .seg2-btn').forEach(b =>
-    b.classList.toggle('is-active', b.dataset.theme === state.theme));
 }
 
-// setTheme 直接指定主题（设置页里点哪一个就是哪一个），不再是“切换”。
-async function setTheme(mode) {
-  const next = mode === 'dark' ? 'dark' : 'light';
-  if (next === state.theme) return;   // 点已选中的那个：什么都不做（不写盘）
-  applyThemeSoft(next);               // 先本地切，界面立刻响应
-  try { await call('SetTheme', next); } catch (e) { fail(e); }
+// applyThemePref 画三段滑块的选中态（看偏好，不看生效色：选了"系统"就停在最左边）。
+function applyThemePref(pref) {
+  state.themePref = (pref === 'dark' || pref === 'light') ? pref : 'system';
+  const seg = document.getElementById('themeSeg');
+  if (seg) seg.dataset.pref = state.themePref;
+  document.querySelectorAll('#themeSeg .seg3-btn').forEach(b =>
+    b.classList.toggle('is-active', b.dataset.pref === state.themePref));
+}
+
+// setTheme 设置主题偏好（设置页里点哪一个就是哪一个），不再是"切换"。
+async function setTheme(pref) {
+  const next = (pref === 'dark' || pref === 'light') ? pref : 'system';
+  if (next === state.themePref) return;   // 点已选中的那个：什么都不做（不写盘）
+  const prevTheme = state.theme;
+  applyThemePref(next);                   // 选中态立刻跟手
+  // 乐观切换：system 的答案在后端，先把当前色留着，免得先闪一下错色
+  applyThemeSoft(next === 'system' ? prevTheme : next);
+  try {
+    const eff = await call('SetTheme', next);   // 后端回"生效的深浅色"
+    if (eff && eff !== state.theme) applyThemeSoft(eff);
+  } catch (e) { fail(e); }
 }
 
 // 切主题时让**整页颜色**淡过去，而不是所有颜色硬切一下。
@@ -1157,8 +1170,14 @@ async function refreshState() {
   document.getElementById('hostsInfo').textContent =
     (s.hostsInFile ? '标记区块已存在' : '未写入标记区块') + ' · ' + (s.hostsPath || '');
 
-  // 主题以后端为准（只在变化时同步，避免打断用户刚点的切换）
-  if (s.theme && s.theme !== state.theme) applyTheme(s.theme);
+  // 主题以后端为准（只在变化时同步，避免打断用户刚点的切换）。
+  // 生效色变化有两种来路：用户点了滑块，或**系统配色变了**（偏好还是"系统"）——
+  // 后者要顺手把窗口标题栏配色也跟上（ApplyTheme 只应用、不写偏好）。
+  if (s.theme && s.theme !== state.theme) {
+    applyThemeSoft(s.theme);
+    call('ApplyTheme').catch(() => { /* 老桥/探针没这个方法：不影响界面本身 */ });
+  }
+  if (s.themePref && s.themePref !== state.themePref) applyThemePref(s.themePref);
 
   // 开机自启：状态由系统决定，回写勾选框（勾选状态就是唯一指示，不再另外写一行小字）
   const cbAuto = document.getElementById('setAutostart');
@@ -2261,6 +2280,7 @@ async function loadSettings() {
   // 那会抛 TypeError 把 boot() 整个搞挂，导致状态轮询都注册不上）
   setChecked('setHostsManage', s.hostsManage);
   setLogLevel(s.logLevel || 'normal', true);
+  applyThemePref(s.theme || 'system');   // 偏好（system/light/dark）：进设置页时滑块要对
   setValue('setHostsEntries', (s.hostsEntries || []).join('\n'));
   loadAbout();
   setValue('setDialTimeout', s.dialTimeout || 5);
@@ -2476,7 +2496,7 @@ async function saveSettings() {
   const payload = {
     hostsManage: !!(elManage && elManage.checked),
     hostsEntries: elEntries ? elEntries.value.split('\n').map(s => s.trim()).filter(Boolean) : [],
-    theme: state.theme,
+    theme: state.themePref,
     dialTimeout: intVal('setDialTimeout', 5),
     dialBudget: intVal('setDialBudget', 10),
     // 启动延迟允许 0（= 登录后立即启动），所以单独处理
@@ -2546,14 +2566,15 @@ async function resetSettings() {
   setValue('setRaceAfter', 300);
   setValue('setWarm', 2);
   applyThemeSoft('light');
+  applyThemePref('system');
 
   const cbAuto = document.getElementById('setAutostart');
   cbAuto.dataset.busy = '1';            // 别让状态轮询把刚写下的值又按系统状态改回去
   try {
     await call('SetAutostart', false);
-    await call('SetTheme', 'light');
+    await call('SetTheme', 'system');
     await call('SaveSettings', {
-      hostsManage: false, hostsEntries: [], theme: 'light',
+      hostsManage: false, hostsEntries: [], theme: 'system',
       dialTimeout: 5, dialBudget: 10, raceAfter: 300, warmSessions: 2, autostartDelay: 20,
     });
     await loadSettings();               // 条目回落成内置默认（后端在空列表时才给默认）
@@ -2677,8 +2698,8 @@ function wire() {
     refreshState();
   };
   document.getElementById('themeSeg').addEventListener('click', ev => {
-    const b = ev.target.closest('[data-theme]');
-    if (b) setTheme(b.dataset.theme);
+    const b = ev.target.closest('[data-pref]');
+    if (b) setTheme(b.dataset.pref);
   });
 
   // 日志页

@@ -204,6 +204,9 @@ type StateView struct {
 	ConfigPath  string `json:"configPath"`
 	LogPath     string `json:"logPath"`
 	Theme       string `json:"theme"`
+	// ThemePref 主题**偏好**（system | light | dark）：设置页的三段滑块看它。
+	// Theme 则是**生效色**（light/dark）—— 两者分开的理由，选了 "system" 时只有后端知道答案。
+	ThemePref   string `json:"themePref"`
 	HostsPath   string `json:"hostsPath"`
 	HostsInFile bool   `json:"hostsInFile"` // hosts 里已存在我们的标记区块
 	Autostart   bool   `json:"autostart"`
@@ -374,7 +377,8 @@ func (b *Backend) GetState() StateView {
 		ActiveConns:   active,
 		ConfigPath:    b.a.Cfg.Path(),
 		LogPath:       b.a.Bus.FilePath(),
-		Theme:         b.a.Cfg.Theme(),
+		Theme:         b.effectiveTheme(),
+		ThemePref:     b.a.Cfg.Theme(),
 		HostsPath:     hostsmgr.Path(),
 		HostsInFile:   hostsInFile,
 		Autostart:     b.autostartCached(),
@@ -1209,8 +1213,8 @@ func (b *Backend) startingNow() bool {
 }
 
 // PushTheme 把当前主题推给界面：界面进程刚起来时窗口主题来自启动参数，
-// 连上之后再对齐一次，保证与配置一致。
-func (b *Backend) PushTheme() { b.uiOrNoop().SetTheme(b.a.Cfg.Theme() == "dark") }
+// 连上之后再对齐一次，保证与配置（含“跟随系统”）一致。
+func (b *Backend) PushTheme() { b.uiOrNoop().SetTheme(b.effectiveTheme() == "dark") }
 
 // SetQuitHook 装上退出收尾：Quit() 把引擎停完、请界面退出之后调它一次。
 //
@@ -1667,23 +1671,68 @@ func (b *Backend) SaveSettings(s SettingsView) error {
 	return nil
 }
 
-// CurrentTheme 当前主题（dark/light）—— 看护拉起界面时用它，每次现读。
-func (b *Backend) CurrentTheme() string { return b.a.Cfg.Theme() }
+// effectiveTheme 把主题**偏好**解析成**生效**的深/浅色。
+//
+// 为什么要有这一层：偏好可以是 "system"（默认），而生效值只能是 light/dark ——
+// 窗口标题栏配色、界面第一帧、看护重启界面都要一个确定的答案，不能把
+// “你自己去问系统”留给每个调用方。
+func (b *Backend) effectiveTheme() string {
+	switch b.a.Cfg.Theme() {
+	case "dark":
+		return "dark"
+	case "light":
+		return "light"
+	default: // system
+		if systemPrefersDark() {
+			return "dark"
+		}
+		return "light"
+	}
+}
 
-// SetTheme 切换深浅色并记住（同时切换窗口标题栏配色）。
-func (b *Backend) SetTheme(mode string) error {
-	if mode != "dark" {
-		mode = "light"
+// CurrentTheme 当前**生效**主题（dark/light）—— 看护拉起界面时用它，每次现读
+// （所以要拿 systemPrefersDark 的实时值，不能在启动时算一次就存起来）。
+func (b *Backend) CurrentTheme() string { return b.effectiveTheme() }
+
+// SetTheme 设置主题偏好并应用（"system"/"light"/"dark"），返回生效的深浅色。
+//
+// 返回值就是告诉界面“现在到底是什么色”：选了 system 时只有后端知道答案
+// （要读系统设置），界面自己去猜会闪一下错色。
+func (b *Backend) SetTheme(mode string) (string, error) {
+	if mode != "dark" && mode != "light" {
+		mode = "system"
 	}
 	b.a.Cfg.SetTheme(mode)
-	b.uiOrNoop().SetTheme(mode == "dark")
+	eff := b.effectiveTheme()
+	b.uiOrNoop().SetTheme(eff == "dark")
 	if err := b.a.Cfg.Save(); err != nil {
-		return err
+		return eff, err
 	}
 	// 这一行是给"设置到底存没存住"用的：以前它静默写盘，现场根本看不出
 	// 是没写、还是写了没读回来（见 SaveSettings 那条同源日志）。
-	b.a.Bus.Info("主题已切到 %s（已写入配置）", map[bool]string{true: "深色", false: "浅色"}[mode == "dark"])
-	return nil
+	b.a.Bus.Info("主题已切到 %s（偏好 %s，已写入配置）", themeName(eff), themeName(mode))
+	return eff, nil
+}
+
+// ApplyTheme 只把**生效**主题应用到窗口（不写盘、不改偏好）。
+//
+// 给“跟随系统”用：用户在 Windows 里改了深/浅色，界面下一秒（轮询）发现生效值变了，
+// 调一次这个把窗口标题栏颜色跟上 —— 偏好没变，所以不该动配置。
+func (b *Backend) ApplyTheme() string {
+	eff := b.effectiveTheme()
+	b.uiOrNoop().SetTheme(eff == "dark")
+	return eff
+}
+
+func themeName(mode string) string {
+	switch mode {
+	case "dark":
+		return "深色"
+	case "light":
+		return "浅色"
+	default:
+		return "跟随系统"
+	}
 }
 
 // SetAutostart 开关开机自启（立即生效，不等"保存"）。

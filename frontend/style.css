@@ -1154,34 +1154,41 @@ html.is-tray *::after {
 .clash-cov > summary:hover { color: var(--ink); }
 .clash-cov .clash-table { margin-top: var(--s2); }
 
-/* ── 两段式滑块（设置 → 外观 → 主题）────────────────────────────
-   要求（用户明确提的）：两个选项**完全等宽**、小字说明另起一行、看起来像滑块。
-   做法：grid 两列 1fr 保证等宽（不靠 padding 凑），选中态由底下那块
-   .seg2-thumb 滑过去表示（transform 过渡），文字颜色随之切换。
+/* ── 三段式滑块（设置 → 外观 → 主题）────────────────────────────
+   要求（用户明确提的）：三个选项**完全等宽**、看起来像滑块。
+   做法：grid 三列 1fr 保证等宽（不靠 padding 凑），选中态由底下那块
+   .seg3-thumb 滑过去表示（transform 过渡），文字颜色随之切换。
    为什么不用 .tabs/.tab：那是顶部标签条，.tab:not(:last-child) 带 min-width，
-   两段宽度会不一样（就是这次的起因）。 */
-.seg2 {
+   几段宽度会不一样（就是当初的起因）。
+   为什么是三段："系统"是默认值 —— Windows 自己管深浅色，在那里改一次比在我们
+   这里改一次更自然（见 ui.theme 的注释）。 */
+.seg3 {
   position: relative;
   display: inline-grid;
   grid-auto-flow: column;
-  grid-auto-columns: 1fr;      /* ← 等宽的关键：两列各占一半 */
-  width: 168px;
+  grid-auto-columns: 1fr;      /* ← 等宽的关键：三列各占 1/3 */
+  width: 240px;
   padding: 3px;
   background: var(--canvas-soft);
   border: 1px solid var(--hairline);
   border-radius: calc(var(--r-chip) + 3px);
 }
-.seg2-thumb {
+.seg3-thumb {
   position: absolute;
   top: 3px; left: 3px;
-  width: calc(50% - 3px);
+  /* 宽度 = 一个格子的宽：padding box 减两侧内边距再除以 3（
+     这样 translateX(100%) 正好是下一格的起点，不会逐格累积几个像素的偏移）。 */
+  width: calc((100% - 6px) / 3);
   height: calc(100% - 6px);
   background: var(--primary);
   border-radius: var(--r-chip);
   transition: transform 220ms var(--ease-soft);
   pointer-events: none;
 }
-.seg2[data-theme="dark"] .seg2-thumb { transform: translateX(100%); }
+/* 滑块位置看**偏好**（data-pref），不是生效主题：选"系统"时它就在最左边，
+   哪怕当前因为是深色系统而显示的是深色皮肤。 */
+.seg3[data-pref="light"] .seg3-thumb { transform: translateX(100%); }
+.seg3[data-pref="dark"] .seg3-thumb { transform: translateX(200%); }
 
 /* ═══ 深浅色切换的柔和过渡 ═══
    做法：切主题的前后由 JS 在 <html> 上挂/摘 .theme-anim，这期间给全页一份色彩过渡；
@@ -1200,11 +1207,11 @@ html.theme-anim *::after {
               fill 560ms var(--ease-theme),
               stroke 560ms var(--ease-theme) !important;
 }
-html.theme-anim .seg2-thumb { transition: transform 220ms var(--ease-soft) !important; }
+html.theme-anim .seg3-thumb { transition: transform 220ms var(--ease-soft) !important; }
 @media (prefers-reduced-motion: reduce) {
   html.theme-anim, html.theme-anim *, html.theme-anim *::before, html.theme-anim *::after { transition: none !important; }
 }
-.seg2-btn {
+.seg3-btn {
   position: relative; z-index: 1;
   width: 100%; min-width: 0;   /* 等宽：不允许按内容撑开 */
   padding: 6px 0;
@@ -1215,5 +1222,5 @@ html.theme-anim .seg2-thumb { transition: transform 220ms var(--ease-soft) !impo
   cursor: pointer;
   transition: color .18s ease;
 }
-.seg2-btn.is-active { color: var(--on-primary); }
-.seg2-btn:not(.is-active):hover { color: var(--ink); }
+.seg3-btn.is-active { color: var(--on-primary); }
+.seg3-btn:not(.is-active):hover { color: var(--ink); }

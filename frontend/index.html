@@ -363,12 +363,15 @@
                且属于“设置”的语义，所以搬进设置页；顶栏只留运行状态与常用动作。 -->
           <div class="input-row">
             <span>主题</span>
-            <!-- 两段式滑块：浅色 | 深色。两个按钮**等宽**（grid 两列 1fr），
-                 选中项由下面那块 .seg2-thumb 滑过去表示。 -->
-            <div class="seg2" id="themeSeg" data-theme="light" role="group" aria-label="主题">
-              <span class="seg2-thumb" aria-hidden="true"></span>
-              <button class="seg2-btn" id="btnThemeLight" data-theme="light">浅色</button>
-              <button class="seg2-btn" id="btnThemeDark" data-theme="dark">深色</button>
+            <!-- 三段式滑块：系统 | 浅色 | 深色。三个按钮**等宽**（grid 三列 1fr），
+                 选中项由下面那块 .seg3-thumb 滑过去表示。
+                 「系统」是**默认值**：Windows 自己管深浅色，而且"跟随系统"在任何机器上
+                 都不会错 —— 错认成浅/深会在与系统相反的那一半机器上"一装上就刺眼"。 -->
+            <div class="seg3" id="themeSeg" data-pref="system" role="group" aria-label="主题">
+              <span class="seg3-thumb" aria-hidden="true"></span>
+              <button class="seg3-btn" id="btnThemeSystem" data-pref="system">系统</button>
+              <button class="seg3-btn" id="btnThemeLight" data-pref="light">浅色</button>
+              <button class="seg3-btn" id="btnThemeDark" data-pref="dark">深色</button>
             </div>
           </div>
         </div>
