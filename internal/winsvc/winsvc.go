@@ -252,6 +252,16 @@ func waitFor(want string, d time.Duration) error {
 	return fmt.Errorf("%s 秒内服务没变成 %s（当前 %s）", d, want, last)
 }
 
+// stopControlTimeout 等 SCM 确认“停止”请求的上限。
+// 服务端收尾慢（实测优雅退出 40 秒上下）时 `Control` 会一直挂着 —— 那正是
+// 2026-10-15 踩到的：一条 `-service-stop` 把实验脚本挂了 11 分钟（现象是“命令没反应”）。
+const stopControlTimeout = 20 * time.Second
+
+// Stop 停止服务。
+//
+// 两条纪律（都是踩出来的）：
+//  1. **幂等**：已经 Stopped 就直接成功 —— 否则脚本里“先停再起”会因“已经停了”而报错。
+//  2. **有超时**：不确定的等待不能无限 —— 见 stopControlTimeout 的注释。
 func Stop() error {
 	m, err := mgr.Connect()
 	if err != nil {
@@ -263,8 +273,24 @@ func Stop() error {
 		return fmt.Errorf("服务未安装: %w", err)
 	}
 	defer s.Close()
-	_, err = s.Control(svc.Stop)
-	return err
+
+	if st, qerr := s.Query(); qerr == nil && st.State == svc.Stopped {
+		return nil // 已经停着：幂等成功
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, cerr := s.Control(svc.Stop)
+		done <- cerr
+	}()
+	select {
+	case cerr := <-done:
+		return cerr
+	case <-time.After(stopControlTimeout):
+		// 超时也**不算失败到底**：SCM 往往仍在继续停（只是没及时回应）。
+		// 所以只报“没等到确认”，让调用方（脚本/界面）自己决定要不要再等。
+		// （那个 goroutine 会陪着进程一起结束；这里不为它做额外收尸。）
+		return fmt.Errorf("停止请求 %v 内没得到 SCM 确认（服务可能仍在慢收尾）", stopControlTimeout)
+	}
 }
 
 func quote(s string) string { return `"` + s + `"` }

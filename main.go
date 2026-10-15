@@ -21,7 +21,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -496,11 +495,6 @@ func doImportBats(cfgPath, dir string) error {
 	}
 	fmt.Printf("导入 %d 条链路（凭据已写入配置文件，未在终端回显）\n", len(got))
 	return nil
-}
-
-func fatal(format string, a ...any) {
-	log.SetFlags(0)
-	log.Fatalf(format, a...)
 }
 
 // exePath 自身路径（拿不到就用相对名兜底）。
