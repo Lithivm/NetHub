@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,7 +16,10 @@ import (
 // 为什么默认跳过：要出公网、要下几 MB —— 网络不能当测试前提。
 // 现场排查"更新按钮点了没反应"时，在本机跑：
 //
-//	NETHUB_LIVE_UPDATE=1 go test ./internal/webui/ -run TestUpdateDownloadLive -v
+//	NETHUB_LIVE_UPDATE=1 go test -count=1 ./internal/webui/ -run TestUpdateDownloadLive -v
+//
+// **`-count=1` 不能省**：go test 会把结果缓存下来、连日志带耗时一起重放，
+// 于是"改完代码重跑"看到的是上一次的输出 —— 排查时能把人带进沟里（2026-10-16 踩过）。
 //
 // 它会把"这次走的是哪条路"（系统代理 / 直连）打在日志第一行 —— 现场多半就差这一句。
 func TestUpdateDownloadLive(t *testing.T) {
@@ -23,6 +27,17 @@ func TestUpdateDownloadLive(t *testing.T) {
 		t.Skip("要出公网并下几 MB，默认跳过（NETHUB_LIVE_UPDATE=1 才跑）")
 	}
 	t.Logf("更新请求走的是：%s", proxyNote())
+	// "设置读到了"与"请求真的用上了"是两件事，分别断言
+	req, _ := http.NewRequest("GET", releasesLatestURL, nil)
+	pf := systemProxyFunc()
+	if pf == nil {
+		t.Fatal("systemProxyFunc() 返回 nil —— 本机开着系统代理，更新请求却会直连")
+	}
+	if u, uerr := pf(req); u == nil || uerr != nil {
+		t.Fatalf("releases/latest 不会经代理：url=%v err=%v", u, uerr)
+	} else {
+		t.Logf("releases/latest 实际经：%s", u)
+	}
 
 	// 先单独验一下「检查更新」走的那条轻路径（302，不消耗 API 配额）
 	tag, err := latestTagViaRedirect()
