@@ -218,20 +218,14 @@ func main() {
 		return // 新进程接管
 	}
 
-	// 角色：能当后端就当后端。抢不到这把锁 = 已经有后端在跑（用户又双击了一次，
-	// 或者界面刚被外部程序杀掉、他想手动叫回来）—— 那就只把它的窗口唤回来，**绝不**
-	// 启动第二套引擎（两套引擎会各装一份 WinDivert 过滤器互相干扰，是静默出错）。
-	releaseBackend, backendBusy, lockWarn := app.AcquireBackendLock()
-	if backendBusy {
-		if webui.RequestShowWindow() {
-			fmt.Println("NetHub 已经在运行，已把它的窗口叫回来")
-		} else {
-			fmt.Println("NetHub 已经在运行（没接上它的界面通道：可能跑的是服务模式，或界面正在重启）")
-		}
-		return
-	}
-	defer releaseBackend()
-
+	// ───── 控制面命令（不跑引擎）：必须在角色判定之前处理 ─────
+	//
+	// 为什么必须在这里（2026-10-15 实测踩到）：这三个命令跟"本进程是后端还是界面"
+	// 毫无关系，但只要引擎已经在跑（服务版、或用户已经双击过一次），
+	// 下面的 AcquireBackendLock 就会 return 掉（只把已有窗口叫回来）——
+	// 用户明明敲了 `-autostart`，看到的却是"NetHub 已经在运行"，
+	// **设置静默没生效**（计划任务里一直留着旧的 10 秒而不是配置的 20 秒）。
+	// 同类的另一条路：外部脚本用 `-autostart` 改自启，在引擎跑着的机器上永远改不动。
 	p := *cfgPath
 	if p == "" {
 		p = config.DefaultPath()
@@ -249,7 +243,7 @@ func main() {
 		// 读不到（配置坏了/首次运行）就用内置默认（config 侧同样是 20s 下限计），
 		// 不让“配置有问题”把开机自启这件事本身卡住。
 		delay := 20
-		if cfg, err := config.Load(*cfgPath); err == nil {
+		if cfg, err := config.Load(p); err == nil {
 			delay = int(cfg.AutostartDelayDur() / time.Second)
 		}
 		if err := autostart.Enable(delay); err != nil {
@@ -265,6 +259,32 @@ func main() {
 		fmt.Println("已从开机启动移除")
 		return
 	}
+
+	// 角色：能当后端就当后端。抢不到这把锁 = 已经有后端在跑（用户又双击了一次，
+	// 或者界面刚被外部程序杀掉、他想手动叫回来）—— 那就只把它的窗口唤回来，**绝不**
+	// 启动第二套引擎（两套引擎会各装一份 WinDivert 过滤器互相干扰，是静默出错）。
+	releaseBackend, backendBusy, lockWarn := app.AcquireBackendLock()
+	if backendBusy {
+		// 已经有后端在跑：先试着把它**已有的**那个界面窗口叫回来（同机同用户时才行）。
+		if webui.RequestShowWindow() {
+			fmt.Println("NetHub 已经在运行，已把它的窗口叫回来")
+			return
+		}
+		// 叫不回来 = 那个后端**自己没有界面**，典型就是 **Windows 服务模式**。
+		// 这时必须**自己起一个只读界面**：它连上服务那边的引擎，只画状态
+		// （启动/停止/重启都不会生效），并按"引擎在别的进程里"自动挂出
+		// 常驻告警条 + 「接管引擎」按钮。
+		//
+		// 为什么必须这样（2026-10-15 用户实测）：设计文档写着"服务模式下界面照旧
+		// 可以由普通用户双击 exe 打开"，但实现里这里直接 return —— 用户双击后
+		// **除了 UAC 弹框什么都没有**（那个 fmt.Println 在 GUI 子系统里没人看得到）。
+		// 后果是一连串的：没有界面 → 没有托盘 → 看不到任何告警 →
+		// 连"接管引擎"那个按钮都无从点起（要打开界面才能点它）。
+		ld := filepath.Join(filepath.Dir(config.DefaultPath()), "logs")
+		runFrontend(ld, "", false)
+		return
+	}
+	defer releaseBackend()
 
 	bus := logbus.New(3000)
 	// 日志单独放 logs\ —— 运行期产物不跟 exe/config 混在一个目录里

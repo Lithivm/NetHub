@@ -42,9 +42,9 @@ type Notice struct {
 // 优先级（数字之间留空档，方便以后往中间插）。
 const (
 	prioDriverBlocked = 100 // 驱动装不上 = 整个程序不可用
-	prioReadOnly      = 70 // 界面没在管引擎（服务版/另一个实例在跑）：能看不能用
-	prioClashTakeover = 50 // 内网**可能**被交给别的代理（有泄漏风险，但程序还在跑）
-	prioUpdateAvail   = 30 // 有新版本（不是故障，但也不该只留给用户自己发现）
+	prioReadOnly      = 70  // 界面没在管引擎（服务版/另一个实例在跑）：能看不能用
+	prioClashTakeover = 50  // 内网**可能**被交给别的代理（有泄漏风险，但程序还在跑）
+	prioUpdateAvail   = 30  // 有新版本（不是故障，但也不该只留给用户自己发现）
 )
 
 // notifiable 哪些告警值得**发 Windows 系统通知**（用户 2026-10-15 明确：只给寡寡几个）。

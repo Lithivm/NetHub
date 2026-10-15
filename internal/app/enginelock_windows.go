@@ -35,6 +35,14 @@ func acquireEngineLock() (*engineLock, string, error) {
 	return acquireNamedLock(engineLockName)
 }
 
+// acquireNamedLock 抢一把命名锁（内部用，见上面两个包装）。
+//
+//	(lock, "", nil)          —— 抢到了
+//	(nil, "", ErrEngineBusy) —— 别人在跑
+//	(nil, reason, nil)       —— 环境拿不到这把锁（极少见，如策略不给
+//	                            SeCreateGlobalPrivilege）：**降级为没有互斥**，
+//	                            reason 是要打给用户看的警告。宁可少一道保护，
+//	                            也不能因为锁建不出来就让引擎整个起不来。
 func acquireNamedLock(name string) (*engineLock, string, error) {
 	p, err := windows.UTF16PtrFromString(name)
 	if err != nil {
@@ -51,13 +59,29 @@ func acquireNamedLock(name string) (*engineLock, string, error) {
 	if h, err := windows.OpenMutex(windows.SYNCHRONIZE, false, p); err == nil {
 		_ = windows.CloseHandle(h)
 		return nil, "", ErrEngineBusy
+	} else if !errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
+		// **打不开 ≠ 不存在。** 典型场景：后端跑在另一个会话 / 更高完整性里
+		// —— Windows 服务在 Session 0、以 LocalSystem 建了这把锁，普通用户进程
+		// 连 SYNCHRONIZE 都拿不到（DACL 里根本没有它），回的是 ERROR_ACCESS_DENIED。
+		//
+		// 这种情况**必须判定为"别人在跑"**（2026-10-15 用户实测踩到）：以前这里
+		// 落到下面的 CreateMutex，它同样 Access denied，于是被当成"环境建不出锁"
+		// 降级成"我是后端" —— 界面进程就去抢引擎、装过滤器、写 hosts，
+		// 而服务已经拿着，用户双击一次 exe 会刷出一整屏 WinDivert/hosts 权限报错。
+		// "打不开"是**比"存在"更强的证据"存在"**，绠不能降级。
+		return nil, "", ErrEngineBusy
 	}
 
 	h, err := windows.CreateMutex(nil, false, p)
 	if h == 0 {
-		// 建不出来：极少见（策略不给 SeCreateGlobalPrivilege）；也可能是刚探测完、
-		// 高完整性进程抢先建了（窗口是微秒级）。两者都按"没有互斥"降级处理 ——
-		// 宁可少一道保护，也不能因为锁建不出来就让引擎整个起不来。
+		// ERROR_ACCESS_DENIED 在这里的语义很确定：**名字已经被人占了，而那个对象我打不开**
+		// （名字真不存在的话 CreateMutex 会当即建出来）。同上，按"别人在跑"处理。
+		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			return nil, "", ErrEngineBusy
+		}
+		// 其余才是真"建不出来"：极少见（策略不给 SeCreateGlobalPrivilege）。
+		// 两者都按"没有互斥"降级处理 —— 宁可少一道保护，
+		// 也不能因为锁建不出来就让引擎整个起不来。
 		return nil, err.Error(), nil
 	}
 	// 竟争输了的那个：CreateMutex 依旧返回一个有效句柄，必须自己关掉 ——
