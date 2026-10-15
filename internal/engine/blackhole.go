@@ -110,11 +110,27 @@ func (e *Engine) blackholeLoop() {
 // 只有"根本没法发"（比如规则集为空、地址非法）才返回 false —— 那种情况下不参与判据，
 // 免得把"没流量"误报成"句柄瞎了"。
 func (e *Engine) probeSelfPacket() bool {
-	rs := e.ruleSet().FilterRanges(false)
-	if len(rs) == 0 {
-		return false
+	// 目标怎么挑（两个约束）：
+	//   ① 必须在**内核过滤器**里 —— 否则包根本到不了我们手上，探测就成了假阴性；
+	//   ② 尽量**不是客户的内网地址** —— 探测包会一路走到上游（目标不存在，注定 CONNECT
+	//      失败），用真实业务网段会让人以为“有东西在扫客户内网”。
+	// 所以优先用**假 IP 段**（DNS 接管开着时它也在过滤器里，而且一眼就是假地址），
+	// 没有假 IP 段（没开 DNS 接管）才退回规则网段的首地址。
+	var ip net.IP
+	if e.fake != nil {
+		if r := e.fake.Range(); r != nil && r.IP != nil {
+			if v4 := r.IP.To4(); v4 != nil {
+				ip = net.IPv4(v4[0], v4[1], v4[2], v4[3]+1) // 段内第二个地址，避开网络地址
+			}
+		}
 	}
-	ip := rules.U2IP(rs[0].First)
+	if ip == nil {
+		rs := e.ruleSet().FilterRanges(false)
+		if len(rs) == 0 {
+			return false
+		}
+		ip = rules.U2IP(rs[0].First)
+	}
 	if ip == nil {
 		return false
 	}

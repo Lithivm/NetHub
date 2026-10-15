@@ -1586,6 +1586,17 @@ func (e *Engine) handleConn(c net.Conn) {
 			e.finish(st)
 			return
 		}
+		// 我们自己的探针（DialSelf）**不是业务**：它不进连接列表、不计累计、normal 档不记日志 ——
+		// 隧道失败这条也一样。blackhole 接管自检每隔一分钟就会探一次不存在的地址，
+		// 按 ERROR 记就是自己给自己刷日志（实测每 60 秒一条“隧道建立失败 10.10.10.0:65533”，
+		// 现场会以为真出了事故）。
+		if st.self {
+			e.bus.Debug("tunnel.down: chain=%s target=%s:%d proc=nethub(自检探针) src_port=%d err=%s",
+				st.chain, dialDst, st.dport, sport, firstLine(err.Error()))
+			st.fail(err.Error())
+			e.finish(st)
+			return
+		}
 		e.bus.Error("[%s] 隧道建立失败 %s:%d（进程 %s，PID %d，源端口 %d）",
 			st.chain, dialDst, st.dport, st.procName, st.pid, sport)
 		for _, line := range strings.Split(err.Error(), "\n") {

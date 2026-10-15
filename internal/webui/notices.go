@@ -155,8 +155,10 @@ func noticesFor(driverBlocked bool, c Coverage, upd UpdateInfo, readOnlyWhy stri
 			ID: "takeover-blackhole", Kind: "error", Priority: prioBlackhole,
 			Title: "接管失效：引擎在跑，但包没经过过滤器",
 			Text: "连续 " + strconv.Itoa(blackholeFails) + " 次自检都没看到自己的包 —— 内网目标" +
-				"会按系统路由漏出去（既不通，也有泄漏风险）。常见原因是机器上跑着 Clash Verge（mihomo）" +
-				"时启动的引擎；引擎已在自动重建句柄，若仍未恢复，重启一次服务即可。",
+				"会按系统路由漏出去（既不通，也有泄漏风险）。" +
+				"引擎已在自动重建句柄；若重建无效，请检查机器上有没有其它代理在跑" +
+				"（Clash / mihomo 这类会在内核层把流量改向 —— 实测：它在跑时启动的 NetHub 拦不到包，" +
+				"而且**先退出它再重启一次服务**才能恢复），关掉它再重启服务。",
 			Card: "cardRuntime",
 		})
 	}
