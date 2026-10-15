@@ -42,26 +42,19 @@ type Notice struct {
 // 优先级（数字之间留空档，方便以后往中间插）。
 const (
 	prioDriverBlocked = 100 // 驱动装不上 = 整个程序不可用
-	prioBlackhole     = 90  // 接管失效（在跑但一个包都没拦到）：业务级故障，而且**看不见**
-	prioReadOnly      = 70  // 界面没在管引擎（服务版/另一个实例在跑）：能看不能用
-	prioClashTakeover = 50  // 内网**可能**被交给别的代理（有泄漏风险，但程序还在跑）
-	prioUpdateAvail   = 30  // 有新版本（不是故障，但也不该只留给用户自己发现）
+	prioReadOnly      = 70 // 界面没在管引擎（服务版/另一个实例在跑）：能看不能用
+	prioClashTakeover = 50 // 内网**可能**被交给别的代理（有泄漏风险，但程序还在跑）
+	prioUpdateAvail   = 30 // 有新版本（不是故障，但也不该只留给用户自己发现）
 )
 
-// notifiable 哪些告警值得**发 Windows 系统通知**（用户 2026-10-15 明确：**只有这两类**）。
+// notifiable 哪些告警值得**发 Windows 系统通知**（用户 2026-10-15 明确：只给寡寡几个）。
 //
 // 为什么要挑：系统通知会进用户的「操作中心」—— 发多了就是骚扰（项目原本因为这一点
-// 完全不发系统通知）。而这两个是"**没人在看界面时也必须知道**"的：
-//
-//	· takeover-blackhole：引擎在跑但包没经过过滤器 —— 业务不通，而且内网流量
-//	  会从默认网关漏出去（静默、看不见）
-//	· clash-takeover：内网域名可能被别的代理接管（它用自己的 DNS 解析，
-//	  有出内网 / 封号风险）
-//
+// 完全不发系统通知）。这里只留一条：**内网域名可能被别的代理接管**
+// （它用自己的 DNS 解析，有出内网 / 封号风险，而且不看界面就无从得知）。
 // 其余（驱动被拦 / 只读 / 有新版本）留在界面告警条 + 日志里就够。
 var notifiable = map[string]bool{
-	"takeover-blackhole": true,
-	"clash-takeover":     true,
+	"clash-takeover": true,
 }
 
 // notifyNotices 把**刚从无到有**的可通知告警推成系统通知（另写入 logs/alert.log）。
@@ -101,7 +94,7 @@ func (b *Backend) notifyNotices(list []Notice) {
 // 所以可以跟着 GetState 每 1.5 秒算一次 —— 不用再单独开一条 60 秒的轮询。
 func (b *Backend) Notices() []Notice {
 	_, roWhy := b.readOnlyState() // 非空即"界面现在管不着引擎"
-	list := noticesFor(b.a.DriverBlocked(), b.clashCoverage(), b.updateInfo(), roWhy, b.a.Engine.Blackhole())
+	list := noticesFor(b.a.DriverBlocked(), b.clashCoverage(), b.updateInfo(), roWhy)
 	// 顺手处理"值得发系统通知的那两条"（只在新出现时推一次，见 notifyNotices）。
 	b.notifyNotices(list)
 	return list
@@ -109,8 +102,8 @@ func (b *Backend) Notices() []Notice {
 
 // noticesFor 是 Notices 的纯函数形式（可测：不碰注册表、不碰引擎、不碰网络）。
 // 前端依赖的契约（有测试盯着）：优先级数字、ID 稳定、Copy/Card 指向真实存在的东西。
-func noticesFor(driverBlocked bool, c Coverage, upd UpdateInfo, readOnlyWhy string, blackholeFails int) []Notice {
-	out := make([]Notice, 0, 4)
+func noticesFor(driverBlocked bool, c Coverage, upd UpdateInfo, readOnlyWhy string) []Notice {
+	out := make([]Notice, 0, 3)
 
 	// ① 内核驱动被安全软件拦（2026-09-28 现场踩过：火绒 6.0 的「漏洞驱动拦截」
 	//    按文件把 WinDivert64.sys 判成漏洞驱动在内核层拒加载，报的却是 1450「系统资源不足」，
@@ -142,24 +135,6 @@ func noticesFor(driverBlocked bool, c Coverage, upd UpdateInfo, readOnlyWhy stri
 				"（它用自己的 DNS 解析，内网域名有出内网的风险）",
 			Copy: strings.Join(missed, ";"), CopyLabel: "复制要加的网段",
 			Card: "clashDetail",
-		})
-	}
-	// ④ 接管失效：引擎在跑，但包没经过过滤器 —— **静默失效**，本项目最危险的一类故障。
-	//
-	// 优先级放在"只读"之上：只读是"能看不能动"（一眼能看出来），而这个是
-	// "看着一切正常，其实内网一个包都没接管" —— 业务不通 + 内网流量从默认网关漏到公网。
-	// 2026-10-15 实测：机器上跑着 Clash Verge（mihomo）时启动的引擎就是这个状态，
-	// 而界面上没有任何东西能看出来（日志里也只有一行 stats total=0），整整几小时没人发现。
-	if blackholeFails > 0 {
-		out = append(out, Notice{
-			ID: "takeover-blackhole", Kind: "error", Priority: prioBlackhole,
-			Title: "接管失效：引擎在跑，但包没经过过滤器",
-			Text: "连续 " + strconv.Itoa(blackholeFails) + " 次自检都没看到自己的包 —— 内网目标" +
-				"大概率不通，流量会按系统路由漏出去。" +
-				"这一条**只告警、不自动处理**：没有可复现的根因，贸然自动重启只会把正在跑的业务断掉。" +
-				"请人工确认：机器上是否跑着会在内核层改向流量的代理（Clash / mihomo 这类）；" +
-				"先退出它，再重启一次 NetHub 服务。",
-			Card: "cardRuntime",
 		})
 	}
 	// ⑤ 有新版本（只在**自动检查**成功且确实有新版时挂）

@@ -15,12 +15,12 @@ import (
 //  3. Copy / Card 要么为空、要么真能用（Copy 有值才出复制按钮；Card 必须是界面上真实存在的锚点）
 func TestNoticesFor(t *testing.T) {
 	// 什么都没有 → 一条都不挂（不能"没装 Clash 也报风险"）
-	if got := noticesFor(false, Coverage{OK: true}, UpdateInfo{}, "", 0); len(got) != 0 {
+	if got := noticesFor(false, Coverage{OK: true}, UpdateInfo{}, ""); len(got) != 0 {
 		t.Fatalf("没问题时不该有告警，得到 %+v", got)
 	}
 
 	// 两条同时存在
-	drv := noticesFor(true, Coverage{OK: false, Missed: []string{"10.0.0.1", "app.example.com"}}, UpdateInfo{}, "", 0)
+	drv := noticesFor(true, Coverage{OK: false, Missed: []string{"10.0.0.1", "app.example.com"}}, UpdateInfo{}, "")
 	if len(drv) != 2 {
 		t.Fatalf("驱动被拦 + 内网被接管，应当两条都在（取舍是前端按优先级做的，后端不替它选），得到 %d 条", len(drv))
 	}
@@ -79,7 +79,7 @@ func TestNoticesFor(t *testing.T) {
 // 并且它的优先级要低于前两类（驱动/内网是故障，新版本只是信息）。
 func TestNoticeForAvailableUpdate(t *testing.T) {
 	upd := UpdateInfo{Current: "v0.4.2", Latest: "v0.5.0", HasNew: true, Published: "2026-09-28"}
-	got := noticesFor(false, Coverage{OK: true}, upd, "", 0)
+	got := noticesFor(false, Coverage{OK: true}, upd, "")
 	if len(got) != 1 {
 		t.Fatalf("有新版时应当恰好挂一条，得到 %d 条：%+v", len(got), got)
 	}
@@ -109,7 +109,7 @@ func TestNoticeForAvailableUpdate(t *testing.T) {
 		{"已是最新", UpdateInfo{Current: "v0.4.2", Latest: "v0.4.2"}},
 		{"没查过（零值）", UpdateInfo{}},
 	} {
-		if got := noticesFor(false, Coverage{OK: true}, c.in, "", 0); len(got) != 0 {
+		if got := noticesFor(false, Coverage{OK: true}, c.in, ""); len(got) != 0 {
 			t.Errorf("%s 不该挂告警，得到 %+v", c.name, got)
 		}
 	}
@@ -121,7 +121,7 @@ func TestNoticeForAvailableUpdate(t *testing.T) {
 // 一个"只读"胺囊 + 一闪而过的 toast，现场很容易理解成"软件卡住了"（用户 2026-10-13 反馈）。
 // 这条告警就是那个入口，不许退化成"只通知不给出路"。
 func TestReadOnlyNotice(t *testing.T) {
-	got := noticesFor(false, Coverage{OK: true}, UpdateInfo{}, "服务版正在运行", 0)
+	got := noticesFor(false, Coverage{OK: true}, UpdateInfo{}, "服务版正在运行")
 	if len(got) != 1 {
 		t.Fatalf("只读态该挂一条告警，实际 %d 条: %+v", len(got), got)
 	}
@@ -136,7 +136,7 @@ func TestReadOnlyNotice(t *testing.T) {
 		t.Fatal("只读比「有新版本」更该被看到，优先级要更高")
 	}
 	// 恢复正常（why 为空）就不该再挂
-	if again := noticesFor(false, Coverage{OK: true}, UpdateInfo{}, "", 0); len(again) != 0 {
+	if again := noticesFor(false, Coverage{OK: true}, UpdateInfo{}, ""); len(again) != 0 {
 		t.Fatalf("不是只读了还在挂告警: %+v", again)
 	}
 }
@@ -149,23 +149,4 @@ func readIndexHTML(t *testing.T) string {
 		t.Fatalf("读不到 frontend/index.html（改动目录结构了？）: %v", err)
 	}
 	return string(b)
-}
-
-// 接管失效告警（2026-10-15）：引擎在跑、但包没经过过滤器时**必须**挂出来 ——
-// 这类故障的可怕之处在于"界面上看不出任何异常"（只能靠人盯 stats 里的 total=0）。
-func TestNoticeBlackhole(t *testing.T) {
-	if got := noticesFor(false, Coverage{OK: true}, UpdateInfo{}, "", 0); len(got) != 0 {
-		t.Fatalf("自检正常时不该挂告警，得到 %d 条：%+v", len(got), got)
-	}
-	got := noticesFor(false, Coverage{OK: true}, UpdateInfo{}, "", 3)
-	if len(got) != 1 || got[0].ID != "takeover-blackhole" {
-		t.Fatalf("自检失败时该挂 takeover-blackhole，得到 %+v", got)
-	}
-	if got[0].Priority <= prioReadOnly {
-		t.Errorf("优先级 %d 应高于只读告警 %d —— 只读一眼能看出来，这个是看不见的故障",
-			got[0].Priority, prioReadOnly)
-	}
-	if got[0].Card != "cardRuntime" {
-		t.Errorf("Card 要指向诊断页真实存在的锚点 cardRuntime，得到 %q", got[0].Card)
-	}
 }
