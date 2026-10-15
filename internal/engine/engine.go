@@ -462,8 +462,13 @@ type Engine struct {
 	mainFilter string
 	// mainRanges 主过滤器里的地址区间数（诊断页“接管状态”卡直显，不用重算）
 	mainRanges int
-	// shards 分片数（1 = 不分片，行为与改造前一致）。默认按核数自动算，见 defaultShards。
+	// shards 分片数（1 = 不分片，行为与改造前基本一致）。默认 1，见 defaultShards。
 	shards int
+	// pktsIn 主句柄**累计收包数**（一个 atomic add/包，~5ns，可忽略）。
+	// 只喂给 blackholeLoop：探测前后它没涨 = 句柄瞎了（详见 blackhole.go）。
+	pktsIn atomic.Int64
+	// blackholeFails 连续几次自检失败（0 = 正常）；界面通过 Blackhole() 读它。
+	blackholeFails atomic.Int64
 	// dynHandle 第二只句柄：只装「通配域名当前覆盖到的 IP」。
 	// 通配域名没法主动解析，只能等观察到应用的 DNS 应答才知道 IP，
 	// 所以它必须可热替换（先开新的、再关旧的，中间不丢包）。
@@ -911,6 +916,9 @@ func (e *Engine) Start() error {
 	e.startLoop("targetLoop", e.targetLoop)
 	e.startLoop("localNetLoop", e.localNetLoop)
 	e.startLoop("rateLoop", e.rateLoop)
+	// 接管自检：周期性验证"我的包还能不能被自己的过滤器看见"（见 blackhole.go ——
+	// 机器上跑着 Clash 时启动的引擎会**一个包都拦不到**，而界面看上去一切正常）。
+	e.startLoop("blackholeLoop", e.blackholeLoop)
 	// 只读嗅探 DNS + SNI/Host：只有真的用了通配域名才开（否则一分钱不花）。
 	// 它们负责把“应用实际要去哪个名字”学回来，并维护动态过滤器。
 	if e.ruleSet().HasWildcards() {
@@ -1826,6 +1834,7 @@ func (e *Engine) packetLoop(h *divert.Handle, stop chan struct{}, kind loopKind,
 			return
 		}
 		pkt := buf[:n]
+		e.pktsIn.Add(1) // 接管自检的健康信号（见 blackhole.go）
 
 		// 我们自己的解析（realResolver 从 53901-53910 发）不能被自己答成假 IP ——
 		// 那就是自己骗自己。用源端口在代码里排掉（过滤器保持最简）。

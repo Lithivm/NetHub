@@ -124,6 +124,8 @@ type perfProbe struct {
 	// 嗅探句柄的分包计数（下标 = 句柄号）
 	sniffPkts  []atomic.Int64
 	sniffBytes []atomic.Int64
+	// sniffShown 已打印过几个包的五元组（诊断用，只前几十个）
+	sniffShown atomic.Int64
 
 	file *os.File
 }
@@ -433,5 +435,20 @@ func (e *Engine) perfSniffLoop(idx int, filter string) {
 		}
 		e.perf.sniffPkts[idx].Add(1)
 		e.perf.sniffBytes[idx].Add(int64(n))
+		// 诊断：把前几十个包的**五元组**也写进 perf.log。
+		// 为什么需要它：“嗅探看得到包吗”这个二值回答不够 —— 真正要回答的是
+		// “这个包的目标地址是什么”（被改向的包目标已经不是原来的内网地址）。
+		if e.perf.file != nil && e.perf.sniffShown.Add(1) <= 40 && n >= 20 {
+			proto := buf[9]
+			src := fmt.Sprintf("%d.%d.%d.%d", buf[12], buf[13], buf[14], buf[15])
+			dst := fmt.Sprintf("%d.%d.%d.%d", buf[16], buf[17], buf[18], buf[19])
+			sport, dport := 0, 0
+			if proto == 6 && n >= 24 {
+				sport = int(buf[20])<<8 | int(buf[21])
+				dport = int(buf[22])<<8 | int(buf[23])
+			}
+			fmt.Fprintf(e.perf.file, "%s perf.pkt: h%d %s:%d -> %s:%d proto=%d len=%d\n",
+				time.Now().Format("15:04:05"), idx, src, sport, dst, dport, proto, n)
+		}
 	}
 }

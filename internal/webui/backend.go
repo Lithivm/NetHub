@@ -71,6 +71,11 @@ type Backend struct {
 	clashMu   sync.Mutex
 	clashSeen Coverage
 
+	// notified 已经推过**系统通知**的告警 ID（只对 notifiable 里那两条，见 notices.go）：
+	// 从无到有时推一次，恢复后从表里移除（下次再出还会推）。
+	notified map[string]bool
+	noticeMu sync.Mutex
+
 	// 顶栏实时流量图：每秒一格的 60 秒窗口（trafficWatch 写，GetTraffic 读）。
 	traffic trafficRing
 
