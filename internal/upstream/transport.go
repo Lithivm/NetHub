@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -113,4 +114,73 @@ func tlsClientOrRaw(raw net.Conn, cfg *tls.Config) (net.Conn, error) {
 		return raw, nil
 	}
 	return tlsClient(raw, cfg)
+}
+
+// applyXrayParams 处理 **xray 分享链接**那一套传输/安全参数。
+//
+// 为什么要有它：vless / vmess / trojan 在现实里几乎都是从分享链接粘来的，那些链接
+// 用的是 `?type=ws&security=tls&sni=&path=&host=&allowInsecure=1`，与 gost 的
+// `协议+传输://` 写法是两套习惯 —— 两种我们都收，而且**参数优先**（它更具体）。
+//
+// 三个协议的参数名完全一样，所以放在这里共用，别在三个文件里各写一遍。
+func applyXrayParams(u *Upstream, q url.Values) error {
+	switch typ := strings.ToLower(q.Get("type")); typ {
+	case "", "tcp", "raw":
+		// 按 scheme 里写的传输来
+	case "ws", "websocket":
+		u.Transport = transportWS
+		if u.TLS {
+			u.Transport = transportWSS
+		}
+	case "grpc", "h2", "http", "kcp", "quic", "httpupgrade", "splithttp", "xhttp", "mkcp":
+		return fmt.Errorf("传输方式 %q 本版不支持（支持 tcp / ws / wss + tls）；"+
+			"请让上游换个传输，或用别的协议", typ)
+	default:
+		return fmt.Errorf("不认识的传输方式 %q", typ)
+	}
+
+	switch sec := strings.ToLower(q.Get("security")); sec {
+	case "":
+		// 按 scheme 里写的来（trojan 默认带 TLS）
+	case "none":
+		u.TLS = false
+		if u.Transport == transportWSS {
+			u.Transport = transportWS
+		}
+		if u.Transport == transportTLS {
+			u.Transport = transportTCP
+		}
+	case "tls":
+		u.TLS = true
+		switch u.Transport {
+		case transportTCP:
+			u.Transport = transportTLS
+		case transportWS:
+			u.Transport = transportWSS
+		}
+	case "reality", "xtls":
+		return fmt.Errorf("security=%s（REALITY / XTLS）本版不支持 —— 它要 uTLS 指纹伪装"+
+			"与 X25519 密钥交换，不是\"打开一个开关\"；请让上游改用普通 TLS", sec)
+	default:
+		return fmt.Errorf("不认识的安全方式 %q（支持 tls / none）", sec)
+	}
+
+	// 分享链接里的 sni= / allowInsecure= 与 gost 的语义对齐
+	if s := q.Get("sni"); s != "" {
+		u.ServerName = s
+	}
+	switch strings.ToLower(q.Get("allowinsecure")) {
+	case "0", "false":
+		// xray 默认校验证书；我们说 allowInsecure=0 就是"要校验"
+		u.Verify = true
+	case "1", "true":
+		u.Verify = false
+	}
+	if u.Verify {
+		// 校验证书时 SNI 不能为空（ServerName 空 + 校验 → 必然失败）
+		if u.ServerName == "" {
+			u.ServerName = stripPort(u.Addr)
+		}
+	}
+	return nil
 }

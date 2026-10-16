@@ -74,7 +74,7 @@ type ssProxy struct{ u *Upstream }
 func (p *ssProxy) cipher() (ss.Cipher, error) { return ss.Lookup(p.u.Creds.User) }
 
 func (p *ssProxy) Dial(ip net.IP, port uint16, timeout time.Duration) (net.Conn, error) {
-	target, err := ss.Addr(ip, "", port)
+	target, err := appendAddr(nil, ip, port)
 	if err != nil {
 		return nil, err
 	}
@@ -83,7 +83,7 @@ func (p *ssProxy) Dial(ip net.IP, port uint16, timeout time.Duration) (net.Conn,
 
 func (p *ssProxy) DialHost(host string, port uint16, timeout time.Duration) (net.Conn, error) {
 	// 域名透传给服务端解析（ATYP=域名）—— 内网域名因此不必在本机解析得出。
-	target, err := ss.Addr(nil, host, port)
+	target, err := appendAddrHost(nil, host, port)
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +136,7 @@ func (p *ssProxy) ConnectOn(conn net.Conn, ip net.IP, port uint16, timeout time.
 	if !ok {
 		return fmt.Errorf("ss 预热连接类型不对: %T", conn)
 	}
-	target, err := ss.Addr(ip, "", port)
+	target, err := appendAddr(nil, ip, port)
 	if err != nil {
 		return err
 	}

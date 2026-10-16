@@ -448,3 +448,297 @@ func TestInteropGostShadowsocksWrongPassword(t *testing.T) {
 		t.Fatal("口令错却读到了数据 —— 要么服务端没校验，要么我们解错了")
 	}
 }
+
+// ───────── xray-core 服务端（trojan / vless / vmess 用 gost 测不了）─────────
+
+// xrayPath 找 xray.exe（仓库根的 local/bin/）。
+func xrayPath() string {
+	for _, p := range []string{
+		filepath.Join("..", "..", "local", "bin", "xray.exe"),
+		filepath.Join("..", "..", "local", "bin", "xray"),
+	} {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			if abs, err := filepath.Abs(p); err == nil {
+				return abs
+			}
+			return p
+		}
+	}
+	return ""
+}
+
+// startXray 起一个 xray 服务端（config 里的 %CERT% / %KEY% 会被替换成临时证书路径）。
+func startXray(t *testing.T, cfg string, ports ...int) {
+	t.Helper()
+	bin := xrayPath()
+	if bin == "" {
+		t.Skip("local/bin/xray.exe 不在，跳过互操作测试（见 KB:资源/代理/上游协议线格式规格.md）")
+	}
+	cert, key := selfSignedCertPEM(t)
+	cfg = strings.ReplaceAll(cfg, "%CERT%", filepath.ToSlash(cert))
+	cfg = strings.ReplaceAll(cfg, "%KEY%", filepath.ToSlash(key))
+	dir, err := os.MkdirTemp("", "nethub-xray")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bin, "run", "-c", cfgPath)
+	cmd.Dir = dir
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("起 xray 失败: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+	for _, p := range ports {
+		waitListen(t, p)
+	}
+}
+
+// trojan 对测：TLS 直连 与 ws 两条路（xray 同时开两个 inbound）。
+func TestInteropXrayTrojan(t *testing.T) {
+	tgt, stopEcho := echoServer(t)
+	defer stopEcho()
+
+	tlsPort, wsPort := freePort(t), freePort(t)
+	cfg := strings.ReplaceAll(xrayTrojanCfg, "%TLS%", fmt.Sprint(tlsPort))
+	cfg = strings.ReplaceAll(cfg, "%WS%", fmt.Sprint(wsPort))
+	startXray(t, cfg, tlsPort, wsPort)
+
+	t.Run("tls", func(t *testing.T) {
+		up, err := Parse(fmt.Sprintf("trojan://sesame@127.0.0.1:%d", tlsPort))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !up.TLS {
+			t.Fatal("trojan 默认就该带 TLS")
+		}
+		echoThrough(t, up, tgt, "hello-trojan")
+	})
+
+	t.Run("ws", func(t *testing.T) {
+		// xray 分享链接的写法（type=ws + path + sni）
+		up, err := Parse(fmt.Sprintf("trojan://sesame@127.0.0.1:%d?type=ws&path=/tr&sni=127.0.0.1", wsPort))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if up.Transport != transportWSS {
+			t.Fatalf("type=ws + security=tls 应该归一化成 wss，得到 %s", up.Transport)
+		}
+		echoThrough(t, up, tgt, "hello-trojan-ws")
+	})
+
+	t.Run("域名透传", func(t *testing.T) {
+		up, err := Parse(fmt.Sprintf("trojan://sesame@127.0.0.1:%d", tlsPort))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, portStr, _ := net.SplitHostPort(tgt)
+		var p uint16
+		fmt.Sscanf(portStr, "%d", &p)
+		c, err := up.DialHost("localhost", p, 5*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		_ = c.SetDeadline(time.Now().Add(3 * time.Second))
+		if _, err := c.Write([]byte("byname")); err != nil {
+			t.Fatal(err)
+		}
+		got := make([]byte, 6)
+		if _, err := readFull(c, got); err != nil {
+			t.Fatalf("域名路径读失败: %v", err)
+		}
+		if string(got) != "byname" {
+			t.Fatalf("域名路径回显不对: %q", got)
+		}
+	})
+
+	t.Run("口令错", func(t *testing.T) {
+		// trojan 与 ss 一样：**请求不报错**，服务端只是不理你（xray 会直接断开）。
+		// 所以断言"写能过、读会失败"，别把 Dial 成功当认证通过。
+		up, err := Parse(fmt.Sprintf("trojan://wrong@127.0.0.1:%d", tlsPort))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, portStr, _ := net.SplitHostPort(tgt)
+		var p uint16
+		fmt.Sscanf(portStr, "%d", &p)
+		c, err := up.Dial(net.ParseIP("127.0.0.1"), p, 3*time.Second)
+		if err != nil {
+			t.Fatalf("trojan 没有握手应答，拨号不该失败: %v", err)
+		}
+		defer c.Close()
+		_ = c.SetDeadline(time.Now().Add(2 * time.Second))
+		_, _ = c.Write([]byte("hello"))
+		if _, err := c.Read(make([]byte, 8)); err == nil {
+			t.Fatal("口令错却读到了数据")
+		}
+	})
+}
+
+// xrayTrojanCfg trojan 对测用的 xray 配置（两个 inbound：TLS 直连 + ws）。
+const xrayTrojanCfg = `{
+  "log": {"loglevel": "warning"},
+  "inbounds": [
+    {"listen": "127.0.0.1", "port": %TLS%, "protocol": "trojan",
+     "settings": {"clients": [{"password": "sesame"}]},
+     "streamSettings": {"network": "tcp", "security": "tls",
+       "tlsSettings": {"certificates": [{"certificateFile": "%CERT%", "keyFile": "%KEY%"}]}}},
+    {"listen": "127.0.0.1", "port": %WS%, "protocol": "trojan",
+     "settings": {"clients": [{"password": "sesame"}]},
+     "streamSettings": {"network": "ws", "security": "tls",
+       "wsSettings": {"path": "/tr"},
+       "tlsSettings": {"certificates": [{"certificateFile": "%CERT%", "keyFile": "%KEY%"}]}}}
+  ],
+  "outbounds": [{"protocol": "freedom"}]
+}`
+
+// ───────── VLESS（裸 flow）与 xray 对测 ─────────
+
+// xrayVlessCfg vless 对测配置（两个 inbound：TLS 直连 + ws，均无 flow）。
+const xrayVlessCfg = `{
+  "log": {"loglevel": "warning"},
+  "inbounds": [
+    {"listen": "127.0.0.1", "port": %TLS%, "protocol": "vless",
+     "settings": {"clients": [{"id": "%ID%"}], "decryption": "none"},
+     "streamSettings": {"network": "tcp", "security": "tls",
+       "tlsSettings": {"certificates": [{"certificateFile": "%CERT%", "keyFile": "%KEY%"}]}}},
+    {"listen": "127.0.0.1", "port": %WS%, "protocol": "vless",
+     "settings": {"clients": [{"id": "%ID%"}], "decryption": "none"},
+     "streamSettings": {"network": "ws", "security": "tls", "wsSettings": {"path": "/vl"},
+       "tlsSettings": {"certificates": [{"certificateFile": "%CERT%", "keyFile": "%KEY%"}]}}}
+  ],
+  "outbounds": [{"protocol": "freedom"}]
+}`
+
+func TestInteropXrayVless(t *testing.T) {
+	tgt, stopEcho := echoServer(t)
+	defer stopEcho()
+
+	id := RandomUUID()
+	tlsPort, wsPort := freePort(t), freePort(t)
+	cfg := xrayVlessCfg
+	cfg = strings.ReplaceAll(cfg, "%ID%", id)
+	cfg = strings.ReplaceAll(cfg, "%TLS%", fmt.Sprint(tlsPort))
+	cfg = strings.ReplaceAll(cfg, "%WS%", fmt.Sprint(wsPort))
+	startXray(t, cfg, tlsPort, wsPort)
+
+	t.Run("tls", func(t *testing.T) {
+		up, err := Parse(fmt.Sprintf("vless://%s@127.0.0.1:%d?encryption=none&security=tls&sni=127.0.0.1", id, tlsPort))
+		if err != nil {
+			t.Fatal(err)
+		}
+		echoThrough(t, up, tgt, "hello-vless")
+	})
+
+	t.Run("ws", func(t *testing.T) {
+		up, err := Parse(fmt.Sprintf("vless://%s@127.0.0.1:%d?encryption=none&security=tls&type=ws&path=/vl&sni=127.0.0.1",
+			id, wsPort))
+		if err != nil {
+			t.Fatal(err)
+		}
+		echoThrough(t, up, tgt, "hello-vless-ws")
+	})
+
+	t.Run("无横线大写UUID也认", func(t *testing.T) {
+		up, err := Parse(fmt.Sprintf("vless://%s@127.0.0.1:%d?security=tls&sni=127.0.0.1",
+			strings.ToUpper(strings.ReplaceAll(id, "-", "")), tlsPort))
+		if err != nil {
+			t.Fatal(err)
+		}
+		echoThrough(t, up, tgt, "uuid-form")
+	})
+
+	t.Run("域名透传", func(t *testing.T) {
+		up, err := Parse(fmt.Sprintf("vless://%s@127.0.0.1:%d?security=tls&sni=127.0.0.1", id, tlsPort))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, portStr, _ := net.SplitHostPort(tgt)
+		var p uint16
+		fmt.Sscanf(portStr, "%d", &p)
+		c, err := up.DialHost("localhost", p, 5*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		_ = c.SetDeadline(time.Now().Add(3 * time.Second))
+		if _, err := c.Write([]byte("byname")); err != nil {
+			t.Fatal(err)
+		}
+		got := make([]byte, 6)
+		if _, err := readFull(c, got); err != nil {
+			t.Fatalf("域名路径读失败: %v", err)
+		}
+		if string(got) != "byname" {
+			t.Fatalf("域名路径回显不对: %q", got)
+		}
+	})
+
+	t.Run("预热等价于直连", func(t *testing.T) {
+		up, err := Parse(fmt.Sprintf("vless://%s@127.0.0.1:%d?security=tls&sni=127.0.0.1", id, tlsPort))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pre, err := up.Prepare(5 * time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer pre.Close()
+		host, portStr, _ := net.SplitHostPort(tgt)
+		var p uint16
+		fmt.Sscanf(portStr, "%d", &p)
+		if err := up.ConnectOn(pre, net.ParseIP(host), p, 5*time.Second); err != nil {
+			t.Fatal(err)
+		}
+		_ = pre.SetDeadline(time.Now().Add(3 * time.Second))
+		if _, err := pre.Write([]byte("ping")); err != nil {
+			t.Fatal(err)
+		}
+		got := make([]byte, 4)
+		if _, err := readFull(pre, got); err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != "ping" {
+			t.Fatalf("回显不对: %q", got)
+		}
+	})
+
+	t.Run("UUID错要在读的时候暴露", func(t *testing.T) {
+		// VLESS 的响应头是**随第一段数据**发的（xray 如此），所以错误不可能在 Dial 里出现：
+		// 服务端对无效 UUID 是静默断开，我们只会在第一次读时发现。
+		// 这条用例把这个语义钉住 —— 别把"Dial 成功"当成"认证通过"。
+		up, err := Parse(fmt.Sprintf("vless://%s@127.0.0.1:%d?security=tls&sni=127.0.0.1", RandomUUID(), tlsPort))
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, err := up.Dial(net.ParseIP("127.0.0.1"), 9, 3*time.Second)
+		if err != nil {
+			t.Logf("Dial 直接失败也可以（服务端断得够快）: %v", err)
+			return
+		}
+		defer c.Close()
+		_ = c.SetDeadline(time.Now().Add(3 * time.Second))
+		_, _ = c.Write([]byte("hello"))
+		if _, err := c.Read(make([]byte, 8)); err == nil {
+			t.Fatal("UUID 不对却读到了数据 —— 服务端应该静默断开")
+		}
+	})
+
+	t.Run("flow要拒绝", func(t *testing.T) {
+		_, err := Parse(fmt.Sprintf("vless://%s@127.0.0.1:%d?flow=xtls-rprx-vision", id, tlsPort))
+		if err == nil {
+			t.Fatal("声明 flow 应该被解析期拒绝")
+		}
+		if !strings.Contains(err.Error(), "flow") {
+			t.Errorf("报错里要提 flow: %v", err)
+		}
+	})
+}

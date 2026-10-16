@@ -41,31 +41,6 @@ func manualEVP(pass string, n int) []byte {
 	return out[:n]
 }
 
-// 地址编码：ATYP + ADDR + PORT（端口在**最后**，大端）—— SIP004 与 SOCKS5 同一套。
-func TestAddr(t *testing.T) {
-	ip, err := Addr(net.ParseIP("10.10.10.237"), "", 5432)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []byte{0x01, 10, 10, 10, 237, 0x15, 0x38}
-	if !bytes.Equal(ip, want) {
-		t.Errorf("IPv4 编码得到 %x，期望 %x", ip, want)
-	}
-	host, err := Addr(nil, "main.his.com", 80)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if host[0] != 0x03 || int(host[1]) != len("main.his.com") {
-		t.Errorf("域名编码头不对: %x", host[:4])
-	}
-	if !bytes.Equal(host[2:len(host)-2], []byte("main.his.com")) {
-		t.Errorf("域名内容不对: %q", host[2:len(host)-2])
-	}
-	if binary.BigEndian.Uint16(host[len(host)-2:]) != 80 {
-		t.Errorf("端口不对: %x", host[len(host)-2:])
-	}
-}
-
 // 套件名的提示要"能照着改"：老流密码与 2022 的诉求不同，不能混成一句"不支持"。
 func TestLookupHints(t *testing.T) {
 	if _, err := Lookup("aes-256-cfb"); err == nil {
@@ -94,7 +69,8 @@ func TestReadPathAgainstManualServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	const password = "sesame"
-	target, _ := Addr(net.ParseIP("10.0.0.9"), "", 5432)
+	// 地址编码由调用方（upstream 侧）给：ss 包只管"把这段字节写进首块"。
+	target := []byte{0x01, 10, 0, 0, 9, 0x15, 0x38}
 
 	conn, err := ClientConn(cli, cip, password, target)
 	if err != nil {
@@ -193,7 +169,7 @@ func TestFirstWriteWritesSaltThenAddr(t *testing.T) {
 
 	for _, method := range []string{"aes-128-gcm", "chacha20-ietf-poly1305"} {
 		cip, _ := Lookup(method)
-		target, _ := Addr(net.ParseIP("1.2.3.4"), "", 80)
+		target := []byte{0x01, 1, 2, 3, 4, 0x00, 0x50}
 		conn, err := ClientConn(cli, cip, "pw", target)
 		if err != nil {
 			t.Fatal(err)

@@ -69,6 +69,10 @@ type Upstream struct {
 
 	Creds socks.Creds
 
+	// UserID vless / vmess 的 UUID（16 字节**原始值**，解析期就转好：
+	// 线上写的是字节而不是文本，等拨号时再转只会把错拖到运行时）。
+	UserID []byte
+
 	// Verify 是否校验上游证书。
 	// 默认 false —— 与 gost 的 socks5+tls 默认行为一致（它不配 CA 时不校验）。
 	// 想开启就在 URL 上加 ?secure=true。

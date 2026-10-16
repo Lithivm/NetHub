@@ -248,32 +248,3 @@ func (c *Conn) RemoteAddr() net.Addr               { return c.raw.RemoteAddr() }
 func (c *Conn) SetDeadline(t time.Time) error      { return c.raw.SetDeadline(t) }
 func (c *Conn) SetReadDeadline(t time.Time) error  { return c.raw.SetReadDeadline(t) }
 func (c *Conn) SetWriteDeadline(t time.Time) error { return c.raw.SetWriteDeadline(t) }
-
-// Addr 拼 shadowsocks 的地址编码：ATYP + ADDR + PORT。
-//
-// 与 SOCKS5 **同一套编码**（端口在最后，2 字节大端）—— sip004 就是借用了它的格式。
-// 注意 ATYP 常量与 SOCKS5 相同：0x01 IPv4 / 0x03 域名 / 0x04 IPv6。
-func Addr(ip net.IP, host string, port uint16) ([]byte, error) {
-	out := make([]byte, 0, 1+1+len(host)+2)
-	switch {
-	case host != "": // 域名：交给服务端解析
-		if len(host) > 255 {
-			return nil, fmt.Errorf("域名过长: %d 字节", len(host))
-		}
-		out = append(out, atypDomain, byte(len(host)))
-		out = append(out, host...)
-	case ip.To4() != nil:
-		out = append(out, atypIPv4)
-		out = append(out, ip.To4()...)
-	default:
-		return nil, fmt.Errorf("不支持的目标地址: %v", ip)
-	}
-	var pb [2]byte
-	binary.BigEndian.PutUint16(pb[:], port)
-	return append(out, pb[:]...), nil
-}
-
-const (
-	atypIPv4   = 0x01
-	atypDomain = 0x03
-)
