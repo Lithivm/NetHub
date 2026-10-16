@@ -497,7 +497,10 @@ type Engine struct {
 	// 唤醒/插拔网线/换 Wi-Fi 之后那几秒本机 DNS 本来就不可用，自检据此让一步
 	// （见 netChangedWithin），别让“机器刚醒”变成“我们把 DNS 弄坏了”。
 	netChangedAt atomic.Int64
-	dnsBox       *dnsBlackbox // 排查用：DNS 黑匣子（tuning.dns_blackbox 打开时才有）
+	// dnsRetry 自检失败后的复测间隔（0 = 用 dnsSelfCheckRetry）。
+	// 只给用例用：真等 20 秒的测试没人跑。
+	dnsRetry time.Duration
+	dnsBox   *dnsBlackbox // 排查用：DNS 黑匣子（tuning.dns_blackbox 打开时才有）
 	// tunBlocked 本机已有别的 TUN 模式代理在接管流量（检测到就自动让路）。
 	// 每次 Start 都要重新问一次：上一轮开着 Clash TUN、这轮关掉了，
 	// 如果这个标记不复位，我们会一直“让路”（不学名字、不接管 DNS）却谁也看不出来。
@@ -3029,10 +3032,14 @@ func (e *Engine) dnsTakeoverSelfCheck() {
 		return
 	}
 	// ② 复测：给“瞬时不可用”一次自己好的机会（别再让唤醒那几秒制造假警报）。
+	retry := e.dnsRetry
+	if retry <= 0 {
+		retry = dnsSelfCheckRetry
+	}
 	select {
 	case <-e.done:
 		return
-	case <-time.After(dnsSelfCheckRetry):
+	case <-time.After(retry):
 	}
 	second := probe()
 	verdict, bad := judgeDNSProbe(second, e.tookOver.Load() != before)

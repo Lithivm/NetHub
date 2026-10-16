@@ -2,8 +2,12 @@ package engine
 
 import (
 	"net"
+	"strings"
 	"testing"
 	"time"
+
+	"nethub/internal/logbus"
+	"nethub/internal/rules"
 )
 
 // DNS 接管自检的判据：什么情况下才该刷那条“我们把别的名字弄坏了”的 ERROR。
@@ -147,5 +151,30 @@ func TestNetChangedWithin(t *testing.T) {
 	e.netChangedAt.Store(time.Now().Add(-time.Minute).UnixNano())
 	if e.netChangedWithin(dnsSelfCheckQuiet) {
 		t.Error("一分钟前变的 ⇒ 不该再静默（那时网络早该稳了）")
+	}
+}
+
+// 接线用例：判据再对，调用点没接上也一样没用 —— 这条**真跑一次自检**，钉两件事：
+//
+//	normal 档一行都不写（自检通过、或“本机 DNS 此刻不可用”都属此列）
+//	verbose 档必须留下说明（否则“早上那一下到底怎么了”事后无从查起）
+//
+// 本机 DNS 通不通不影响结论：两种情况下都不许在 normal 档写。
+func TestDNSSelfCheckLogTier(t *testing.T) {
+	e := newTestEngine()
+	e.rules.Store(rules.New())
+	e.dnsRetry = time.Millisecond // 别真等 20 秒
+
+	n := len(e.bus.Snapshot())
+	e.dnsTakeoverSelfCheck()
+	if got := newLines(e.bus, n); got != "" {
+		t.Fatalf("normal 档不该写 dns.selftest（无论通过还是环境原因）：%q", got)
+	}
+
+	e.bus.SetLevel(logbus.LevelVerbose)
+	n = len(e.bus.Snapshot())
+	e.dnsTakeoverSelfCheck()
+	if got := newLines(e.bus, n); !strings.Contains(got, "dns.selftest") {
+		t.Errorf("verbose 档必须留下说明（通过 / 复测通过 / 环境原因 / 该报的那两条），得到：%q", got)
 	}
 }
