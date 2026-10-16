@@ -325,7 +325,8 @@ type StatPage struct {
 	Direct  uint64 `json:"direct"`
 	Blocked uint64 `json:"blocked"`
 
-	// Uptime 引擎本次运行了多久；Since 这组数字从什么时候开始数（都是给人看的字符串）。
+	// Uptime 这组数字覆盖了多久（与 Since 同一窗口）；Since 这组数字从什么时候开始数
+	// （都是给人看的字符串，不是时间戳）。
 	Uptime string `json:"uptime"`
 	Since  string `json:"since"`
 
@@ -370,13 +371,16 @@ func (a *statAcc) addPort(p uint16, keep int) {
 }
 
 // StatsPage 生成「统计」页快照。scope 为空 / StatScopeRun 时看"本次运行"，StatScopeAll 看累计。
-func (e *Engine) StatsPage(scope string, topN int) StatPage {
+//
+// 返回的 Uptime / Since 都描述**这组数字的窗口**（与 scope 一致）——
+// 别把它当成"程序跑了多久"（那在诊断页）。
+func (e *Engine) StatsPage(scope string, topN int) (p StatPage) {
 	if topN <= 0 {
 		topN = StatTopN
 	}
 	now := time.Now()
 	run := scope != StatScopeAll
-	p := StatPage{Scope: StatScopeAll, TopN: topN, Cap: StatBucketCap}
+	p = StatPage{Scope: StatScopeAll, TopN: topN, Cap: StatBucketCap}
 	if run {
 		p.Scope = StatScopeRun
 	}
@@ -384,11 +388,20 @@ func (e *Engine) StatsPage(scope string, topN int) StatPage {
 		p.Readonly = true
 		return p
 	}
-	if up := now.Sub(e.startedAt); e.startedAt.IsZero() {
-		p.Uptime = "—"
-	} else {
-		p.Uptime = humanDur(up)
-	}
+
+	// Uptime 的语义：**这组数字覆盖了多久**（与 Since 同一个起点：累计 = 程序启动或上次
+	// 清零；本次运行 = 上次点「启动」）—— 不是引擎/进程跑了多久（那在诊断页）。
+	// 两个错法都会让卡片自相矛盾：用引擎起点 → 引擎重启后“累计 100 条 · 时长 2 分钟”；
+	// 清零后不重算 → “累计 0 条 · 时长 6 小时”。
+	// 起点在下面读桶时一起拿到（要持锁），所以用命名返回值 + defer 统一算。
+	var start time.Time
+	defer func() {
+		if start.IsZero() {
+			p.Uptime = "—"
+		} else {
+			p.Uptime = humanDur(now.Sub(start))
+		}
+	}()
 
 	apps := map[string]*statAcc{}
 	tgts := map[string]*statAcc{}
@@ -428,6 +441,7 @@ func (e *Engine) StatsPage(scope string, topN int) StatPage {
 			since = b.runSince
 		}
 		p.Evicted = b.evicted
+		start = since // 时长跟这组数字的窗口一致（清零 / 本次运行都会把它一并挪走）
 		if !since.IsZero() {
 			p.Since = since.Format("15:04:05")
 		}

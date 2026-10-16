@@ -2,6 +2,9 @@ package engine
 
 import (
 	"net"
+	"regexp"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -282,4 +285,71 @@ func TestStatPageReadonly(t *testing.T) {
 	if !p.Readonly || p.Conns != 0 || p.TopN != StatTopN {
 		t.Fatalf("只读态应该给空页：%+v", p)
 	}
+}
+
+// 「时长」= **这组数字覆盖了多久**，不是引擎/进程跑了多久。
+// 两种错法都会让卡片自相矛盾，所以两条都钉住：
+//
+//	· 累计口径用引擎起点 → 引擎重启后显示"累计 100 条 · 时长 2 分钟"
+//	· 清零之后不重置 → 显示"累计 0 条 · 时长 6 小时"
+func TestStatUptimeFollowsWindow(t *testing.T) {
+	e := newTestEngine()
+	e.finish(mkConn("a.exe", "10.0.0.5", 443, rules.ActionChain, 10, 20))
+
+	// 累计口径：窗口起点是"程序启动 / 上次清零"（引擎刚重启过也不动它）
+	e.stats.since = time.Now().Add(-3 * time.Hour)
+	e.startedAt = time.Now().Add(-2 * time.Minute) // 引擎刚重启过（只影响本次运行口径）
+	e.stats.runSince = e.startedAt
+	all := e.StatsPage(StatScopeAll, 20)
+	if all.Uptime == "" || all.Uptime == "—" {
+		t.Fatalf("累计口径该有时长: %+v", all.Uptime)
+	}
+	if d := durOf(t, all.Uptime); d < 170*time.Minute {
+		t.Fatalf("累计口径的时长要用窗口起点（程序启动/上次清零 = 3h），得到 %s —— 用引擎起点就会出现“累计 100 条 · 时长 2 分钟”", all.Uptime)
+	}
+
+	// 本次运行口径：用引擎起点
+	run := e.StatsPage(StatScopeRun, 20)
+	if d := durOf(t, run.Uptime); d > 10*time.Minute {
+		t.Fatalf("本次运行口径的时长要用引擎「启动」那一刻（2m），得到 %s", run.Uptime)
+	}
+
+	// 清零：窗口从头算，时长必须跟着变短（否则"累计 0 条 · 时长 6 小时"）
+	e.ResetStats()
+	after := e.StatsPage(StatScopeAll, 20)
+	if after.Conns != 0 {
+		t.Fatalf("清零没生效: %+v", after)
+	}
+	if d := durOf(t, after.Uptime); d > time.Minute {
+		t.Fatalf("清零之后时长要跟着重算（现在应是几毫秒），得到 %s", after.Uptime)
+	}
+}
+
+// durOf 把 humanDur 的输出（"3h2m" / "12s" / "5m"）解回 time.Duration。
+func durOf(t *testing.T, s string) time.Duration {
+	t.Helper()
+	d, err := time.ParseDuration(strings.ReplaceAll(s, "h", "h"))
+	if err == nil {
+		return d
+	}
+	// humanDur 可能是 "6h12m"（可解析）或 "3d4h"（不可解析 → 粗略处理）
+	var total time.Duration
+	re := regexp.MustCompile(`(\d+)([dhms])`)
+	for _, m := range re.FindAllStringSubmatch(s, -1) {
+		n, _ := strconv.Atoi(m[1])
+		switch m[2] {
+		case "d":
+			total += time.Duration(n) * 24 * time.Hour
+		case "h":
+			total += time.Duration(n) * time.Hour
+		case "m":
+			total += time.Duration(n) * time.Minute
+		case "s":
+			total += time.Duration(n) * time.Second
+		}
+	}
+	if total == 0 {
+		t.Fatalf("解不出时长: %q", s)
+	}
+	return total
 }

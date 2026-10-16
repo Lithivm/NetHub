@@ -203,7 +203,7 @@ function showPage(name) {
   if (name === 'stats') {
     loadStats();
     // 两个分段滑块的指示块要重新量一次宽度（这一页平时不可见，量出来是 0）
-    ['segStatScope', 'segStatDim'].forEach(id => {
+    ['segStatDim'].forEach(id => {
       const s = document.getElementById(id);
       if (s) positionSegThumb(s, true);
     });
@@ -1130,14 +1130,18 @@ function connDetailRow(g) {
 
    两个口径（本次运行 / 累计）由后端给：前端只切一个参数重拉，**不在本地算差** ——
    本地算差会在"切页/收托盘"停轮询后失真（回来一看数字跳一大下）。 */
-let statScope = 'run';    // run=本次运行 / all=累计
 let statDim = 'targets';  // targets=按目标 / apps=按应用
 let statSort = null;      // {col, dir}：点表头排序；null = 默认（流量大的在前）
 let statData = null;
 
+// 口径只有一个：**累计**（本程序启动以来，界面上的「清零」清掉）。
+// 曾经做过「本次运行 / 累计」两档，去掉了（2026-10-16）—— 引擎 Start 时清的那一档
+// 是全界面**唯一**不同起点的数字（链页的规则累计、顶栏流量图都是进程起算），
+// 留着就会出现「连接页 80、链页 100」这种自相矛盾；而且服务形态一跑几周，两档完全一样。
+// 后端 GetStats 仍认 run / all 两档（有用例钉住），但界面只问 all。
 async function loadStats() {
   let d = null;
-  try { d = await call('GetStats', statScope); }
+  try { d = await call('GetStats', 'all'); }
   catch (e) { return; }   // 轮询失败静默：别每 1.5 秒弹一次错
   statData = d || null;
   renderStats();
@@ -1145,7 +1149,6 @@ async function loadStats() {
 
 function renderStats() {
   const d = statData || {};
-  const on = statScope === 'all';
   if (!document.getElementById('statConns')) return;   // 老 HTML/局部刷新时别炸
 
   document.getElementById('statConns').textContent = (d.conns || 0);
@@ -1165,9 +1168,7 @@ function renderStats() {
     '直连要看得到，得先在「连接」页打开「也统计直连流量的字节数」——\n' +
     '关着时直连的包根本不进内核过滤器（零开销），也就无从统计。';
 
-  document.getElementById('statSince').textContent = d.since
-    ? (on ? '累计从 ' : '从 ') + d.since + ' 起' + (on ? '（本程序启动以来）' : '')
-    : '';
+  document.getElementById('statSince').textContent = d.since ? '自 ' + d.since + ' 起' : '';
 
   const rows = ((statDim === 'apps' ? d.apps : d.targets) || []).slice();
   const keys = statDim === 'apps' ? (d.keysApps || 0) : (d.keysTargets || 0);
@@ -1235,9 +1236,8 @@ function renderStats() {
   t.appendChild(head);
 
   if (!rows.length) {
-    const which = on ? '累计' : '本次运行';
     t.appendChild(emptyState(ICON_TARGET, '这一段还没有统计',
-      '命中规则的连接一旦收尾，就会按应用与目标累计到这里（' + which + '口径）。'
+      '命中规则的连接一旦收尾，就会按应用与目标累计到这里。'
       + '刚点过「清零」的话，等业务再跑一会儿。', null, null));
     return;
   }
@@ -1281,10 +1281,9 @@ function renderStats() {
    "这段时间谁在占带宽"这个结论，而截图截不全、也不能被搜。 */
 function statsCopyText() {
   const d = statData || {};
-  const on = statScope === 'all';
   const rows = (statDim === 'apps' ? d.apps : d.targets) || [];
   const L = [];
-  L.push('NetHub 统计（' + (on ? '累计（本程序启动以来）' : '本次运行') + (d.since ? '，从 ' + d.since + ' 起' : '') + '）');
+  L.push('NetHub 统计（累计，本程序启动以来' + (d.since ? '，从 ' + d.since + ' 起' : '') + '）');
   L.push('连接：' + (d.conns || 0) + '（活跃 ' + (d.active || 0) + ' · 失败 ' + (d.failed || 0) + '）');
   L.push('流量：↑ ' + fmtBytes(d.up) + ' / ↓ ' + fmtBytes(d.down));
   L.push('分解：走隧道 ' + (d.chain || 0) + ' · 直连 ' + (d.direct || 0) + ' · 阻断 ' + (d.blocked || 0));
@@ -2584,7 +2583,8 @@ const HELP = {
     title: '「统计」这一块的口径与边界（在「连接」页里）',
     paras: [
       '这一块回答「这段时间谁在占通道」；上面那张连接列表回答「现在有哪些连接」。两者不重复：列表实时、已结束的一会儿就消失；这一块累计、可清零。',
-      '两个口径：本次运行 = 引擎这一次「启动」以来；累计 = 本程序启动以来（跨「停止/启动」）。点「清零」两个口径一起清。',
+      '口径只有一个：累计（本程序启动以来），与「链」页的累计、「连接」页上方的累计、顶栏流量图是同一个起点 —— 引擎「停止/启动」不会把它清零（否则同一件事会有两个数，反而说不清）。要重新起算就点「清零」。',
+      '「时长」是这组数字覆盖了多久（与「自 … 起」同一个起点；点「清零」后会重新算），不是程序/引擎跑了多久 —— 那在「诊断」页。',
       '连接数 = 已经收尾的 + 还开着的（行内「12·2」= 共 12 条，其中 2 条还在跑）；「活跃」与失败是同一口径，阻断的算失败 —— 应用那边确实没连上。',
       '流量 = 这条连接实际过的字节（走隧道的分上下行；直连的只有出方向）。',
       '当前速率只看还开着的连接（已结束的自然没有速率）；平均速率 = （发送 + 接收）/ 这一行活跃的时长。',
@@ -2998,18 +2998,8 @@ function wire() {
   bind('btnHelpRule', 'rule');
   bind('btnHelpStats', 'stats');
 
-  // 统计页：两个分段（口径 / 维度）+ 复制 + 清零。
-  // 两个滑块的指示块在页面可见时才量得准，所以点了先动数据再重新量。
-  const segScope = document.getElementById('segStatScope');
-  if (segScope) segScope.querySelectorAll('.seg-btn').forEach(b => {
-    b.onclick = () => {
-      statScope = b.dataset.scope || 'run';
-      segScope.querySelectorAll('.seg-btn').forEach(x => x.classList.toggle('is-active', x === b));
-      positionSegThumb(segScope);
-      statSort = null;   // 换口径 = 换一份数据，旧的排序键不再适用
-      loadStats();
-    };
-  });
+  // 统计块：只切维度（按目标 / 按应用）+ 复制 + 清零。
+  // 指示块在页面可见时才量得准，所以点了先动数据再重新量。
   const segDim = document.getElementById('segStatDim');
   if (segDim) segDim.querySelectorAll('.seg-btn').forEach(b => {
     b.onclick = () => {

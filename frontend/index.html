@@ -174,12 +174,8 @@
       <div class="card">
         <div class="card-head">
           <h2>统计</h2>
-          <div class="seg" id="segStatScope" title="本次运行：引擎这一次启动以来 · 累计：本程序启动以来（「清零」会把它一起清掉）">
-            <span class="seg-thumb"></span>
-            <button type="button" class="seg-btn is-active" data-scope="run">本次运行</button>
-            <button type="button" class="seg-btn" data-scope="all">累计</button>
-          </div>
           <div class="spacer"></div>
+          <span class="hint">累计（本程序启动以来）</span>
           <span class="hint" id="statSince">—</span>
           <button class="btn btn-sm" id="btnStatCopy">复制</button>
           <button class="btn btn-sm" id="btnStatReset">清零</button>
@@ -199,7 +195,7 @@
           <div class="stat-fig">
             <span class="stat-label">时长</span>
             <b class="stat-num" id="statUptime">—</b>
-            <span class="stat-sub">引擎本次运行</span>
+            <span class="stat-sub">这组数字覆盖了多久</span>
           </div>
         </div>
         <div class="hint stat-break" id="statBreak">—</div>
