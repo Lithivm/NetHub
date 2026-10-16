@@ -493,6 +493,10 @@ type Engine struct {
 	sniffClosing bool
 	tookOver     atomic.Uint64
 	tookSeen     map[string]bool
+	// netChangedAt 本机网络签名最后一次**真变化**的时刻（localNetLoop 写、DNS 自检读）。
+	// 唤醒/插拔网线/换 Wi-Fi 之后那几秒本机 DNS 本来就不可用，自检据此让一步
+	// （见 netChangedWithin），别让“机器刚醒”变成“我们把 DNS 弄坏了”。
+	netChangedAt atomic.Int64
 	dnsBox       *dnsBlackbox // 排查用：DNS 黑匣子（tuning.dns_blackbox 打开时才有）
 	// tunBlocked 本机已有别的 TUN 模式代理在接管流量（检测到就自动让路）。
 	// 每次 Start 都要重新问一次：上一轮开着 Clash TUN、这轮关掉了，
@@ -2877,45 +2881,173 @@ func (e *Engine) noteRealIP(name string, ip net.IP) {
 // 而且要能自己说出来。
 var dnsCanaries = []string{"www.baidu.com", "www.qq.com"}
 
+const (
+	// dnsSelfCheckRetry 自检失败后的复测间隔（瞬时抖动与真故障的分界）。
+	dnsSelfCheckRetry = 20 * time.Second
+	// dnsSelfCheckQuiet 本机网络刚变化后多久之内根本不查（见 netChangedWithin）。
+	dnsSelfCheckQuiet = 30 * time.Second
+)
+
+// dnsCanaryProbe 一条 canary 名字的探测结果。
+type dnsCanaryProbe struct {
+	Name       string
+	IPs        []net.IP
+	Err        error
+	Answerable bool // 这个名字命中通配规则（本来就归我们答）—— 那它就不是“不相干名字”了
+	Fake       bool // 解出来的是我们发的假 IP
+}
+
+// ok 这条 canary 的表现算“照常”吗。
+//
+// 两种都算：解出了真实 IP；或者它本来就命中通配规则 —— 那种情况下被答成假 IP 是
+// 用户明写的意图，不是故障（自检的前提“它不属于任何通配规则”在这个名字上不成立）。
+func (p dnsCanaryProbe) ok() bool {
+	if p.Err != nil || len(p.IPs) == 0 {
+		return false
+	}
+	return !p.Fake || p.Answerable
+}
+
+// why 这条 canary 为什么算失败（人话，直接进日志）。
+func (p dnsCanaryProbe) why() string {
+	if p.Fake && !p.Answerable {
+		return fmt.Sprintf("%s 被答成了我们自己的假 IP（%v）", p.Name, p.IPs)
+	}
+	return fmt.Sprintf("%s 解不出（%v）", p.Name, p.Err)
+}
+
+// probeDNSCanaries 用**系统解析器**（应用走的那条路）解一遍所有 canary。
+//
+// 解名与判据分开：解名是这条路径，判据是纯函数（judgeDNSProbe）—— 这样“什么情况下
+// 才该报那条 ERROR”能逐条钉在用例里，不用真去动本机 DNS。
+func probeDNSCanaries(lookup func(string) ([]net.IP, error), isFake func(net.IP) bool, answerable func(string) bool) []dnsCanaryProbe {
+	out := make([]dnsCanaryProbe, 0, len(dnsCanaries))
+	for _, name := range dnsCanaries {
+		p := dnsCanaryProbe{Name: name, Answerable: answerable(name)}
+		p.IPs, p.Err = lookup(name)
+		for _, ip := range p.IPs {
+			if isFake(ip) {
+				p.Fake = true
+			}
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// dnsProbeAnyOK 这一轮里有没有“照常”的 canary（至少一个就算通过，与原来的口径一致）。
+func dnsProbeAnyOK(list []dnsCanaryProbe) bool {
+	for _, p := range list {
+		if p.ok() {
+			return true
+		}
+	}
+	return false
+}
+
+// dnsProbeReasons 这一轮里失败的那几条的原因。
+func dnsProbeReasons(list []dnsCanaryProbe) []string {
+	var out []string
+	for _, p := range list {
+		if !p.ok() {
+			out = append(out, p.why())
+		}
+	}
+	return out
+}
+
+// dnsProbeVerdict 复测之后的结论。
+type dnsProbeVerdict int
+
+const (
+	dnsProbeOK   dnsProbeVerdict = iota // 照常
+	dnsProbeEnv                         // 本机 DNS 整体不可用，但**不是我们干的**
+	dnsProbeOurs                        // 我们有份 → 该大声报
+)
+
+// judgeDNSProbe 复测仍失败时下结论：这次解不出来，跟我们有没有关系？（纯函数）
+//
+// 为什么要归因，而不是“解不出来就报”：探针走的是**系统解析器**，所以
+// “本机 DNS 整体不可用”与“我们把别的名字答坏了”在这一层长得一模一样。
+// 2026-10-16 08:58 就是这个坑：机器从睡眠唤醒、物理网卡还没起来
+// （事件日志：08:58:57 唤醒，08:59:07 网卡才有地址），系统解析器必然解不出 ——
+// Windows 自己的时间服务在同一秒也在报 WSAHOST_NOT_FOUND。那天自检刷了一条
+// “我们把 DNS 弄坏了”的 ERROR。
+//
+// 归因是**结构性**的，不是猜：我们往网上发 DNS 应答的唯一入口是 takeoverQuery，
+// 而它被 WildcardMatch 挡着（不命中就一个包都不发；注入句柄还是 filter=false，
+// 只塞不拦）—— 于是“本轮 tookOver 没涨”= 我们一个应答都没发过 = 与我们无关。
+//
+// 反过来，只要这轮我们发过应答、或者 canary（本不该被我们答的名字）被答成了假 IP，
+// 就照旧大声报 —— 那才是这个自检要抓的东西。
+func judgeDNSProbe(second []dnsCanaryProbe, injected bool) (dnsProbeVerdict, []string) {
+	bad := dnsProbeReasons(second)
+	if len(bad) == 0 {
+		return dnsProbeOK, nil
+	}
+	for _, p := range second {
+		if p.Fake && !p.Answerable {
+			return dnsProbeOurs, bad // 明证：不相干的名字被我们答了
+		}
+	}
+	if injected {
+		return dnsProbeOurs, bad // 这轮我们发过应答 → 不能排除自己
+	}
+	return dnsProbeEnv, bad
+}
+
 // dnsTakeoverSelfCheck 验“除指定域名外的解析照常吗”。
 //
 // **只报警，不自己关**：这个功能就是干这个的，一有问题就自废就没意义了。
 // （唯一会自动退让的情形是“本机还有别的程序也在拦 DNS”导致的乒乓，那是真打架，
 // 见 dnsTakeoverLoop 里的检测。）
 //
-// 判据：canary 名字用**系统解析器**（应用走的那条路）解一遍 —— 至少一个解出
-// 非假 IP 才算通过；全解不出、或全被答成我们自己的假 IP → 大声报。
+// 三层判据：
+//
+//	① 至少一个 canary 照常 → 通过（verbose 一行，normal 档什么都不写）。
+//	② 失败**先不下结论**：唤醒/换网那几秒本来就会解不出来，等 dnsSelfCheckRetry
+//	   再解一遍；复测通过只写 verbose。
+//	③ 复测仍失败才**归因**（judgeDNSProbe）：不是我们干的 → verbose 说清；
+//	   有我们的份 → ERROR，原文照旧。
 func (e *Engine) dnsTakeoverSelfCheck() {
-	good, bad := 0, 0
-	var detail []string
-	for _, name := range dnsCanaries {
+	before := e.tookOver.Load()
+	lookup := func(name string) ([]net.IP, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		ips, err := net.DefaultResolver.LookupIP(ctx, "ip4", name)
-		cancel()
-		if err != nil || len(ips) == 0 {
-			bad++
-			detail = append(detail, fmt.Sprintf("%s 解不出（%v）", name, err))
-			continue
-		}
-		fake := false
-		for _, ip := range ips {
-			if e.isFakeIP(ip) {
-				fake = true
-			}
-		}
-		if fake {
-			bad++
-			detail = append(detail, fmt.Sprintf("%s 被答成了我们自己的假 IP（%v）", name, ips))
-			continue
-		}
-		good++
+		defer cancel()
+		return net.DefaultResolver.LookupIP(ctx, "ip4", name)
 	}
-	if good > 0 {
+	probe := func() []dnsCanaryProbe {
+		return probeDNSCanaries(lookup,
+			func(ip net.IP) bool { return e.isFakeIP(ip) },
+			func(name string) bool { return e.ruleSet().WildcardMatch(name) })
+	}
+
+	first := probe()
+	if dnsProbeAnyOK(first) {
 		// 自检通过属于“一切都好”的自证行 → verbose 档（失败仍是 Error，两档都看得见）。
 		e.bus.Detail("dns.selftest: ok canaries=%v", dnsCanaries)
 		return
 	}
-	e.bus.Error("dns.selftest: failed bad=%d total=%d detail=%v", bad, len(dnsCanaries), detail)
+	// ② 复测：给“瞬时不可用”一次自己好的机会（别再让唤醒那几秒制造假警报）。
+	select {
+	case <-e.done:
+		return
+	case <-time.After(dnsSelfCheckRetry):
+	}
+	second := probe()
+	verdict, bad := judgeDNSProbe(second, e.tookOver.Load() != before)
+	switch verdict {
+	case dnsProbeOK:
+		// 第一轮失败、复测通过 —— “早上报一次、再查就好了”这种现场材料必须留得下（verbose），
+		// 否则下次还得靠猜。
+		e.bus.Detail("dns.selftest: 复测通过（第一轮：%v）—— 瞬时不可用，与 DNS 接管无关", dnsProbeReasons(first))
+		return
+	case dnsProbeEnv:
+		e.bus.Detail("dns.selftest: 本机 DNS 此刻整体不可用（%v）—— 本轮我们没有注入过任何应答，"+
+			"与本机 DNS 接管无关（刚唤醒/刚换网/现场网络不通时都这样）", bad)
+		return
+	}
+	e.bus.Error("dns.selftest: failed bad=%d total=%d detail=%v", len(bad), len(dnsCanaries), bad)
 	e.bus.Error("  —— 注意：DNS 接管只应该改变**命中通配规则**的名字，其余必须照常。" +
 		"这条已经影响别的名字了，请把上面几行日志发回来（功能不会自动关闭，但这个问题得查）")
 }
@@ -2937,11 +3069,31 @@ func (e *Engine) dnsTakeoverGuard() {
 		case <-e.done:
 			return
 		case <-tk.C:
-			if e.dnsTakeoverRunning() {
-				e.dnsTakeoverSelfCheck()
+			if !e.dnsTakeoverRunning() {
+				continue
 			}
+			// ③ 本机网络刚变过（唤醒/插拔网线/换 Wi-Fi）：那几秒里 DNS 本来就不可用，
+			// 现在查是白查 —— 让给下一轮（2026-10-16 早上那次误报正好落在这个窗口里：
+			// 08:58:57 唤醒，08:59:07 网卡才有地址，自检在 08:58:58 就跑了）。
+			if e.netChangedWithin(dnsSelfCheckQuiet) {
+				e.bus.Detail("dns.selftest: 跳过本轮（本机网络刚变化，等它稳下来）")
+				continue
+			}
+			e.dnsTakeoverSelfCheck()
 		}
 	}
+}
+
+// netChangedWithin 本机网络在 d 之内刚变化过吗（唤醒/换网/插拔网线）。
+//
+// 时刻来自 localNetLoop 的采样（它每 10 秒看一眼本机非回环地址），只看**真变了**的
+// 那一次；引擎启动后的首次采样不算（见那里的注释）。
+func (e *Engine) netChangedWithin(d time.Duration) bool {
+	at := e.netChangedAt.Load()
+	if at == 0 {
+		return false
+	}
+	return time.Since(time.Unix(0, at)) < d
 }
 
 // dnsTakeoverRunning DNS 接管句柄还在不在。
@@ -3945,6 +4097,10 @@ func (e *Engine) localNetLoop() {
 		if sig != last {
 			e.ruleSet().SetLocalIPs(ips)
 			if last != "" {
+				// 真的变了（唤醒/插拔网线/换 Wi-Fi）→ 记下时刻，DNS 自检据此让一步。
+				// 首次采样**不算**变化：那是“我们刚开始看”，而启动那一下正是最该自检的时候
+				// （那里另外留了 3 秒给本地 DNS 栈）。
+				e.netChangedAt.Store(time.Now().UnixNano())
 				// 只在真的变了的时候说一句，别刷日志
 				e.bus.Info("本机网络变化：现在 %s（带本机网段条件的规则会据此生效/失效）", sig)
 			}
