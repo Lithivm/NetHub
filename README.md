@@ -28,8 +28,13 @@
   业务目标定时巡检（默认关，设置里一键开）；疑似环路检测（被别的代理绕回来时告警）
 - **运维友好** —— 配置自动备份（留 3 份）可回滚、配置体检、规则重叠检查、
   配置一键导出/导入（一个文件就够）、按需抓包（导出 pcap，Wireshark 直接打开）
-- **自带代理客户端** —— `socks5` / `socks5+tls` / `socks4` / `http` / `https`（加 `?cert=&key=` 可带上客户端证书，供要求双向认证的上游用）；不需要装 gost；
-  旧 gost 的 `.bat` 可以在界面里直接导入（只取其中的上游地址）
+- **自带代理客户端**（不需要装 gost / v2ray）—— 协议：`socks5` / `socks4` / `socks4a` / `http(s)` /
+  **`ss`（shadowsocks，AEAD）** / **`trojan`** / **`vless`** / **`vmess`**；
+  传输层可叠加 `+tls` / `+ws` / `+wss`（如 `socks5+wss://host:8443?path=/ws`）；
+  旧 gost 的 `.bat` 可以在界面里直接导入（只取其中的上游地址）；
+  **xray 分享链接直接粘**（`vmess://<base64>`、`vless://uuid@host?type=ws&security=tls…`）；
+  客户端证书用 `?cert=&key=`（要求双向认证的上游）；
+  不支持的写法会**当场报错并说清该怎么写**，不会静默降级（详见下面「上游协议能填到哪一步」）
 - **口令是明文**（和 gost 脚本一样）—— `config.yaml` 里直接写账号口令，不加密；
   发配置给别人看用「导出配置（抹掉口令）」。**不要把 config.yaml 提交进 git 或发到群里**
 - **界面**（Wails + WebView2）—— 实时日志、链路自检、与 Clash 共存检测、**跟随系统**的深/浅主题（可手动锁定）、托盘常驻
@@ -160,6 +165,35 @@ $st.tuning.quicBlock   # QUIC 阻断开着没有
 - **导出配置（无凭据）** —— 同样能导入，只是上游口令被剔除（导入后补上），适合发给人看或存进仓库
 - **从地址导入** —— 也可以填一个 http(s) 地址，从那里拉配置（团队统一下发的轻量做法）
 - 导入都是**先校验 → 自动备份 → 再生效**，校验不过什么都不改；回滚就是导入 `backups/` 里的旧文件
+
+## 上游协议能填到哪一步
+
+上游地址写在配置的 `chains[].forward`（界面里就是「链路」页的上游框），一行一个，可多个（故障转移）。
+
+| 协议 | 写法 | 备注 |
+|---|---|---|
+| SOCKS5 | `socks5://user:pass@host:1080` · `socks5+tls://…` | 也支持 `?auth=<base64(user:pass)>`（gost 的写法） |
+| SOCKS4 | `socks4://user@host:1080` · `socks4a://…` | 4a 会把域名交给上游解析；4 只能本机解析 |
+| HTTP 代理 | `http://user:pass@host:8080` · `https://…` | 走 CONNECT，能代任意 TCP |
+| shadowsocks | `ss://aes-256-gcm:口令@host:8388` | 支持 `aes-128/192/256-gcm`、`chacha20-ietf-poly1305`；也认 `ss://base64(方式:口令)@…` |
+| trojan | `trojan://口令@host:443` | 天生 TLS；服务端成功时不回话，所以「连上了」不等于认证通过 |
+| VLESS | `vless://uuid@host:443?security=tls&sni=…` | 或 `vless://uuid@host:443?type=ws&path=/ws` |
+| VMess | `vmess://<base64(json)>`（分享链接） | 或 `vmess://uuid@host:443?security=tls` |
+| 传输后缀 | `+tls` `+ws` `+wss` | **只认两段**：`socks5+wss` 对，`socks5+ws+tls` 错（gost 也会把它默默丢掉） |
+| 公共参数 | `?path=` `?host=`（ws）· `?sni=` `?secure=true` · `?cert=` `?key=`（客户端证书） | xray 分享链接里的 `type=` `security=` `sni=` `allowInsecure=` 也认 |
+
+**明确不做**（写了会**报错**并告诉你怎么改，不会静默降级）：
+
+- **VLESS 的 flow / Vision（`xtls-rprx-vision`）**：服务端账号一旦配了 Vision，客户端不声明会被**直接拒连**
+  （不是降级）。请让上游把这个账号的 flow 去掉。
+- **REALITY / XTLS**（要 uTLS 指纹伪装 + X25519，不是打开一个开关）；**grpc / kcp / quic / h2 传输**；
+  **VMess 的 alterId ≠ 0**（xray 已删 LEGACY，AEAD 下它没有意义）；
+  **shadowsocks 的老式流密码**（`aes-*-cfb` 这类，不安全）；**`none` / `dummy` 加密**。
+- **shadowsocks 2022（`2022-blake3-*`）本版还没做**（它要 BLAKE3 派生 + 时间戳 + padding，与老版是两套东西）。
+
+> 关于「连接成功」的语义：**shadowsocks / trojan / VLESS / VMess 都没有“认证成功”的应答**
+> （口令或 UUID 不对时服务端是静默断开）。所以日志里出现“已连上”并不意味着凭据对 ——
+> 诊断页的「链路自检」会真正跑一次业务目标往返，以它为准。
 
 ## 已知边界（先说清楚，省得现场试）
 

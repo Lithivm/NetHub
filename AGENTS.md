@@ -82,6 +82,17 @@ Go + **Wails v2**（WebView2 界面）+ **WinDivert**（内核驱动），**仅 
 - **明确不做**：IPv6 · UDP 中继 · 多跳串联 · TUN/TAP · 域名/正则匹配 · 限速配额 · 反向端口转发 · 上游 mux。
   IPv6 是**我们主动不收**（引擎只做 IPv4，且 DNS 层把 AAAA 答空防应用绕过）—— **不是 WinDivert 的限制**，
   它的网络层同时管 v4/v6；哪天真要做就是重写拦截层，不是“打开一个开关”。
+- **上游协议是可插拔的**（本批扩到 ws/wss 传输 + ss/trojan/vless/vmess）：
+  加协议 = **新写一个文件 + `init()` 里 register**（`internal/upstream/protocol.go` 的注册表），
+  engine / config **一个字不用改**；`contract_test.go` 那 6 条契约会自动覆到新协议头上。
+  两处容易写错的公共东西单独成文件，别在各协议里重写：
+  **传输层** `transport.go`（TCP → [TLS] → [ws]；`+tls/+ws/+wss` 只认两段，≥3 段直接拒）、
+  **地址编码** `addr.go`（A 族 SOCKS5 风格：ATYP|ADDR|PORT，域名 0x03；
+  B 族 xray 风格：**PORT|AT|ADDR**，域名 **0x02** —— 两族的端口位置与域名码都不同）。
+- **上游协议必须与真实现对测**（`interop_test.go`）：ws/tls/ss 用 `local/bin/gost.exe`，
+  trojan/vless/vmess 用 `local/bin/xray.exe`（gost 没有这三家的服务端）；文件不在就 skip，
+  所以别人 clone 下来 `go test` 不会红。**别自己写个“照规范的”假服务端来测** ——
+  那只会把“我读规范理解错了”照抄一遍（两边一起错、测试全绿、上线连不上）。
 - **系统配置红线（新增功能前先过一遍）**：**不得**要求“改路由表 / 抢系统代理 / 写注册表新键”。
   现在碰系统的只有三处，别再添：WinDivert 驱动服务条目（内核驱动的唯一注册方式）·
   hosts 文件（可选、可关、停就撤）· 计划任务（**GUI 形态的自启方式**，用户自己开）。
