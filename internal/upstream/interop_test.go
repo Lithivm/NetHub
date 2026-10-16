@@ -1,11 +1,13 @@
 package upstream
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/pem"
 	"fmt"
 	"math/big"
@@ -739,6 +741,150 @@ func TestInteropXrayVless(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "flow") {
 			t.Errorf("报错里要提 flow: %v", err)
+		}
+	})
+}
+
+// ───────── VMess（AEAD）与 xray 对测 ─────────
+
+const xrayVmessCfg = `{
+  "log": {"loglevel": "warning"},
+  "inbounds": [
+    {"listen": "127.0.0.1", "port": %TLS%, "protocol": "vmess",
+     "settings": {"clients": [{"id": "%ID%", "alterId": 0}]},
+     "streamSettings": {"network": "tcp", "security": "tls",
+       "tlsSettings": {"certificates": [{"certificateFile": "%CERT%", "keyFile": "%KEY%"}]}}},
+    {"listen": "127.0.0.1", "port": %WS%, "protocol": "vmess",
+     "settings": {"clients": [{"id": "%ID%", "alterId": 0}]},
+     "streamSettings": {"network": "ws", "security": "tls", "wsSettings": {"path": "/vm"},
+       "tlsSettings": {"certificates": [{"certificateFile": "%CERT%", "keyFile": "%KEY%"}]}}}
+  ],
+  "outbounds": [{"protocol": "freedom"}]
+}`
+
+func TestInteropXrayVmess(t *testing.T) {
+	tgt, stopEcho := echoServer(t)
+	defer stopEcho()
+
+	id := RandomUUID()
+	tlsPort, wsPort := freePort(t), freePort(t)
+	cfg := xrayVmessCfg
+	cfg = strings.ReplaceAll(cfg, "%ID%", id)
+	cfg = strings.ReplaceAll(cfg, "%TLS%", fmt.Sprint(tlsPort))
+	cfg = strings.ReplaceAll(cfg, "%WS%", fmt.Sprint(wsPort))
+	startXray(t, cfg, tlsPort, wsPort)
+
+	t.Run("tls", func(t *testing.T) {
+		up, err := Parse(fmt.Sprintf("vmess://%s@127.0.0.1:%d?security=tls&sni=127.0.0.1&scy=auto", id, tlsPort))
+		if err != nil {
+			t.Fatal(err)
+		}
+		echoThrough(t, up, tgt, "hello-vmess")
+	})
+
+	t.Run("ws分享链接式", func(t *testing.T) {
+		up, err := Parse(fmt.Sprintf("vmess://%s@127.0.0.1:%d?security=tls&type=ws&path=/vm&sni=127.0.0.1", id, wsPort))
+		if err != nil {
+			t.Fatal(err)
+		}
+		echoThrough(t, up, tgt, "hello-vmess-ws")
+	})
+
+	t.Run("base64分享链接", func(t *testing.T) {
+		// 现场拿到的是这一种：vmess://<base64(json)>
+		js := fmt.Sprintf(`{"v":"2","ps":"test","add":"127.0.0.1","port":"%d","id":"%s","aid":"0","scy":"auto","net":"tcp","tls":"tls","sni":"127.0.0.1"}`,
+			tlsPort, id)
+		link := "vmess://" + base64.RawStdEncoding.EncodeToString([]byte(js))
+		up, err := Parse(link)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if up.Protocol != "vmess" || up.UserID == nil {
+			t.Fatalf("分享链接解析不对: %+v", up)
+		}
+		echoThrough(t, up, tgt, "share-link")
+	})
+
+	t.Run("大包要分块", func(t *testing.T) {
+		// 一次写 40KB（超过 xray 的 16KB 块上限）→ 走多块路径，读回来必须一模一样
+		up, err := Parse(fmt.Sprintf("vmess://%s@127.0.0.1:%d?security=tls&sni=127.0.0.1", id, tlsPort))
+		if err != nil {
+			t.Fatal(err)
+		}
+		host, portStr, _ := net.SplitHostPort(tgt)
+		var p uint16
+		fmt.Sscanf(portStr, "%d", &p)
+		c, err := up.Dial(net.ParseIP(host), p, 5*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+		payload := make([]byte, 40000)
+		for i := range payload {
+			payload[i] = byte(i % 251)
+		}
+		go func() { _, _ = c.Write(payload) }()
+		got := make([]byte, len(payload))
+		if _, err := readFull(c, got); err != nil {
+			t.Fatalf("读大包失败: %v", err)
+		}
+		if !bytes.Equal(got, payload) {
+			t.Fatal("大包回显不一致（分块/拼接写错了）")
+		}
+	})
+
+	t.Run("域名透传", func(t *testing.T) {
+		up, err := Parse(fmt.Sprintf("vmess://%s@127.0.0.1:%d?security=tls&sni=127.0.0.1", id, tlsPort))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, portStr, _ := net.SplitHostPort(tgt)
+		var p uint16
+		fmt.Sscanf(portStr, "%d", &p)
+		c, err := up.DialHost("localhost", p, 5*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		_ = c.SetDeadline(time.Now().Add(3 * time.Second))
+		if _, err := c.Write([]byte("byname")); err != nil {
+			t.Fatal(err)
+		}
+		got := make([]byte, 6)
+		if _, err := readFull(c, got); err != nil {
+			t.Fatalf("域名路径读失败: %v", err)
+		}
+		if string(got) != "byname" {
+			t.Fatalf("域名路径回显不对: %q", got)
+		}
+	})
+
+	t.Run("UUID错在读的时候暴露", func(t *testing.T) {
+		up, err := Parse(fmt.Sprintf("vmess://%s@127.0.0.1:%d?security=tls&sni=127.0.0.1", RandomUUID(), tlsPort))
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, err := up.Dial(net.ParseIP("127.0.0.1"), 9, 3*time.Second)
+		if err != nil {
+			t.Logf("Dial 直接失败也可以: %v", err)
+			return
+		}
+		defer c.Close()
+		_ = c.SetDeadline(time.Now().Add(3 * time.Second))
+		if _, err := c.Read(make([]byte, 8)); err == nil {
+			t.Fatal("UUID 不对却读到了数据")
+		}
+	})
+
+	t.Run("aid非0要拒绝", func(t *testing.T) {
+		js := fmt.Sprintf(`{"v":"2","add":"127.0.0.1","port":"%d","id":"%s","aid":"4","net":"tcp"}`, tlsPort, id)
+		_, err := Parse("vmess://" + base64.RawStdEncoding.EncodeToString([]byte(js)))
+		if err == nil {
+			t.Fatal("alterId != 0 应该被拒绝")
+		}
+		if !strings.Contains(err.Error(), "alterId") {
+			t.Errorf("报错要提 alterId: %v", err)
 		}
 	})
 }

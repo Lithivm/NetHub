@@ -140,11 +140,18 @@ func Parse(raw string) (*Upstream, error) {
 
 	host := u.Hostname()
 	port := u.Port()
-	if host == "" || port == "" {
+	switch {
+	case host != "" && port != "":
+		up.Addr = net.JoinHostPort(host, port)
+		up.ServerName = host
+	case host != "" && urlSetups[up.Protocol] != nil:
+		// **分享链接形态**：`vmess://<base64(json)>` 里整段都是 payload，主机与端口
+		// 在 JSON 里（url.Parse 会把 base64 当成 Host、解不出端口）。这里只要记下
+		// "这是分享链接"，具体地址交给协议自己的解析去填（见下面的 urlSetups）。
+		up.ServerName = host // 兜底，通常会被 set 覆盖
+	default:
 		return nil, fmt.Errorf("上游地址必须是 host:port，当前 %q", u.Host)
 	}
-	up.Addr = net.JoinHostPort(host, port)
-	up.ServerName = host
 
 	// 凭据可以写在 userinfo，也可以写在 ?auth=<base64(user:pass)>（gost 的写法）
 	if u.User != nil {
@@ -204,10 +211,14 @@ func Parse(raw string) (*Upstream, error) {
 
 	// 协议自己的 URL 参数（xray 分享链接那一套：?security= ?type= ?flow= …）。
 	// 分发到协议自己的文件里，Parse 不必知道任何私有参数（加协议不动这里）。
+	// 注意顺序：它**可以在上面填地址之前**就把 Addr/ServerName 写好（分享链接就是这样）。
 	if setup := urlSetups[up.Protocol]; setup != nil {
 		if err := setup(up, u.Query()); err != nil {
 			return nil, err
 		}
+	}
+	if up.Addr == "" || !strings.Contains(up.Addr, ":") {
+		return nil, fmt.Errorf("上游地址必须是 host:port，当前 %q", u.Host)
 	}
 
 	// 客户端证书（mTLS）：`?cert=<证书路径>&key=<私钥路径>`
