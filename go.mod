@@ -8,6 +8,7 @@ require (
 	github.com/imgk/divert-go v0.1.0
 	github.com/wailsapp/wails/v2 v2.16.0
 	github.com/ying32/govcl v2.2.3+incompatible
+	github.com/zeebo/blake3 v0.2.4
 	golang.org/x/crypto v0.53.0
 	golang.org/x/sys v0.46.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -20,6 +21,7 @@ require (
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/jchv/go-winloader v0.0.0-20210711035445-715c2860da7e // indirect
+	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/labstack/echo/v4 v4.13.3 // indirect
 	github.com/labstack/gommon v0.4.2 // indirect
 	github.com/leaanthony/go-ansi-parser v1.6.1 // indirect

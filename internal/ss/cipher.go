@@ -1,23 +1,15 @@
-// Package ss 实现 shadowsocks 客户端 —— 传统 AEAD（SIP004 / SIP007）。
+// Package ss 实现 shadowsocks 客户端 —— 传统 AEAD（SIP004 / SIP007）与 2022（SIP022）。
 //
 // 范围（KB:资源/代理/上游协议线格式规格.md 有全文，别凭记忆改）：
 //
-//	aes-128-gcm / aes-192-gcm / aes-256-gcm / chacha20-ietf-poly1305
+//	传统：aes-128-gcm / aes-192-gcm / aes-256-gcm / chacha20-ietf-poly1305
+//	2022：2022-blake3-aes-128-gcm / 2022-blake3-aes-256-gcm / 2022-blake3-chacha20-poly1305
 //
 // **不做**：老式流密码（aes-*-cfb / rc4 / bf-cfb …）与 none/dummy —— 不安全且上游基本停用；
-// 2022（SIP022）是另一套（BLAKE3 派生 + 时间戳 + padding），单独实现。
+// 2022 的多用户 PSK（要 EIH 报头）与 UDP（我们本来就只做 TCP，见 Conn2022 的注释）。
 //
-// 线格式（照规范逐条实现）：
-//
-//	key   = EVP_BytesToKey(MD5, password)            ← OpenSSL 的老 KDF，不是 PBKDF2
-//	salt  = 随机 SaltSize 字节，**明文**写在最前
-//	subkey= HKDF-SHA1(master, salt, info="ss-subkey")
-//	chunk = [E(len 2B ≤ 0x3FFF)][tag] [E(payload)][tag]
-//	nonce = 12 字节**小端计数器**，从 0 起，**每个 AEAD 操作 +1**（一个 chunk 用两次）
-//	首段明文 = SOCKS5 风格的 ATYP+ADDR+PORT，后面紧跟真正的业务数据
-//
-// 为什么第一段要带地址：shadowsocks 是"目标地址写在第一个密文块里"，所以握手与
-// 首包可以合成一次写（少一次往返）。ATYP=域名时域名交给服务端解析。
+// 两个版本的公共形状（长度域 + 小端 nonce 计数器）在 stream.go；两套线格式的差别见
+// conn.go（传统）与 ss2022.go（2022）的文件头注释。
 package ss
 
 import (
@@ -49,11 +41,10 @@ type Cipher struct {
 
 // ciphers 支持的套件表。
 var ciphers = map[string]Cipher{
-	"aes-128-gcm": {Name: "aes-128-gcm", KeySize: 16, NewAEAD: aesGCM},
-	"aes-192-gcm": {Name: "aes-192-gcm", KeySize: 24, NewAEAD: aesGCM},
-	"aes-256-gcm": {Name: "aes-256-gcm", KeySize: 32, NewAEAD: aesGCM},
-	"chacha20-ietf-poly1305": {Name: "chacha20-ietf-poly1305", KeySize: 32,
-		NewAEAD: func(k []byte) (cipher.AEAD, error) { return chacha20poly1305.New(k) }},
+	"aes-128-gcm":            {Name: "aes-128-gcm", KeySize: 16, NewAEAD: aesGCM},
+	"aes-192-gcm":            {Name: "aes-192-gcm", KeySize: 24, NewAEAD: aesGCM},
+	"aes-256-gcm":            {Name: "aes-256-gcm", KeySize: 32, NewAEAD: aesGCM},
+	"chacha20-ietf-poly1305": {Name: "chacha20-ietf-poly1305", KeySize: 32, NewAEAD: chacha20New},
 }
 
 func aesGCM(key []byte) (cipher.AEAD, error) {
@@ -64,15 +55,33 @@ func aesGCM(key []byte) (cipher.AEAD, error) {
 	return cipher.NewGCM(blk)
 }
 
-// SupportedMethods 支持的套件名（排序，用于错误提示）。
-func SupportedMethods() []string {
-	out := make([]string, 0, len(ciphers))
-	for k := range ciphers {
+// LookupSuite 认**所有**支持的加密方式（传统与 2022），返回它是不是 2022 那一套。
+// 给上游做"解析期就把写错的名字挡住"用 —— 拨号时才报错的体验太差了。
+func LookupSuite(method string) (is2022 bool, err error) {
+	if Is2022(method) {
+		return true, nil
+	}
+	if _, err := Lookup(method); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+// SupportedMethods 支持的传统套件名（排序，用于错误提示）。
+func SupportedMethods() []string { return sortedKeys(ciphers) }
+
+// sortedKeys 把 map 的键排好序（错误提示里要稳定顺序，不然每次报的名字顺序都不一样）。
+func sortedKeys[T any](m map[string]T) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
 		out = append(out, k)
 	}
 	sort.Strings(out)
 	return out
 }
+
+// chacha20New 和 aesGCM 并列的构造器（两张套件表都用）。
+func chacha20New(k []byte) (cipher.AEAD, error) { return chacha20poly1305.New(k) }
 
 // Lookup 取一个套件（名字大小写不敏感 —— 配置里大小写混着写是常事）。
 func Lookup(method string) (Cipher, error) {
@@ -80,12 +89,12 @@ func Lookup(method string) (Cipher, error) {
 	if c, ok := ciphers[m]; ok {
 		return c, nil
 	}
-	// 老式流密码与 2022 单独给提示：这两种写法的用户诉求完全不同（一个该换，
-	// 一个是"我们还没做"），混在一句"不支持"里会让人不知道该干什么。
+	// 2022 是另一套（BLAKE3 派生 + 时间戳 + padding），走 Lookup2022 —— 这里指个路，
+	// 免得调用方把 2022 当成"我们没做"（它是我们做了，只是入口不同）。
 	switch {
-	case strings.Contains(m, "2022"):
-		return Cipher{}, fmt.Errorf("shadowsocks 2022（%s）还没实现；"+
-			"请先用传统 AEAD 套件（%s）", method, strings.Join(SupportedMethods(), " / "))
+	case Is2022(method):
+		return Cipher{}, fmt.Errorf("shadowsocks 2022（%s）是另一套实现（SIP022），用 Lookup2022 / "+
+			"upstream 的 ss 会自己分发", method)
 	case strings.HasSuffix(m, "-cfb") || strings.HasSuffix(m, "-ctr") || strings.HasSuffix(m, "-ofb") ||
 		m == "rc4" || m == "rc4-md5" || m == "bf-cfb" || m == "none" || m == "dummy":
 		return Cipher{}, fmt.Errorf("shadowsocks 的老式流密码（%s）不安全也不做；"+

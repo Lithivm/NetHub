@@ -95,8 +95,22 @@ func waitListen(t *testing.T, port int) {
 }
 
 // echoServer 一个把收到的字节原样回送的 TCP 服务端（互操作测试的目标）。
-// 返回它的地址与关闭函数。
+// 返回它的地址与关闭函数（关闭时会**等**所有连接处理完）。
 func echoServer(t *testing.T) (string, func()) {
+	return echoServerImpl(t, true)
+}
+
+// echoServerNoWait 同上，但关闭时不等待 —— 给"服务端不回收出口连接"的场景用。
+//
+// 实测（2026-10-16）：**xray 的 ss2022 服务端在客户端正常关闭后不回收**它到 echo 的连接，
+// 等下去只会把测试挂到超时 —— 拿 xray 自己当 ss2022 客户端（socks 进→ss2022 出）跑同样的
+// 12 万字节，echo 连接同样不被回收，所以那是**那个服务端的脾气**，不是我们客户端的 bug。
+// gost（传统 ss / ws）没有这个问题。
+func echoServerNoWait(t *testing.T) (string, func()) {
+	return echoServerImpl(t, false)
+}
+
+func echoServerImpl(t *testing.T, wait bool) (string, func()) {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -128,7 +142,12 @@ func echoServer(t *testing.T) (string, func()) {
 			}()
 		}
 	}()
-	return l.Addr().String(), func() { l.Close(); wg.Wait() }
+	return l.Addr().String(), func() {
+		l.Close()
+		if wait {
+			wg.Wait()
+		}
+	}
 }
 
 // echoThrough 通过 up 连到 target（IP:port），发一句、收一句（验证"数据真的双向走"）。
@@ -887,4 +906,207 @@ func TestInteropXrayVmess(t *testing.T) {
 			t.Errorf("报错要提 alterId: %v", err)
 		}
 	})
+}
+
+// ───────── shadowsocks 2022（SIP022）与 xray 对测 ─────────
+
+// 为什么用 xray 而不是 gost 测 2022：**gost 不支持 2022**
+// （实测 `gost -L "ss://2022-blake3-aes-256-gcm:<psk>@:8388"` → `cipher not supported`）。
+// KB 的资源文档里曾写着 gost 支持，是错的 —— 已改。
+//
+// xray 的 shadowsocks inbound 里 method 写 2022-blake3-*、password 写 **base64 的 PSK**。
+
+// xraySS2022Cfg 2022 对测配置（%METHOD% / %PSK% / %PORT% 会被替换）。
+const xraySS2022Cfg = `{
+  "log": {"loglevel": "warning"},
+  "inbounds": [
+    {"listen": "127.0.0.1", "port": %PORT%, "protocol": "shadowsocks",
+     "settings": {"method": "%METHOD%", "password": "%PSK%", "network": "tcp"}}
+  ],
+  "outbounds": [{"protocol": "freedom"}]
+}`
+
+// testPSK 按密钥长度生成一个 base64 PSK（测试里每次都不一样，避免"写死一个串"）。
+func testPSK(t *testing.T, keySize int) string {
+	t.Helper()
+	buf := make([]byte, keySize)
+	if _, err := rand.Read(buf); err != nil {
+		t.Fatal(err)
+	}
+	return base64.StdEncoding.EncodeToString(buf)
+}
+
+func TestInteropXraySS2022(t *testing.T) {
+	tgt, stopEcho := echoServerNoWait(t)
+	defer stopEcho()
+
+	cases := []struct {
+		method  string
+		keySize int
+	}{
+		{"2022-blake3-aes-256-gcm", 32},
+		{"2022-blake3-aes-128-gcm", 16},
+		{"2022-blake3-chacha20-poly1305", 32},
+	}
+	for _, tc := range cases {
+		t.Run(tc.method, func(t *testing.T) {
+			port := freePort(t)
+			psk := testPSK(t, tc.keySize)
+			cfg := strings.ReplaceAll(xraySS2022Cfg, "%METHOD%", tc.method)
+			cfg = strings.ReplaceAll(cfg, "%PSK%", psk)
+			cfg = strings.ReplaceAll(cfg, "%PORT%", fmt.Sprint(port))
+			startXray(t, cfg, port)
+
+			up, err := Parse(fmt.Sprintf("ss://%s:%s@127.0.0.1:%d", tc.method, psk, port))
+			if err != nil {
+				t.Fatal(err)
+			}
+			echoThrough(t, up, tgt, "hello-ss2022-"+tc.method)
+
+			// 域名交给服务端解析（ATYP=域名）。
+			host, portStr, _ := net.SplitHostPort(tgt)
+			var p uint16
+			fmt.Sscanf(portStr, "%d", &p)
+			c, err := up.DialHost("localhost", p, 5*time.Second)
+			if err != nil {
+				t.Fatalf("域名路径拨号失败: %v", err)
+			}
+			defer c.Close()
+			_ = c.SetDeadline(time.Now().Add(3 * time.Second))
+			if _, err := c.Write([]byte("byname")); err != nil {
+				t.Fatal(err)
+			}
+			got := make([]byte, 6)
+			if _, err := readFull(c, got); err != nil {
+				t.Fatalf("域名路径读失败: %v", err)
+			}
+			if string(got) != "byname" {
+				t.Fatalf("域名路径回显不对: %q（目标 %s）", got, host)
+			}
+		})
+	}
+}
+
+// 分块与首段容量：一次写 40KB（首段变长头装得下就跟着请求走，装不下就落到数据块），
+// 再写 70KB（必须走多块，每块 ≤0xFFFF）。读回来要一模一样。
+func TestInteropXraySS2022Chunking(t *testing.T) {
+	tgt, stopEcho := echoServerNoWait(t)
+	defer stopEcho()
+
+	port := freePort(t)
+	psk := testPSK(t, 32)
+	cfg := strings.ReplaceAll(xraySS2022Cfg, "%METHOD%", "2022-blake3-aes-256-gcm")
+	cfg = strings.ReplaceAll(cfg, "%PSK%", psk)
+	cfg = strings.ReplaceAll(cfg, "%PORT%", fmt.Sprint(port))
+	startXray(t, cfg, port)
+
+	up, err := Parse(fmt.Sprintf("ss://2022-blake3-aes-256-gcm:%s@127.0.0.1:%d", psk, port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, portStr, _ := net.SplitHostPort(tgt)
+	var p uint16
+	fmt.Sscanf(portStr, "%d", &p)
+	c, err := up.Dial(net.ParseIP(host), p, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(15 * time.Second))
+
+	payload := make([]byte, 40000+70000)
+	for i := range payload {
+		payload[i] = byte(i % 251)
+	}
+	go func() { _, _ = c.Write(payload[:40000]) }()
+	got := make([]byte, 40000)
+	if _, err := readFull(c, got); err != nil {
+		t.Fatalf("读首段大包失败: %v", err)
+	}
+	if !bytes.Equal(got, payload[:40000]) {
+		t.Fatal("首段大包回显不一致")
+	}
+	go func() { _, _ = c.Write(payload[40000:]) }()
+	got2 := make([]byte, 70000)
+	if _, err := readFull(c, got2); err != nil {
+		t.Fatalf("读后续大包失败: %v", err)
+	}
+	if !bytes.Equal(got2, payload[40000:]) {
+		t.Fatal("后续大包回显不一致（多块路径写错了）")
+	}
+}
+
+// 预热路径：Prepare 只建传输层（**一个字节的请求都不发**），ConnectOn 设目标，之后才发。
+func TestInteropXraySS2022Prepare(t *testing.T) {
+	tgt, stopEcho := echoServerNoWait(t)
+	defer stopEcho()
+
+	port := freePort(t)
+	psk := testPSK(t, 32)
+	cfg := strings.ReplaceAll(xraySS2022Cfg, "%METHOD%", "2022-blake3-aes-256-gcm")
+	cfg = strings.ReplaceAll(cfg, "%PSK%", psk)
+	cfg = strings.ReplaceAll(cfg, "%PORT%", fmt.Sprint(port))
+	startXray(t, cfg, port)
+
+	up, err := Parse(fmt.Sprintf("ss://2022-blake3-aes-256-gcm:%s@127.0.0.1:%d", psk, port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pre, err := up.Prepare(5 * time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pre.Close()
+	// 预热连接在池子里放一会儿（时间戳是**第一次写**时才取的，放久了也不该过期）
+	time.Sleep(1200 * time.Millisecond)
+	host, portStr, _ := net.SplitHostPort(tgt)
+	var p uint16
+	fmt.Sscanf(portStr, "%d", &p)
+	if err := up.ConnectOn(pre, net.ParseIP(host), p, 3*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	_ = pre.SetDeadline(time.Now().Add(3 * time.Second))
+	if _, err := pre.Write([]byte("warm")); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, 4)
+	if _, err := readFull(pre, got); err != nil {
+		t.Fatalf("预热连接读失败: %v", err)
+	}
+	if string(got) != "warm" {
+		t.Fatalf("预热回显不对: %q", got)
+	}
+}
+
+// PSK 错：服务端静默断开（协议里没有错误码）—— 所以断言的是"写能过、读会失败"。
+// 另外：口令错时服务端仍会发自己的 salt + 响应头，我们解不开 **或者** 解开了但 salt 回显不对，
+// 两种情况都必须表现为错误，绝不能读到数据。
+func TestInteropXraySS2022WrongPSK(t *testing.T) {
+	tgt, stopEcho := echoServerNoWait(t)
+	defer stopEcho()
+
+	port := freePort(t)
+	psk := testPSK(t, 32)
+	cfg := strings.ReplaceAll(xraySS2022Cfg, "%METHOD%", "2022-blake3-aes-256-gcm")
+	cfg = strings.ReplaceAll(cfg, "%PSK%", psk)
+	cfg = strings.ReplaceAll(cfg, "%PORT%", fmt.Sprint(port))
+	startXray(t, cfg, port)
+
+	up, err := Parse(fmt.Sprintf("ss://2022-blake3-aes-256-gcm:%s@127.0.0.1:%d", testPSK(t, 32), port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, portStr, _ := net.SplitHostPort(tgt)
+	var p uint16
+	fmt.Sscanf(portStr, "%d", &p)
+	c, err := up.Dial(net.ParseIP(host), p, 3*time.Second)
+	if err != nil {
+		t.Fatalf("ss2022 没有握手应答，拨号不该失败: %v", err)
+	}
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(3 * time.Second))
+	_, _ = c.Write([]byte("hello"))
+	if _, err := c.Read(make([]byte, 8)); err == nil {
+		t.Fatal("PSK 错却读到了数据 —— 要么服务端没校验，要么我们把响应头校验放过了")
+	}
 }

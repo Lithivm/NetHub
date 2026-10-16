@@ -10,6 +10,7 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -435,4 +436,98 @@ func fakeSocks5Capturing(t *testing.T, user, pass string, got chan<- string) (st
 		}
 	}()
 	return ln.Addr().String(), func() { ln.Close() }
+}
+
+// 2022 的 PSK 是 base64 的随机串 —— **里面出现 / + = ? # 是常态**。
+// 现场抄来的链接往往没做 percent 编码，那段 base64 会让 url.Parse 直接炸
+// （`/` 被当路径分隔）或者更阴（`#` 能解析成功但把主机名吃掉）。
+// 这两种都必须能正常解析出**同一个** PSK，而且已经写对的 %2B 不能被二次转义。
+func TestParseSloppyBase64Creds(t *testing.T) {
+	// 一个真的 32 字节 PSK：它的 base64 里 `+` `/` `=` 全有（这三类字符在 userinfo 里都不合法）
+	pskBytes := make([]byte, 32)
+	for i := range pskBytes {
+		pskBytes[i] = []byte{0xfb, 0xff, 0xbf}[i%3]
+	}
+	psk := base64.StdEncoding.EncodeToString(pskBytes)
+	if !strings.ContainsAny(psk, "+/=") {
+		t.Fatalf("这个 PSK 没有脏字符，用例白测了: %s", psk)
+	}
+	plain := "ss://2022-blake3-aes-256-gcm:" + psk + "@127.0.0.1:8388"
+	encoded := "ss://2022-blake3-aes-256-gcm:" + url.QueryEscape(psk) + "@127.0.0.1:8388"
+
+	for _, raw := range []string{plain, encoded} {
+		up, err := Parse(raw)
+		if err != nil {
+			t.Fatalf("解析失败（%q）: %v", raw, err)
+		}
+		if up.Addr != "127.0.0.1:8388" {
+			t.Errorf("主机端口解析错了: %q", up.Addr)
+		}
+		if up.Creds.Pass != psk {
+			t.Errorf("口令应该是 %q，得到 %q（%q）", psk, up.Creds.Pass, raw)
+		}
+	}
+
+	// 中文口令（现场真有人这么用）：url.Parse 会报 “invalid userinfo”，我们兜底转义
+	up, err := Parse("ss://aes-256-gcm:中文口令@1.2.3.4:8388")
+	if err != nil {
+		t.Fatalf("中文口令解析失败: %v", err)
+	}
+	if up.Creds.Pass != "中文口令" {
+		t.Errorf("中文口令解错: %q", up.Creds.Pass)
+	}
+
+	// 老版 ss 的 SIP002 写法（userinfo 是 base64(method:pass)）同样会遇到脏字符 —— 也得收
+	ui := base64.StdEncoding.EncodeToString([]byte("aes-256-gcm:pa/ss+word="))
+	up, err = Parse("ss://" + ui + "@1.2.3.4:8388")
+	if err != nil {
+		t.Fatalf("SIP002 脏 userinfo 解析失败: %v", err)
+	}
+	if up.Creds.User != "aes-256-gcm" || up.Creds.Pass != "pa/ss+word=" {
+		t.Errorf("SIP002 凭据解错: user=%q pass=%q", up.Creds.User, up.Creds.Pass)
+	}
+}
+
+// 分享链接形态（vmess://base64）本来就没有端口，别被"重新转义再试"那条兜底路径弄坏。
+func TestParseShareLinkStillWorks(t *testing.T) {
+	js := `{"v":"2","add":"1.2.3.4","port":"443","id":"bce34715-e471-4319-9873-6d2d3bb5f157","net":"tcp"}`
+	up, err := Parse("vmess://" + base64.RawStdEncoding.EncodeToString([]byte(js)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if up.Addr != "1.2.3.4:443" {
+		t.Errorf("分享链接里的地址没取到: %q", up.Addr)
+	}
+}
+
+// 2022：解析期就要把写错的地方挡住（长度不对、多用户写法、base64 坏了）——
+// 这些错在拨号时的表现只有"服务端静默断开"，等于没有线索。
+func TestParseSS2022Validation(t *testing.T) {
+	k32 := make([]byte, 32)
+	for i := range k32 {
+		k32[i] = byte(i + 1)
+	}
+	ok := base64.StdEncoding.EncodeToString(k32)
+	for _, tc := range []struct{ name, raw, wantErr string }{
+		{"正常", "ss://2022-blake3-aes-256-gcm:" + ok + "@127.0.0.1:8388", ""},
+		{"长度不对", "ss://2022-blake3-aes-256-gcm:" + base64.StdEncoding.EncodeToString(k32[:16]) + "@127.0.0.1:8388", "正好 32 字节"},
+		{"多用户", "ss://2022-blake3-aes-256-gcm:" + ok + ":" + ok + "@127.0.0.1:8388", "EIH"},
+		{"base64坏了", "ss://2022-blake3-aes-256-gcm:!!!!@127.0.0.1:8388", "base64"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse(tc.raw)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("应该通过: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("应该报错")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("报错里要说 %q: %v", tc.wantErr, err)
+			}
+		})
+	}
 }

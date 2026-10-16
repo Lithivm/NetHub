@@ -175,12 +175,16 @@ $st.tuning.quicBlock   # QUIC 阻断开着没有
 | SOCKS5 | `socks5://user:pass@host:1080` · `socks5+tls://…` | 也支持 `?auth=<base64(user:pass)>`（gost 的写法） |
 | SOCKS4 | `socks4://user@host:1080` · `socks4a://…` | 4a 会把域名交给上游解析；4 只能本机解析 |
 | HTTP 代理 | `http://user:pass@host:8080` · `https://…` | 走 CONNECT，能代任意 TCP |
-| shadowsocks | `ss://aes-256-gcm:口令@host:8388` | 支持 `aes-128/192/256-gcm`、`chacha20-ietf-poly1305`；也认 `ss://base64(方式:口令)@…` |
+| shadowsocks | `ss://aes-256-gcm:口令@host:8388` | 传统：`aes-128/192/256-gcm`、`chacha20-ietf-poly1305`；2022：`2022-blake3-aes-128/256-gcm`、`2022-blake3-chacha20-poly1305`（口令位置填 **base64 的 PSK**）；也认 `ss://base64(方式:口令)@…` |
 | trojan | `trojan://口令@host:443` | 天生 TLS；服务端成功时不回话，所以「连上了」不等于认证通过 |
 | VLESS | `vless://uuid@host:443?security=tls&sni=…` | 或 `vless://uuid@host:443?type=ws&path=/ws` |
 | VMess | `vmess://<base64(json)>`（分享链接） | 或 `vmess://uuid@host:443?security=tls` |
 | 传输后缀 | `+tls` `+ws` `+wss` | **只认两段**：`socks5+wss` 对，`socks5+ws+tls` 错（gost 也会把它默默丢掉） |
 | 公共参数 | `?path=` `?host=`（ws）· `?sni=` `?secure=true` · `?cert=` `?key=`（客户端证书） | xray 分享链接里的 `type=` `security=` `sni=` `allowInsecure=` 也认 |
+
+> **从聊天工具里粘来的链接**往往没做 URL 编码（凭据里带 `+` `/` `=` `?` `#`，或者中文口令）——
+> 这种我们**自己补上编码**再解析，你不用先去转义一遍；PSK 长度不对、把口令当 PSK 写这类错
+> 会在**保存配置时就报**，并告诉你应该是什么样（不用等到连不上才猜）。
 
 **明确不做**（写了会**报错**并告诉你怎么改，不会静默降级）：
 
@@ -188,8 +192,9 @@ $st.tuning.quicBlock   # QUIC 阻断开着没有
   （不是降级）。请让上游把这个账号的 flow 去掉。
 - **REALITY / XTLS**（要 uTLS 指纹伪装 + X25519，不是打开一个开关）；**grpc / kcp / quic / h2 传输**；
   **VMess 的 alterId ≠ 0**（xray 已删 LEGACY，AEAD 下它没有意义）；
-  **shadowsocks 的老式流密码**（`aes-*-cfb` 这类，不安全）；**`none` / `dummy` 加密**。
-- **shadowsocks 2022（`2022-blake3-*`）本版还没做**（它要 BLAKE3 派生 + 时间戳 + padding，与老版是两套东西）。
+  **shadowsocks 的老式流密码**（`aes-*-cfb` / `rc4` / `bf-cfb`）与 **`none` / `dummy` 加密**（不安全，上游也基本停用）。
+- **shadowsocks 2022 的多用户写法**（一个服务端多个 PSK，要 EIH 报头）；**UDP**（2022 的 UDP 与 TCP 是两套东西）；
+  2022 的 PSK 长度不合法、把服务端口令当 PSK 写这类错，保存时就会报错并告诉你该是多长。
 
 > 关于「连接成功」的语义：**shadowsocks / trojan / VLESS / VMess 都没有“认证成功”的应答**
 > （口令或 UUID 不对时服务端是静默断开）。所以日志里出现“已连上”并不意味着凭据对 ——

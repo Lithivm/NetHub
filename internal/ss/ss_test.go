@@ -49,7 +49,12 @@ func TestLookupHints(t *testing.T) {
 		t.Errorf("报错里应该给出可用的替代: %v", err)
 	}
 	if _, err := Lookup("2022-blake3-aes-256-gcm"); err == nil {
-		t.Error("2022 还没实现，应该报错而不是当成传统 AEAD")
+		t.Error("传统入口不该把 2022 当成普通 AEAD 套件收下")
+	} else if !bytes.Contains([]byte(err.Error()), []byte("Lookup2022")) {
+		t.Errorf("2022 要指向它自己的入口: %v", err)
+	}
+	if _, err := Lookup2022("2022-blake3-aes-256-gcm"); err != nil {
+		t.Errorf("2022 入口应该认得它: %v", err)
 	}
 	if _, err := Lookup("AES-256-GCM"); err != nil {
 		t.Errorf("套件名大小写不敏感: %v", err)

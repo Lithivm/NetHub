@@ -107,6 +107,61 @@ func looksMasked(s string) bool {
 	return true
 }
 
+// escapeUserinfo 把 userinfo 里那些"在 URL 里有特殊含义、但 base64 串里很常见"的字符转义掉。
+//
+// 只动三件事：`+` `/` `=` `?` `#` → percent 编码，以及**孤立的 `%`**（后面不是两位十六进制）
+// → `%25`。已经写对的 `%2B` 会原样留着，不会被二次转义。
+// 返回 false = 这个 URL 没有 userinfo（或结构不像 URL），别拿它当万能修复。
+func escapeUserinfo(raw string) (string, bool) {
+	schemeEnd := strings.Index(raw, "://")
+	if schemeEnd < 0 {
+		return "", false
+	}
+	rest := raw[schemeEnd+3:]
+
+	// 先找**最后一个** @：userinfo 自己可能带 / ? #（就是我们要修的东西），
+	// 所以不能在 @ 之前去找分隔符。注意 base64 字母表里没有 @，不会误判。
+	at := strings.LastIndex(rest, "@")
+	if at < 0 {
+		return "", false
+	}
+	// @ 之后才是 host[:port][?query][#frag]，分隔符从这里算
+	end := len(rest)
+	if i := strings.IndexAny(rest[at+1:], "/?#"); i >= 0 {
+		end = at + 1 + i
+	}
+	user, tail := rest[:at], rest[end:]
+
+	var b strings.Builder
+	b.Grow(len(user) + 16)
+	for i := 0; i < len(user); i++ {
+		c := user[i]
+		switch c {
+		case '+', '/', '=', '?', '#':
+			fmt.Fprintf(&b, "%%%02X", c)
+		case '%':
+			if i+2 < len(user) && isHex(user[i+1]) && isHex(user[i+2]) {
+				b.WriteByte(c) // 已经是 %XX，留着
+			} else {
+				b.WriteString("%25")
+			}
+		default:
+			// 非 ASCII（中文口令、中文账号是常事）—— url.Parse 对 userinfo 里的裸字节
+			// 直接报 “invalid userinfo”，而百分号编码解出来还是同一串 UTF-8 字节。
+			if c >= 0x80 {
+				fmt.Fprintf(&b, "%%%02X", c)
+			} else {
+				b.WriteByte(c)
+			}
+		}
+	}
+	return raw[:schemeEnd+3] + b.String() + rest[at:end] + tail, true
+}
+
+func isHex(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
 // maskOf 报错里指一下是哪一段被抹了。
 func maskOf(user, pass string) string {
 	switch {
@@ -127,6 +182,19 @@ func Parse(raw string) (*Upstream, error) {
 		return nil, fmt.Errorf("上游 URL 为空")
 	}
 	u, err := url.Parse(raw)
+	// **现场抄来的链接常把 base64 凭据里的 / + = ? # 原样写在 userinfo 里**（没做 percent 编码）：
+	// `ss://2022-blake3-aes-256-gcm:AA+/BB=@host:8388` —— 那个 `/` 会被当成路径分隔，
+	// url.Parse 直接报 “invalid port”；而 `#` 更阴：它**能解析成功但把主机名吃掉**。
+	// 这不是用户的错（他抄的就是这么写的），也不能让他去学 percent 编码 ——
+	// 所以解析不出端口时，就把 userinfo 重新转义一遍再试（已经写对的 %2B 会原样留着）。
+	// 注意：分享链接形态（vmess://base64）本来就没有端口，转义后仍然没端口，所以不受影响。
+	if err != nil || u.Port() == "" {
+		if fixed, ok := escapeUserinfo(raw); ok {
+			if u2, err2 := url.Parse(fixed); err2 == nil && u2.Port() != "" {
+				u, err = u2, nil
+			}
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("解析上游 URL 失败: %w", err)
 	}
