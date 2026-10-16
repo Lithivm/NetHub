@@ -203,6 +203,11 @@ func utf16BOM(s string) []byte {
 // DisallowStartIfOnBatteries=false 是必须的（笔记本用电池时否则根本不启动）。
 // delaySec = 0 时**整段省略** Delay（写成 <Delay>PT0S</Delay> 虽然也算合法，
 // 但省略最不容易被 schtasks 挑刺）。
+//
+// RestartOnFailure 是**被外部结束/崩了之后自动拉起**（与服务的失败恢复对齐，2026-10-16 补）：
+// 现场那台 DF.HIS.Launcher 会按进程名杀进程，GUI 形态下被杀之后没人会再去点一下。
+// Interval=PT1M 是计划任务的最小粒度（秒级做不到），Count=3 就是**熔断**：
+// 拉起 3 次仍失败就不再拉（对“配置坏了导致的启动即崩”，不能无限重启把网络反复搞断）。
 func taskXML(exe, dir string, delaySec int) string {
 	delay := ""
 	if d := iso8601Duration(delaySec); d != "" {
@@ -231,6 +236,10 @@ func taskXML(exe, dir string, delaySec int) string {
     <AllowHardTerminate>true</AllowHardTerminate>
     <StartWhenAvailable>true</StartWhenAvailable>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
     <Enabled>true</Enabled>
     <Hidden>false</Hidden>
     <IdleSettings>

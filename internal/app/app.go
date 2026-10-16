@@ -9,11 +9,13 @@ import (
 	"sync"
 	"time"
 
+	"nethub/internal/autostart"
 	"nethub/internal/config"
 	"nethub/internal/engine"
 	"nethub/internal/hostsmgr"
 	"nethub/internal/logbus"
 	"nethub/internal/rules"
+	"nethub/internal/winsvc"
 )
 
 // NotifyKind 通知级别，对应托盘气泡图标。
@@ -280,6 +282,7 @@ func (a *App) startLocked() error {
 // startLockedInner 真正装配并启动引擎（调用方必须已持有引擎锁）。
 func (a *App) startLockedInner() error {
 	a.setLastError("", nil) // 重新启动就清掉上次的错
+	a.noteUncleanExit()     // 上一轮要是被外面弄死的，先说一句（现场只关心“为什么重启了”）
 	a.mu.Lock()
 	if a.running {
 		a.mu.Unlock()
@@ -431,6 +434,44 @@ func (a *App) clearRuntime() {
 	if err == nil {
 		a.Bus.Info("runtime.clear: file=%s", RuntimeFile)
 	}
+}
+
+// noteUncleanExit 上一轮没干净退出的话先写一行。
+//
+// 为什么要它：runtime.json 是“停就撤、启再写”的 —— 它还在，就说明上一次进程
+// 没走到收尾（被外部结束 / 崩 / 断电）。而这正是“隧道为什么重启了”这个现场唯一
+// 会问的问题，不能只靠猜：按形态约定（AGENTS 里的两种形态），
+// 这种重启通常就是服务管理器或计划任务把我们拉起来的。
+//
+// 不是错误的**事**就不报错：被杀之后被拉起是正常工作，写 Warn 让人看得见就行。
+func (a *App) noteUncleanExit() {
+	prev, ok := ReadRuntime()
+	if !ok || prev.PID == os.Getpid() {
+		return // 没有自报 = 上次正常收尾；同一个 pid = 我们自己刚写过
+	}
+	if processAlive(prev.PID) {
+		// 另一个实例还活着（引擎锁会仲裁谁真的持引擎）—— 这不是“没干净退出”
+		a.Bus.Warn("发现另一个实例的运行态文件（pid=%d 仍在运行）", prev.PID)
+		return
+	}
+	from := prev.StartedAt
+	if from == "" {
+		from = prev.UpdatedAt
+	}
+	a.Bus.Warn("上次未正常退出（runtime.json 还在：pid=%d，启动于 %s）—— 进程被外部结束或崩溃；本次由%s拉起",
+		prev.PID, from, launchReason())
+	a.notify("上次未正常退出", "隧道进程被外部结束或崩溃过；本次已重新拉起，详见日志", NotifyWarn)
+}
+
+// launchReason 这次大概是谁把我们拉起来的（在日志里说清，不猜得过分）。
+func launchReason() string {
+	if winsvc.IsService() {
+		return "服务管理器（无人登录的服务形态，可能是失败恢复）"
+	}
+	if autostart.Enabled() {
+		return "计划任务或手工双击"
+	}
+	return "手工启动"
 }
 
 // Restart 重启（改完配置后调用）。

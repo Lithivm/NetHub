@@ -86,6 +86,16 @@ func TestTaskXMLDelay(t *testing.T) {
 	if !strings.Contains(noDelay, "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>") {
 		t.Error("DisallowStartIfOnBatteries=false 不能丢")
 	}
+	// 被外部结束/崩了之后自动拉起，且**带熔断**（Count 就是熔断次数，改小/删掉即失去熔断）
+	if !strings.Contains(noDelay, "<RestartOnFailure>") ||
+		!strings.Contains(noDelay, "<Count>3</Count>") {
+		t.Error("必须有 RestartOnFailure + Count（拉几次后不再拉 = 熔断）")
+	}
+	// RestartOnFailure 必须在 Settings 里（放错层级 schtasks 会拒掉整份 XML）
+	set := noDelay[strings.Index(noDelay, "<Settings>"):strings.Index(noDelay, "</Settings>")]
+	if !strings.Contains(set, "<RestartOnFailure>") {
+		t.Error("RestartOnFailure 必须在 Settings 内")
+	}
 	// 路径要转义，否则含 & 的目录会让整个任务建不起来
 	esc := taskXML(`C:\a&b\nethub.exe`, `C:\a&b`, 0)
 	if !strings.Contains(esc, `C:\a&amp;b\nethub.exe`) {

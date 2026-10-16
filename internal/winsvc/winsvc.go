@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
@@ -122,6 +123,9 @@ func Install(exePath, configPath string) error {
 		}); err != nil {
 			return fmt.Errorf("更新已有服务失败: %w", err)
 		}
+		if err := applyRecovery(s); err != nil {
+			return fmt.Errorf("设置失败恢复策略失败: %w", err)
+		}
 		return nil
 	}
 
@@ -136,7 +140,61 @@ func Install(exePath, configPath string) error {
 		return fmt.Errorf("创建服务失败: %w", err)
 	}
 	defer s.Close()
+	if err := applyRecovery(s); err != nil {
+		return fmt.Errorf("设置失败恢复策略失败: %w", err)
+	}
 	return nil
+}
+
+// ── 失败恢复（被外部结束 / 崩了之后自动拉起）────────────────────────
+
+// recoveryResetPeriod 失败计数多少秒后清零（SCM 的 RESET_PERIOD）。
+const recoveryResetPeriod = 86400 // 1 天
+
+// recoveryActions 服务失败后按顺序执行的动作：5 秒后重启 → 30 秒后重启 → **不再动作**。
+//
+// 为什么要它（AGENTS 里记的“已知边界”，2026-10-16 补）：无人值守的机器上，
+// 有人点名 Kill nethub.exe（现场那台 DF.HIS.Launcher 就是按进程名杀进程的）或进程崩掉之后，
+// 服务就静静地没了 —— 表现是“隧道消失、hosts 段留在系统里没人兜付”，而没人会再去点一下。
+//
+// **熔断是故意的，也是必须的**（用户 2026-10-16 拍板）：配置坏了导致的“启动即崩”
+// 绝不能变成无限重启循环（那会把客户网络反复搞断）。这里借 SCM 自己的语义实现：
+// 最后一项是 SC_ACTION_NONE，而 Windows 在失败次数超过动作表长度时**重复使用最后一项**
+// ⇒ 本窗口内最多自动拉起 2 次，第 3 次起不再动作、服务停在 STOPPED 等人工处理。
+// （`sc failure <name>` 能看到这张表；手工 `sc start` 照旧可用。）
+func recoveryActions() []windows.SC_ACTION {
+	return []windows.SC_ACTION{
+		{Type: windows.SC_ACTION_RESTART, Delay: 5 * 1000},
+		{Type: windows.SC_ACTION_RESTART, Delay: 30 * 1000},
+		{Type: windows.SC_ACTION_NONE}, // 熔断
+	}
+}
+
+// RecoveryText 恢复策略的一句话（给人看；**真值以 SCM 里那张表为准**：`sc failure <name>`）。
+func RecoveryText() string {
+	return "被外部结束/崩溃后 5 秒、30 秒各重启一次，之后不再自动拉起（熔断；计数 1 天清零）"
+}
+
+// applyRecovery 把恢复策略写进 SCM（需要管理员权限，Install 本来就要）。
+//
+// 另一个关键点：**我们自己干净地停不会被它拉回来**。SCM 默认只在“进程没报告
+// SERVICE_STOPPED 就消失”时才算失败 —— 这正好是我们要的语义：界面上的停止、`-quit`、
+// `sc stop` 都照旧停得掉。下面显式把 FailureActionsOnNonCrashFailures 写成 0，
+// 不让机器上可能残留的旧设置改变语义（这一条要实测钉住：local/kill-recover.ps1）。
+func applyRecovery(s *mgr.Service) error {
+	acts := recoveryActions()
+	fa := windows.SERVICE_FAILURE_ACTIONS{
+		ResetPeriod:  recoveryResetPeriod,
+		ActionsCount: uint32(len(acts)),
+		Actions:      &acts[0],
+	}
+	if err := windows.ChangeServiceConfig2(s.Handle, windows.SERVICE_CONFIG_FAILURE_ACTIONS,
+		(*byte)(unsafe.Pointer(&fa))); err != nil {
+		return err
+	}
+	flag := windows.SERVICE_FAILURE_ACTIONS_FLAG{FailureActionsOnNonCrashFailures: 0}
+	return windows.ChangeServiceConfig2(s.Handle, windows.SERVICE_CONFIG_FAILURE_ACTIONS_FLAG,
+		(*byte)(unsafe.Pointer(&flag)))
 }
 
 // Uninstall 停止并删除服务（幂等）。
