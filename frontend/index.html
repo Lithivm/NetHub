@@ -71,6 +71,7 @@
     <button class="tab" data-page="chain">隧道链路<span class="tab-badge" id="badgeChain">0</span></button>
     <button class="tab" data-page="rule">路由规则<span class="tab-badge" id="badgeRule">0</span></button>
     <button class="tab" data-page="conn">连接<span class="tab-badge" id="badgeConn">0</span></button>
+    <button class="tab" data-page="stats">统计</button>
     <button class="tab" data-page="diag">诊断</button>
   </nav>
 </div>
@@ -197,6 +198,62 @@
           </label>
           <div class="hint" id="quicBlockInfo">—</div>
         </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════ 统计 ═══════ -->
+  <!-- 与「连接」页的分工：那里回答"现在有哪些连接"，这一页回答**"这段时间谁在占通道"**
+       （按应用 / 按目标的累计连接数、失败数、字节数、速率）。 -->
+  <section class="page" id="page-stats">
+    <div class="settings-scroll">
+      <div class="card">
+        <div class="card-head">
+          <h2>统计</h2>
+          <div class="seg" id="segStatScope" title="本次运行：引擎这一次启动以来 · 累计：本程序启动以来（界面上「清零」会把它一起清掉）">
+            <span class="seg-thumb"></span>
+            <button type="button" class="seg-btn is-active" data-scope="run">本次运行</button>
+            <button type="button" class="seg-btn" data-scope="all">累计</button>
+          </div>
+          <div class="spacer"></div>
+          <span class="hint" id="statSince">—</span>
+          <button class="btn btn-sm" id="btnStatCopy">复制</button>
+          <button class="btn btn-sm" id="btnStatReset">清零</button>
+          <button class="info-btn" id="btnHelpStats" title="这一页的口径与边界">i</button>
+        </div>
+        <div class="stat-figs">
+          <div class="stat-fig">
+            <span class="stat-label">连接</span>
+            <b class="stat-num" id="statConns">0</b>
+            <span class="stat-sub" id="statConnsSub">—</span>
+          </div>
+          <div class="stat-fig">
+            <span class="stat-label">流量</span>
+            <b class="stat-num" id="statTraffic">—</b>
+            <span class="stat-sub" id="statTrafficSub">—</span>
+          </div>
+          <div class="stat-fig">
+            <span class="stat-label">时长</span>
+            <b class="stat-num" id="statUptime">—</b>
+            <span class="stat-sub">引擎本次运行</span>
+          </div>
+        </div>
+        <div class="hint stat-break" id="statBreak">—</div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>按目标 / 按应用</h2>
+          <div class="seg" id="segStatDim" title="同一个连接会同时算进两个维度（所以两张表的合计相等）">
+            <span class="seg-thumb"></span>
+            <button type="button" class="seg-btn is-active" data-dim="targets">按目标</button>
+            <button type="button" class="seg-btn" data-dim="apps">按应用</button>
+          </div>
+          <div class="spacer"></div>
+          <span class="hint" id="statTableHint">—</span>
+        </div>
+        <div class="table" id="statTable"></div>
+        <div class="hint stat-note" id="statNote" hidden></div>
       </div>
     </div>
   </section>

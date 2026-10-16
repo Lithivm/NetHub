@@ -850,6 +850,31 @@ func (b *Backend) ClearConnsHistory() {
 	}
 }
 
+// GetStats 「统计」页快照（scope 空/"run" = 本次运行，"all" = 累计）。
+//
+// 为什么每次都要现算、不给引擎加一层"按秒缓存"：这一页的键来自**此刻正在跑的连接**
+// （不然开了一天的会话在页面上永远是 0），缓存一秒就等于把"刚才"当成"现在"。
+// 代价是每次遍历一遍连接表 —— 几百条的量级，1.5 秒一次，可以忽略。
+func (b *Backend) GetStats(scope string) engine.StatPage {
+	e := b.a.Engine
+	if e == nil {
+		// 只读态（引擎在别的进程/没接上）：给空页，不是崩溃
+		if scope == "" {
+			scope = engine.StatScopeRun
+		}
+		return engine.StatPage{Scope: scope, Readonly: true,
+			TopN: engine.StatTopN, Cap: engine.StatBucketCap}
+	}
+	return e.StatsPage(scope, 0)
+}
+
+// ResetStats 界面上「清零」：两个口径（本次运行 / 累计）都从头数。
+func (b *Backend) ResetStats() {
+	if e := b.a.Engine; e != nil {
+		e.ResetStats()
+	}
+}
+
 // ProcPath 某个 PID 的完整路径（连接页点进程名看“到底是谁”）。
 // 拿不到时返回空串（受保护进程/已退出）。
 func (b *Backend) ProcPath(pid uint32) string {

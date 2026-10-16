@@ -200,6 +200,14 @@ function showPage(name) {
   positionTabThumb();
   if (name === 'log') { scrollLogToEnd(); loadLogLevel(); }
   if (name === 'conn') { loadConns(); loadCountDirect(); loadQuicBlock(); }
+  if (name === 'stats') {
+    loadStats();
+    // 两个分段滑块的指示块要重新量一次宽度（这一页平时不可见，量出来是 0）
+    ['segStatScope', 'segStatDim'].forEach(id => {
+      const s = document.getElementById(id);
+      if (s) positionSegThumb(s, true);
+    });
+  }
   if (name === 'diag') { precheckConfig(true); loadTargetHealth(); loadPatrol(); loadLastSelfTest(); loadRuntimeStatus(); loadVerdict(); }
 }
 
@@ -1107,6 +1115,220 @@ function connDetailRow(g) {
   row.appendChild(cell);
   return row;
 }
+
+/* ═══════════════ 统计（谁在占通道） ═══════════════
+
+   与「连接」页的分工：那里回答**"现在有哪些连接"**（实时、秒级、转眼就消失），
+   这一页回答**"这段时间谁在占通道"**（累计、按应用/目标聚合、可清零）。
+
+   后端在连接**收尾时**把字节数落进累计桶，读取时再把**还开着的**连接实时算进去
+   （见 internal/engine/stats.go）—— 所以这里既看得到 8 小时长会话的实时字节，
+   也不怕短连接转眼就没了。
+
+   两个口径（本次运行 / 累计）由后端给：前端只切一个参数重拉，**不在本地算差** ——
+   本地算差会在"切页/收托盘"停轮询后失真（回来一看数字跳一大下）。 */
+let statScope = 'run';    // run=本次运行 / all=累计
+let statDim = 'targets';  // targets=按目标 / apps=按应用
+let statSort = null;      // {col, dir}：点表头排序；null = 默认（流量大的在前）
+let statData = null;
+
+async function loadStats() {
+  let d = null;
+  try { d = await call('GetStats', statScope); }
+  catch (e) { return; }   // 轮询失败静默：别每 1.5 秒弹一次错
+  statData = d || null;
+  renderStats();
+}
+
+function renderStats() {
+  const d = statData || {};
+  const on = statScope === 'all';
+
+  document.getElementById('statConns').textContent = (d.conns || 0);
+  document.getElementById('statConnsSub').textContent =
+    '活跃 ' + (d.active || 0) + ' · 失败 ' + (d.failed || 0);
+  document.getElementById('statTraffic').textContent =
+    '↑ ' + fmtBytes(d.up) + ' · ↓ ' + fmtBytes(d.down);
+  document.getElementById('statTrafficSub').textContent =
+    '合计 ' + fmtBytes((d.up || 0) + (d.down || 0));
+  document.getElementById('statUptime').textContent = d.uptime || '—';
+
+  const br = document.getElementById('statBreak');
+  let txt = '走隧道 ' + (d.chain || 0) + ' · 直连 ' + (d.direct || 0) + ' · 阻断 ' + (d.blocked || 0);
+  if (d.evicted) txt += ' · 已挤掉 ' + d.evicted + ' 个目标（只留最近活跃的 ' + (d.cap || 0) + ' 个）';
+  br.textContent = txt;
+  br.title = '走隧道 + 直连 + 阻断 = 上面那个连接数\n' +
+    '直连要看得到，得先在「连接」页打开「也统计直连流量的字节数」——\n' +
+    '关着时直连的包根本不进内核过滤器（零开销），也就无从统计。';
+
+  document.getElementById('statSince').textContent = d.since
+    ? (on ? '累计从 ' : '从 ') + d.since + ' 起' + (on ? '（本程序启动以来）' : '')
+    : '';
+
+  const rows = ((statDim === 'apps' ? d.apps : d.targets) || []).slice();
+  const keys = statDim === 'apps' ? (d.keysApps || 0) : (d.keysTargets || 0);
+
+  // 排序：点表头切换。默认保持后端给的顺序（按流量，同量按连接数、名字）。
+  if (statSort) {
+    const col = statSort.col, mul = statSort.dir === 'desc' ? -1 : 1;
+    const val = (r) => {
+      switch (col) {
+        case 'name': return r.name || '';
+        case 'conns': return r.conns || 0;
+        case 'failed': return r.failed || 0;
+        case 'up': return r.up || 0;
+        case 'down': return r.down || 0;
+        case 'rate': return (r.upBps || 0) + (r.downBps || 0);
+        case 'avg': return r.avgBps || 0;
+        case 'lastAgo': return r.lastAgo || 0;
+      }
+      return 0;
+    };
+    rows.sort((a, b) => {
+      const x = val(a), y = val(b);
+      if (typeof x === 'string' || typeof y === 'string') return mul * String(x).localeCompare(String(y));
+      return mul * (x - y);
+    });
+  }
+
+  const hint = document.getElementById('statTableHint');
+  if (keys > rows.length) {
+    hint.textContent = '共 ' + keys + ' 项，显示前 ' + rows.length + '（按流量排序；点列头可换序）';
+  } else {
+    hint.textContent = '共 ' + keys + ' 项' + (keys ? '（点列头可换序）' : '');
+  }
+
+  const note = document.getElementById('statNote');
+  note.textContent = d.note || '';
+  note.hidden = !d.note;
+
+  const t = document.getElementById('statTable');
+  t.replaceChildren();
+
+  const cols = [
+    { key: 'name', label: statDim === 'apps' ? '进程' : '目标', num: false },
+    { key: 'conns', label: '连接', num: true },
+    { key: 'failed', label: '失败', num: true },
+    { key: 'up', label: '↑ 发送', num: true },
+    { key: 'down', label: '↓ 接收', num: true },
+    { key: 'rate', label: '当前速率', num: true },
+    { key: 'avg', label: '平均速率', num: true },
+    { key: 'lastAgo', label: '最后活动', num: true },
+  ];
+  const head = el('div', 'trow thead stat-grid');
+  cols.forEach(c => {
+    const cell = el('div', 'cell' + (c.num ? ' num' : '') + (statSort && statSort.col === c.key ? ' strong' : ''));
+    cell.textContent = c.label + (statSort && statSort.col === c.key ? (statSort.dir === 'desc' ? ' ↓' : ' ↑') : '');
+    cell.style.cursor = 'pointer';
+    cell.title = '点一下按这一列排序';
+    cell.onclick = () => {
+      if (statSort && statSort.col === c.key) statSort.dir = statSort.dir === 'desc' ? 'asc' : 'desc';
+      else statSort = { col: c.key, dir: c.num ? 'desc' : 'asc' };
+      renderStats();
+    };
+    head.appendChild(cell);
+  });
+  t.appendChild(head);
+
+  if (!rows.length) {
+    const which = on ? '累计' : '本次运行';
+    t.appendChild(emptyState(ICON_TARGET, '这一段还没有统计',
+      '命中规则的连接一旦收尾，就会按应用与目标累计到这里（' + which + '口径）。'
+      + '刚点过「清零」的话，等业务再跑一会儿。', null, null));
+    return;
+  }
+
+  rows.forEach(r => {
+    const row = el('div', 'trow stat-grid');
+    // 名称列：目标维度给"域名 + 实际地址/端口"两行，应用维度给"进程名 + 端口"
+    const nameCell = el('div', 'cell stack');
+    nameCell.appendChild(el('div', 'name' + (statDim === 'apps' ? '' : ' mono'), r.name || '未知'));
+    const sub = [];
+    if (statDim !== 'apps' && r.ip && r.ip !== r.name) sub.push(r.ip);
+    if (r.ports) sub.push('端口 ' + r.ports);
+    if (sub.length) nameCell.appendChild(el('div', 'sub mono', sub.join(' · ')));
+    if (statDim === 'apps') {
+      nameCell.title = '这个进程发起的连接合计\n（进程名查不到时全归到「未知」一行）';
+    } else {
+      nameCell.title = '这个目标的连接合计\n点「复制」可以把整张表拿走\n（域名能认出来就并到域名那一行，认不出来的按 IP 单列）';
+    }
+    row.appendChild(nameCell);
+
+    const conns = el('div', 'cell mono num', String(r.conns || 0) + (r.active ? '·' + r.active : ''));
+    conns.title = '累计 ' + (r.conns || 0) + ' 条' + (r.active ? '，其中 ' + r.active + ' 条还在跑' : '');
+    row.appendChild(conns);
+    row.appendChild(el('div', 'cell mono num' + (r.failed ? ' strong' : ' dim'), String(r.failed || 0)));
+    row.appendChild(el('div', 'cell mono num', '↑ ' + fmtBytes(r.up)));
+    row.appendChild(el('div', 'cell mono num', '↓ ' + fmtBytes(r.down)));
+    const rate = el('div', 'cell mono num' + ((r.upBps || r.downBps) ? ' strong' : ' dim'),
+      fmtRate((r.upBps || 0) + (r.downBps || 0)));
+    rate.title = '出 ' + fmtRate(r.upBps) + ' / 入 ' + fmtRate(r.downBps) +
+      '（只算还开着的连接：已结束的自然没有速率）';
+    row.appendChild(rate);
+    const avg = el('div', 'cell mono num dim', fmtRate(r.avgBps));
+    avg.title = '这一行活跃期间的平均值：（发送 + 接收）/ 时长（' + histDur(r.durSec) + '）';
+    row.appendChild(avg);
+    row.appendChild(el('div', 'cell num dim', histAgo(r.lastAgo)));
+    t.appendChild(row);
+  });
+}
+
+/* 复制成文本（能整段贴给同事/贴进表格）。为什么要复制：现场要交的是
+   "这段时间谁在占带宽"这个结论，而截图截不全、也不能被搜。 */
+function statsCopyText() {
+  const d = statData || {};
+  const on = statScope === 'all';
+  const rows = (statDim === 'apps' ? d.apps : d.targets) || [];
+  const L = [];
+  L.push('NetHub 统计（' + (on ? '累计（本程序启动以来）' : '本次运行') + (d.since ? '，从 ' + d.since + ' 起' : '') + '）');
+  L.push('连接：' + (d.conns || 0) + '（活跃 ' + (d.active || 0) + ' · 失败 ' + (d.failed || 0) + '）');
+  L.push('流量：↑ ' + fmtBytes(d.up) + ' / ↓ ' + fmtBytes(d.down));
+  L.push('分解：走隧道 ' + (d.chain || 0) + ' · 直连 ' + (d.direct || 0) + ' · 阻断 ' + (d.blocked || 0));
+  L.push('时长：' + (d.uptime || '—'));
+  L.push('');
+  L.push('按' + (statDim === 'apps' ? '应用' : '目标') + '（共 ' + (statDim === 'apps' ? (d.keysApps || 0) : (d.keysTargets || 0)) + ' 项）：');
+  if (!rows.length) {
+    L.push('（无）');
+  } else {
+    L.push(['名称', '连接', '失败', '发送', '接收', '当前速率', '平均速率', '最后活动'].join('\t'));
+    rows.forEach(r => L.push([
+      (r.name || '未知') + (r.ip && r.ip !== r.name ? ' (' + r.ip + ')' : '') + (r.ports ? ':' + r.ports : ''),
+      String(r.conns || 0) + (r.active ? '（' + r.active + ' 活跃）' : ''),
+      String(r.failed || 0), fmtBytes(r.up), fmtBytes(r.down),
+      fmtRate((r.upBps || 0) + (r.downBps || 0)), fmtRate(r.avgBps), histAgo(r.lastAgo),
+    ].join('\t')));
+  }
+  return L.join('\n');
+}
+
+async function copyStats() {
+  const txt = statsCopyText();
+  try {
+    await navigator.clipboard.writeText(txt);
+    toast('已复制', '统计结果已复制到剪贴板（可直接贴进表格）', 'success');
+  } catch (e) {
+    // WebView2 里 clipboard API 可能要权限：回退到“选中 + execCommand”（与日志页同一路）
+    const ta = document.createElement('textarea');
+    ta.value = txt;
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); toast('已复制', '统计结果已复制到剪贴板', 'success'); }
+    catch (e2) { fail(e2); }
+    ta.remove();
+  }
+}
+
+async function resetStats() {
+  const ok = await confirmBox('清零统计？',
+    '「本次运行」与「累计」两个口径都从头数（连接数、字节数、按应用/按目标的累计）。\n' +
+    '连接列表与日志不受影响。', false, '清零');
+  if (!ok) return;
+  try { await call('ResetStats'); } catch (e) { fail(e); return; }
+  await loadStats();
+  toast('已清零', '统计从现在起重新数', 'success');
+}
+
+/* 这一页的“为什么”全部写在 HELP.stats 里（那一个“i”按钮）—— 界面上不再另开一份文案。 */
 
 /* ═══════════════ 状态刷新 ═══════════════ */
 
@@ -2354,6 +2576,22 @@ const HELP = {
       '已结束的连接保留 15 秒。',
     ],
   },
+  stats: {
+    title: '「统计」这一页的口径与边界',
+    paras: [
+      '这一页回答「这段时间谁在占通道」；「连接」页回答「现在有哪些连接」。两者不重复：连接页实时、会消失；这一页累计、可清零。',
+      '两个口径：本次运行 = 引擎这一次「启动」以来；累计 = 本程序启动以来（跨「停止/启动」）。点「清零」两个口径一起清。',
+      '连接数 = 已经收尾的 + 还开着的（行内「12·2」= 共 12 条，其中 2 条还在跑）；「活跃」与失败是同一口径，阻断的算失败 —— 应用那边确实没连上。',
+      '流量 = 这条连接实际过的字节（走隧道的分上下行；直连的只有出方向）。',
+      '当前速率只看还开着的连接（已结束的自然没有速率）；平均速率 = （发送 + 接收）/ 这一行活跃的时长。',
+      '不算我们自己的探针（自检 / 共存检测那几条）：它们是仪器，不是业务流量 —— 与「连接」页同一个口径。',
+      '直连要看得到，得先在「连接」页打开「也统计直连流量的字节数」：关着时直连的包不进内核过滤器（零开销），根本无从统计。',
+      '目标能认出域名就并到域名那一行（同一个域名用域名 / 假 IP / 真实 IP 连都算一行）；认不出来的按 IP 单列。',
+      '只留最近活跃的 512 个应用 / 目标（超出会挤掉最久没活动的，挤了几个会写在这页上）；表里只列前 20 行，点「复制」拿到的是整张表。',
+      '不落盘：程序退出就没了。长期的账看日志里每 5 分钟一行的流量概览。',
+      '点列头可以按这一列换序；默认按流量大的在前。',
+    ],
+  },
   runtime: {
     title: '接管状态：各项指标的含义与判定口径',
     paras: [
@@ -2754,6 +2992,34 @@ function wire() {
   bind('btnHelpWhitelist', 'whitelist');
   bind('btnHelpHosts', 'hosts');
   bind('btnHelpRule', 'rule');
+  bind('btnHelpStats', 'stats');
+
+  // 统计页：两个分段（口径 / 维度）+ 复制 + 清零。
+  // 两个滑块的指示块在页面可见时才量得准，所以点了先动数据再重新量。
+  const segScope = document.getElementById('segStatScope');
+  if (segScope) segScope.querySelectorAll('.seg-btn').forEach(b => {
+    b.onclick = () => {
+      statScope = b.dataset.scope || 'run';
+      segScope.querySelectorAll('.seg-btn').forEach(x => x.classList.toggle('is-active', x === b));
+      positionSegThumb(segScope);
+      statSort = null;   // 换口径 = 换一份数据，旧的排序键不再适用
+      loadStats();
+    };
+  });
+  const segDim = document.getElementById('segStatDim');
+  if (segDim) segDim.querySelectorAll('.seg-btn').forEach(b => {
+    b.onclick = () => {
+      statDim = b.dataset.dim || 'targets';
+      segDim.querySelectorAll('.seg-btn').forEach(x => x.classList.toggle('is-active', x === b));
+      positionSegThumb(segDim);
+      statSort = null;
+      renderStats();       // 换维度不用重拉：一次快照里两个维度都有
+    };
+  });
+  const btnStatCopy = document.getElementById('btnStatCopy');
+  if (btnStatCopy) btnStatCopy.onclick = () => copyStats();
+  const btnStatReset = document.getElementById('btnStatReset');
+  if (btnStatReset) btnStatReset.onclick = () => resetStats();
 
   // 连接页
   document.getElementById('btnConnRefresh').onclick = () => loadConns();
@@ -3153,6 +3419,12 @@ async function boot() {
       // 历史连接展开着就顺手刷一下（节流：最多 3 秒一次，它不走 1.5 秒那条轮询）
       if (histOpen && Date.now() - histAt > 3000) loadConnsHistory();
     }
+  }, 1500);
+  // 统计页：只在当前页时刷（与连接页同一节奏）。
+  // 1.5 秒而不是 60 秒：这一页要回答"现在谁在占带宽"，慢一拍就没用了。
+  setInterval(() => {
+    const p = document.getElementById('page-stats');
+    if (p && p.classList.contains('is-active')) loadStats();
   }, 1500);
   // 链路页的上游健康：只在这一页时刷新
   setInterval(() => {

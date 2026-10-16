@@ -178,6 +178,10 @@ func (e *Engine) finish(st *connState) {
 	// 历史存档：只留界面看得见的这段时间之外的“刚刚那批”
 	// （「当前连接」15 秒就不显示了，janitor 2 分钟物理删 —— 诊断常常来不及看）
 	e.noteHistory(st)
+	// 统计：这条连接的数字落进累计桶。
+	// 幂等性由**上面那次 CAS** 保证：只有把 ended 从 false 翻成 true 的那一条路径会走到这里，
+	// 所以 janitor 回收同一条条目时那次 CAS 一定失败，不会重复计数。
+	e.noteStatEnd(st)
 	// 只有建条目时**真的加过**活跃数的那条才扣：
 	// 直连/阻断的条目以前不加只扣（用了 block 规则后，界面“活跃”会被持续偷走）。
 	if !st.counted {
@@ -523,6 +527,8 @@ type Engine struct {
 	statTotal   uint64
 	statActive  int
 	statPerRule map[string]uint64
+	// stats 统计页的两个维度累计桶与合计（「统计」页的数据源，见 stats.go）。
+	stats *statBoard
 	// rateUp/rateDown：全表速率合计（字节/秒，出/入方向），由 rateLoop 每秒更新。
 	// 界面顶栏/连接页汇总量每次轮询直接读，不必自己遍历连接表。
 	//
@@ -625,6 +631,7 @@ func New(bus *logbus.Bus, rs *rules.Set, cfg *config.Config) *Engine {
 		bus: bus, cfg: cfg,
 		conns:       map[uint16]*connState{},
 		statPerRule: map[string]uint64{},
+		stats:       newStatBoard(time.Now()),
 		selfPorts:   map[uint16]time.Time{},
 		done:        make(chan struct{}),
 		pool:        newWarmPool(),
@@ -886,6 +893,7 @@ func (e *Engine) Start() error {
 	e.mu.Lock()
 	e.ln, e.relay, e.handles, e.mainStops, e.mainFilter, e.mainRanges, e.run = ln, relay, handles, stops, base, nrange, true
 	e.startedAt = time.Now()
+	e.stats.beginRun(e.startedAt) // 「本次运行」口径从这一刻开始数（累计口径不动，见 stats.go）
 	e.mu.Unlock()
 
 	e.bus.Info("engine.start: relay=%s rules=%d", relay, len(e.ruleSet().List()))
@@ -3568,29 +3576,50 @@ func (e *Engine) janitor() {
 				e.logStatsSummary()
 			}
 			e.fillMissingProcs()
-			activeCut := time.Now().Add(-10 * time.Minute).UnixNano()
-			endedCut := time.Now().Add(-2 * time.Minute).UnixNano()
-			e.mu.Lock()
-			for k, st := range e.conns {
-				cut := activeCut
-				if st.ended.Load() {
-					cut = endedCut
-				}
-				if st.last.Load() < cut {
-					// 收尾时发现是“没人动的进行中”，把活跃数一起扣回来
-					if st.ended.CompareAndSwap(false, true) && e.statActive > 0 {
-						e.statActive--
-					}
-					delete(e.conns, k)
-				}
-			}
-			for k, d := range e.notices {
-				if d.last.Before(time.Unix(0, activeCut)) {
-					delete(e.notices, k)
-				}
-			}
-			e.mu.Unlock()
+			e.sweepConns()
 		}
+	}
+}
+
+// sweepConns 回收长时间没动的连接条目（janitor 每分钟调一次）。
+//
+// 单独成方法是为了能被测试直接调 —— 这一段里有两个容易写错的口径：
+//
+//	① 只有“这一次才标结束”的条目要落统计：finish 已经落过的那些（比如正常收到 FIN）
+//	   在回收时**不能再落一次**，否则同一条连接的字节数会被算两遍；
+//	② 落统计必须在**锁外** —— noteStatEnd 要看进程名，拿的是读锁，在写锁里调就是自己锁自己。
+func (e *Engine) sweepConns() {
+	activeCut := time.Now().Add(-10 * time.Minute).UnixNano()
+	endedCut := time.Now().Add(-2 * time.Minute).UnixNano()
+	// recycled 这一轮**由我们标成结束**的条目，出锁后再落统计。
+	var recycled []*connState
+	e.mu.Lock()
+	for k, st := range e.conns {
+		cut := activeCut
+		if st.ended.Load() {
+			cut = endedCut
+		}
+		if st.last.Load() >= cut {
+			continue
+		}
+		// 收尾时发现是“没人动的进行中”，把活跃数一起扣回来
+		wasLive := st.ended.CompareAndSwap(false, true)
+		if wasLive && e.statActive > 0 {
+			e.statActive--
+		}
+		if wasLive {
+			recycled = append(recycled, st)
+		}
+		delete(e.conns, k)
+	}
+	for k, d := range e.notices {
+		if d.last.Before(time.Unix(0, activeCut)) {
+			delete(e.notices, k)
+		}
+	}
+	e.mu.Unlock()
+	for _, st := range recycled {
+		e.noteStatEnd(st)
 	}
 }
 

@@ -19,6 +19,7 @@ func newTestEngine() *Engine {
 		conns:       map[uint16]*connState{},
 		notices:     map[uint16]noticeSeen{},
 		statPerRule: map[string]uint64{},
+		stats:       newStatBoard(time.Now()),
 	}
 }
 

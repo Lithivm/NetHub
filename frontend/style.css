@@ -630,6 +630,32 @@ html.is-tray *::after {
 .sim-badge.none { background: var(--card-strong); color: var(--muted); }
 .rule-grid  { grid-template-columns: 34px 46px 200px minmax(220px, 1.5fr) 130px 104px; }
 .conn-grid  { grid-template-columns: 40px 132px minmax(160px, 1.2fr) 62px 92px 74px 84px 84px 76px 92px; }
+/* 统计表：这一页跟连接页不一样 —— 除了第一列全是数字，所以数字列**右对齐**，
+   一列千位才能对齐着竖读（左对齐的数字表得靠右边缘才能比大小，实际读不下来）。
+   列宽按“最多能有多宽”定：连接数带一个小尾巴（1.5k）、字节数是“45.6 MB”这种宽度。 */
+.stat-grid  { grid-template-columns: minmax(180px, 1.4fr) 62px 52px 92px 92px 88px 88px 84px; }
+.stat-grid .cell.num { text-align: right; }
+/* 统计页顶部的三组数字（照 Proxifier 的 Statistics 那三组：连接 / 流量 / 时长）。
+   图下面是空态文案的位置，所以用 grid + 等宽分栏，不做卡片套卡片。 */
+.stat-figs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--s2);
+  padding: var(--s3) var(--s4) var(--s2);
+}
+.stat-fig { display: flex; flex-direction: column; gap: var(--s1); min-width: 0; }
+.stat-fig .stat-label { font-size: var(--fs-xs); color: var(--muted); }
+.stat-fig .stat-num {
+  font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+  font-size: 20px; font-weight: 700; color: var(--ink);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* 顶部卡片里的两行补充文字：缩到与表头同一水平线上（--s4 是卡片的水平内边距） */
+.stat-break { padding: 0 var(--s4) var(--s3); }
+.stat-note { padding: var(--s2) var(--s4) var(--s3); }
+/* 统计表封顶：一屏放得下 12 行左右，剩下的表内滑动（表头 sticky）。
+   不封顶的话 20 行会把页面拉得很长，而“谁在占带宽”只需要看头部几行。 */
+#statTable { max-height: 480px; }
 /* 连接列表：整行可点开（展开明细），明细行跨整行 */
 .conn-row { cursor: pointer; }
 .conn-row.is-open { background: var(--primary-soft); }
