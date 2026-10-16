@@ -29,15 +29,15 @@ func (p *socks5Proxy) Dial(ip net.IP, port uint16, timeout time.Duration) (net.C
 	if v4 == nil {
 		return nil, fmt.Errorf("仅支持 IPv4 目标: %v", ip)
 	}
-	return socks.DialTLS(p.u.Addr, p.u.Creds, p.u.tls(), v4, port, timeout)
+	return socks.DialVia(p.u.dialVia(), p.u.Creds, v4, port, timeout)
 }
 
 func (p *socks5Proxy) DialHost(host string, port uint16, timeout time.Duration) (net.Conn, error) {
-	return socks.DialTLSHost(p.u.Addr, p.u.Creds, p.u.tls(), host, port, timeout)
+	return socks.DialHostVia(p.u.dialVia(), p.u.Creds, host, port, timeout)
 }
 
 func (p *socks5Proxy) Prepare(timeout time.Duration) (net.Conn, error) {
-	return socks.Prepare(p.u.Addr, p.u.Creds, p.u.tls(), timeout)
+	return socks.PrepareVia(p.u.dialVia(), p.u.Creds, timeout)
 }
 
 func (p *socks5Proxy) ConnectOn(conn net.Conn, ip net.IP, port uint16, timeout time.Duration) error {
@@ -58,7 +58,7 @@ func (p *socks4Proxy) Dial(ip net.IP, port uint16, timeout time.Duration) (net.C
 		return nil, fmt.Errorf("仅支持 IPv4 目标: %v", ip)
 	}
 	// SOCKS4 协议本身没有 TLS；但 gost 允许 "socks4+tls" 这种"TLS 传输 + SOCKS4 协议"。
-	return socks.DialSOCKS4TLS(p.u.Addr, p.u.Creds.User, v4.String(), port, p.u.tls(), timeout)
+	return socks.DialSOCKS4Via(p.u.dialVia(), p.u.Creds.User, v4.String(), port, timeout)
 }
 
 func (p *socks4Proxy) DialHost(host string, port uint16, timeout time.Duration) (net.Conn, error) {
@@ -80,13 +80,17 @@ func (p *socks4Proxy) DialHost(host string, port uint16, timeout time.Duration) 
 		if v4 == nil {
 			return nil, fmt.Errorf("SOCKS4 只支持 IPv4，%s 解析到 %v", host, ips)
 		}
-		return socks.DialSOCKS4TLS(p.u.Addr, p.u.Creds.User, v4.String(), port, p.u.tls(), timeout)
+		return socks.DialSOCKS4Via(p.u.dialVia(), p.u.Creds.User, v4.String(), port, timeout)
 	}
-	return socks.DialSOCKS4TLS(p.u.Addr, p.u.Creds.User, host, port, p.u.tls(), timeout)
+	return socks.DialSOCKS4Via(p.u.dialVia(), p.u.Creds.User, host, port, timeout)
 }
 
 func (p *socks4Proxy) Prepare(timeout time.Duration) (net.Conn, error) {
-	return socks.PrepareSOCKS4(p.u.Addr, p.u.tls(), timeout)
+	c, err := p.u.dialTransport(timeout)
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
 }
 
 func (p *socks4Proxy) ConnectOn(conn net.Conn, ip net.IP, port uint16, timeout time.Duration) error {

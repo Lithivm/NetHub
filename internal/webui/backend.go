@@ -564,11 +564,9 @@ func (b *Backend) GetChains() []ChainView {
 func briefUpstream(raw string) string {
 	b := gostbat.Redact(raw)
 	if u, err := upstream.Parse(raw); err == nil && u.Addr != "" {
-		proto := u.Protocol
-		if u.TLS {
-			proto += "+tls"
-		}
-		b = proto + "://" + u.Addr
+		// 用协议自己的写法（含 ws/wss 这类传输后缀），不要在这里拼 +tls ——
+		// 拼接点一多，加了新传输就会漏掉某一处（用户看到的协议名与实际不符）。
+		b = u.SchemeTag() + "://" + u.Addr
 	}
 	return b
 }

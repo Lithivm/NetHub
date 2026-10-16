@@ -22,6 +22,7 @@ package upstream
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -52,6 +53,15 @@ type factory func(u *Upstream) Proxy
 var registry = map[string]factory{}
 
 func register(name string, f factory) { registry[name] = f }
+
+// urlSetups 协议自己的 URL 参数处理（`?security=` `?type=` `?flow=` 这类）。
+//
+// 为什么要这个口子：vless / vmess / trojan 在现实里都是从 **xray 分享链接**拿到的，
+// 那一套参数（type=ws / security=tls / sni= / path= / host=）属于协议自己，
+// 不该让通用 Parse 知道。加协议时一并在这里注册，Parse 一个字不用改。
+var urlSetups = map[string]func(u *Upstream, q url.Values) error{}
+
+func registerURLSetup(name string, f func(u *Upstream, q url.Values) error) { urlSetups[name] = f }
 
 // RegisteredSchemes 已注册的协议名（排序）。给错误提示与"两边是否同步"的测试用。
 func RegisteredSchemes() []string {

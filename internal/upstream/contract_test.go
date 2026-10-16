@@ -362,24 +362,21 @@ func echoOnce(c net.Conn, want string) error {
 func TestRegistryCoversClassifiedSchemes(t *testing.T) {
 	// classify 认得的原始写法（见 scheme.go）；别名归一化后的 base 必须在注册表里。
 	accepted := []string{"socks", "socks5", "socks5h", "socks4", "socks4a", "http", "https",
-		"socks5+tls", "socks4+tls", "socks5+mtls"}
+		"socks5+tls", "socks4+tls", "socks5+mtls", "socks5+ws", "socks5+wss", "http+ws"}
 	for _, s := range accepted {
-		base, _, known := classify(s)
-		if !known {
-			t.Errorf("classify 不认 %q，但它是我们对外声称支持的写法", s)
+		info, err := classify(s)
+		if err != nil {
+			t.Errorf("classify 不认 %q，但它是我们对外声称支持的写法: %v", s, err)
 			continue
 		}
-		if _, ok := registry[base]; !ok {
-			t.Errorf("写法 %q 归一化成 %q，但注册表里没有这个协议（忘了 register？）", s, base)
+		if _, ok := registry[info.Base]; !ok {
+			t.Errorf("写法 %q 归一化成 %q，但注册表里没有这个协议（忘了 register？）", s, info.Base)
 		}
 	}
 	// 反向：注册表里有的，classify 也必须认得（否则用户根本写不出这个协议）
 	for name := range registry {
-		if _, ok := registry[name]; !ok {
-			continue
-		}
-		if _, _, known := classify(name); !known {
-			t.Errorf("注册了协议 %q，但 classify 不认 —— 用户没法在配置里写出来", name)
+		if _, err := classify(name); err != nil {
+			t.Errorf("注册了协议 %q，但 classify 不认 —— 用户没法在配置里写出来: %v", name, err)
 		}
 	}
 	// SupportedSchemes 是给用户看的清单，不能漏掉已注册的协议

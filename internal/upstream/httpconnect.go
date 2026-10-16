@@ -30,26 +30,11 @@ func dialHTTPConnect(u *Upstream, targetIP net.IP, targetPort uint16, timeout ti
 	return conn, nil
 }
 
-// prepareHTTPConnect 连上代理（+可选 TLS）；HTTP 代理的认证在 CONNECT 里发，
-// 所以预备阶段就是 TCP+TLS。
+// prepareHTTPConnect 连上代理：整个传输层（TCP → [TLS] → [ws 握手]）交给 dialTransport，
+// 所以 HTTP CONNECT 也自动能跑在 ws/wss 上。HTTP 代理的认证在 CONNECT 里发，
+// 所以预备阶段就到此为止。
 func prepareHTTPConnect(u *Upstream, timeout time.Duration) (net.Conn, error) {
-	if timeout <= 0 {
-		timeout = 10 * time.Second
-	}
-	raw, err := net.DialTimeout("tcp", u.Addr, timeout)
-	if err != nil {
-		return nil, fmt.Errorf("连代理失败: %w", err)
-	}
-	_ = raw.SetDeadline(time.Now().Add(timeout))
-	if !u.TLS {
-		return raw, nil
-	}
-	tc := tls.Client(raw, u.tlsConfig())
-	if err := tc.Handshake(); err != nil {
-		raw.Close()
-		return nil, fmt.Errorf("代理的 TLS 握手失败: %w", err)
-	}
-	return tc, nil
+	return u.dialTransport(timeout)
 }
 
 // connectHTTPConnect 在已预备好的连接上发 CONNECT 并读应答（2xx = 隧道建立）。

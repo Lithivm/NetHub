@@ -2116,12 +2116,10 @@ func stripCreds(raw string) string {
 	switch {
 	case up.Protocol == "http" && up.TLS:
 		return "https://" + up.Addr
-	case up.Protocol == "http":
-		return "http://" + up.Addr
-	case up.TLS:
-		return up.Protocol + "+tls://" + up.Addr
 	default:
-		return up.Protocol + "://" + up.Addr
+		// SchemeTag 自带传输后缀（+tls / +ws / +wss）—— 写丢传输层的话，
+		// “导出无凭据”再导回来就连不上了。
+		return up.SchemeTag() + "://" + up.Addr
 	}
 }
 

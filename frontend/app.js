@@ -1828,7 +1828,8 @@ async function chainForm(index, preset) {
   const warn = el('p', 'hint', '口令是明文存在 config.yaml 里（和 gost 脚本一样）—— 别提交进 git、别发群里。');
   const nodes = [
     field('链名', name),
-    field('上游', forwards, '支持 socks5 / socks5+tls / socks4 / http / https；旧 gost 脚本可直接导入'),
+    field('上游', forwards, '支持 socks5 / socks4 / http(s) / shadowsocks(ss) / trojan / vless / vmess；
+传输层可加 +tls / +ws / +wss（如 socks5+wss）；旧 gost 脚本可直接导入'),
     field('', credNote),
     field('', importBtn),
     field('策略', strategy, '多条上游时怎么挑：故障转移（默认）/ 轮询 / 随机'),

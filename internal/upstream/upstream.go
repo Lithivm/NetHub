@@ -53,10 +53,21 @@ import (
 // Upstream 一条上游链路。
 type Upstream struct {
 	Raw      string // 原始 URL（含凭据，不要往日志里打）
-	Protocol string // socks5 | socks4 | socks4a | http
+	Protocol string // socks5 | socks4 | socks4a | http | ss | trojan | vless | vmess
 	Addr     string // host:port
-	TLS      bool   // 是否要在连接上做 TLS（由 +tls / https 决定）
-	Creds    socks.Creds
+
+	// Transport 传输层：tcp | tls | ws | wss（见 transport.go）。
+	// gost 的组合写法 `协议+传输` 就映射到这里：`socks5+tls` → tls、`socks5+wss` → wss。
+	Transport string
+	// TLS 是否要在连接上做 TLS。**由 Transport 派生**（tls/wss 为真），
+	// 协议自己的默认值在 classify 里定（trojan 天生 TLS）。
+	TLS bool
+
+	// ws 传输的两个参数（`?path=` / `?host=`，xray 分享链接里就是这两个名字）
+	WSPath string // ws 路径，默认 /ws（gost 严格匹配）
+	WSHost string // ws 握手的 Host 头，默认 = 节点地址
+
+	Creds socks.Creds
 
 	// Verify 是否校验上游证书。
 	// 默认 false —— 与 gost 的 socks5+tls 默认行为一致（它不配 CA 时不校验）。
@@ -115,12 +126,13 @@ func Parse(raw string) (*Upstream, error) {
 	if err != nil {
 		return nil, fmt.Errorf("解析上游 URL 失败: %w", err)
 	}
-	base, isTLS, known := classify(u.Scheme)
-	if !known {
-		return nil, fmt.Errorf("不支持的上游协议 %q（当前支持 %s）", u.Scheme, SupportedSchemes())
+	info, err := classify(u.Scheme)
+	if err != nil {
+		return nil, err
 	}
 
-	up := &Upstream{Raw: raw, Protocol: base, TLS: isTLS}
+	up := &Upstream{Raw: raw, Protocol: info.Base, Transport: info.Transport,
+		TLS: info.Transport == transportTLS || info.Transport == transportWSS}
 
 	host := u.Hostname()
 	port := u.Port()
@@ -172,6 +184,26 @@ func Parse(raw string) (*Upstream, error) {
 	}
 	if q := u.Query(); q.Get("secure") == "true" {
 		up.Verify = true
+	}
+
+	// ws 传输的两个参数（xray 分享链接与 gost 都用这两个名字）
+	up.WSPath = firstNonEmpty(queryRaw(u.RawQuery, "path"), "")
+	up.WSHost = queryRaw(u.RawQuery, "host")
+	// TLS 的 SNI / 校验证名：gost 写 ?servername=、xray 分享链接写 ?sni=。
+	// 两者都空时用节点地址（原行为）；`wss + ?host=` 那种（xray 分享链接的常见形态）
+	// 把 host 当 SNI —— xray 自己的行为就是这样，不这么填多半握手就失败。
+	if name := firstNonEmpty(queryRaw(u.RawQuery, "sni"), queryRaw(u.RawQuery, "servername")); name != "" {
+		up.ServerName = name
+	} else if up.Transport == transportWSS && up.WSHost != "" {
+		up.ServerName = stripPort(up.WSHost)
+	}
+
+	// 协议自己的 URL 参数（xray 分享链接那一套：?security= ?type= ?flow= …）。
+	// 分发到协议自己的文件里，Parse 不必知道任何私有参数（加协议不动这里）。
+	if setup := urlSetups[up.Protocol]; setup != nil {
+		if err := setup(up, u.Query()); err != nil {
+			return nil, err
+		}
 	}
 
 	// 客户端证书（mTLS）：`?cert=<证书路径>&key=<私钥路径>`
@@ -226,15 +258,29 @@ func queryRaw(rawQuery, key string) string {
 
 // String 只用来打日志：把凭据遮蔽掉。
 func (u *Upstream) String() string {
-	s := u.Protocol
-	if u.TLS {
-		s += "+tls"
-	}
 	auth := ""
 	if u.Creds.User != "" || u.Creds.Pass != "" {
 		auth = "（带凭据）"
 	}
-	return s + "://" + u.Addr + auth
+	return u.SchemeTag() + "://" + u.Addr + auth
+}
+
+// firstNonEmpty 取第一个非空值（解析期的默认值链用）。
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// stripPort 去掉 host:port 里的端口（SNI 只要主机名）。
+func stripPort(s string) string {
+	if h, _, err := net.SplitHostPort(s); err == nil {
+		return h
+	}
+	return s
 }
 
 // Dial 连到 targetIP:port。
@@ -255,6 +301,13 @@ func (u *Upstream) tls() *tls.Config {
 		return nil
 	}
 	return u.tlsConfig()
+}
+
+// dialVia 把传输层包成 socks 包要的"拨号函数"。
+// 传它是为了让 SOCKS4/5 也能跑在 ws/wss 上（协议字节塞进 ws 帧），
+// 而不必给每种传输在 socks 包里写一遍拨号。
+func (u *Upstream) dialVia() socks.Dialer {
+	return func(timeout time.Duration) (net.Conn, error) { return u.dialTransport(timeout) }
 }
 
 // ───────────────────────── 预热连接池（A11）─────────────────────────

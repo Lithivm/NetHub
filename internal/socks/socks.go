@@ -72,35 +72,122 @@ func DialAuthHost(proxy string, c Creds, host string, dstPort uint16, timeout ti
 	return dialWith(proxy, c, nil, atypDomain, body, dstPort, timeout)
 }
 
-// Prepare 先连上代理并做完“不依赖目标”的握手（TCP + 可选 TLS + 方法协商/认证），
-// 返回一个**待用**的连接（还差一次 CONNECT）。
+// Dialer 拨通"到代理"的连接（**含传输层**）。
 //
-// 用途：预热连接池（A11）—— 把这三段提前做完并放着，业务来了只需发 CONNECT，
-// 省掉 TCP+TLS+招呼（实测 193～258ms）。
-func Prepare(proxy string, c Creds, tlsConf *tls.Config, timeout time.Duration) (net.Conn, error) {
-	if timeout <= 0 {
-		timeout = 10 * time.Second
-	}
-	raw, err := net.DialTimeout("tcp", proxy, timeout)
-	if err != nil {
-		return nil, fmt.Errorf("连代理失败: %w", err)
-	}
-	_ = raw.SetDeadline(time.Now().Add(timeout))
+// 为什么要有这一层：到上游那一跳不只有“TCP + 可选 TLS”了 —— 现在还有 ws / wss
+// （协议字节塞进 WebSocket 帧）。把拨号整个交给调用方，SOCKS5/4 就不必知道任何传输细节，
+// 今后加传输也不必动这个包。
+type Dialer func(timeout time.Duration) (net.Conn, error)
 
-	var conn net.Conn = raw
-	if tlsConf != nil {
+// tcpTLSDialer 最常用的一种传输：TCP + 可选 TLS（保留原来的错误文案）。
+func tcpTLSDialer(proxy string, tlsConf *tls.Config) Dialer {
+	return func(timeout time.Duration) (net.Conn, error) {
+		if timeout <= 0 {
+			timeout = 10 * time.Second
+		}
+		raw, err := net.DialTimeout("tcp", proxy, timeout)
+		if err != nil {
+			return nil, fmt.Errorf("连代理失败: %w", err)
+		}
+		_ = raw.SetDeadline(time.Now().Add(timeout))
+		if tlsConf == nil {
+			return raw, nil
+		}
 		tc := tls.Client(raw, tlsConf)
 		if err := tc.Handshake(); err != nil {
 			raw.Close()
 			return nil, fmt.Errorf("TLS 握手失败: %w", err)
 		}
-		conn = tc
+		return tc, nil
+	}
+}
+
+// DialVia 用 dial 建立的连接做一次 SOCKS5（方法协商 + 认证）并 CONNECT 到 dstIP:dstPort。
+func DialVia(dial Dialer, c Creds, dstIP net.IP, dstPort uint16, timeout time.Duration) (net.Conn, error) {
+	v4 := dstIP.To4()
+	if v4 == nil {
+		return nil, fmt.Errorf("仅支持 IPv4 目标: %v", dstIP)
+	}
+	return dialWithVia(dial, c, atypIPv4, v4, dstPort, timeout)
+}
+
+// DialHostVia 同上，但把**域名**交给上游解析（ATYP=域名）。
+func DialHostVia(dial Dialer, c Creds, host string, dstPort uint16, timeout time.Duration) (net.Conn, error) {
+	if err := checkHost(host); err != nil {
+		return nil, err
+	}
+	body := append([]byte{byte(len(host))}, []byte(host)...)
+	return dialWithVia(dial, c, atypDomain, body, dstPort, timeout)
+}
+
+// PrepareVia 用 dial 建连接 + 做完协商/认证（不 CONNECT）—— 预热连接池用。
+func PrepareVia(dial Dialer, c Creds, timeout time.Duration) (net.Conn, error) {
+	conn, err := dial(timeout)
+	if err != nil {
+		return nil, err
 	}
 	if err := negotiate(conn, c); err != nil {
 		conn.Close()
 		return nil, err
 	}
 	return conn, nil
+}
+
+// dialWithVia = PrepareVia + CONNECT（addr 是 ATYP 对应的地址体）。
+func dialWithVia(dial Dialer, c Creds, atyp byte, addr []byte, dstPort uint16,
+	timeout time.Duration) (net.Conn, error) {
+	conn, err := PrepareVia(dial, c, timeout)
+	if err != nil {
+		return nil, err
+	}
+	if err := connect(conn, atyp, addr, dstPort); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	_ = conn.SetDeadline(time.Time{})
+	return conn, nil
+}
+
+// prepareSOCKS4Via 用 dial 建连接（SOCKS4 没有方法协商，所以"预备"就是建连接）。
+func prepareSOCKS4Via(dial Dialer, timeout time.Duration) (net.Conn, error) {
+	conn, err := dial(timeout)
+	if err != nil {
+		return nil, err
+	}
+	return conn, nil
+}
+
+// DialSOCKS4Via 用 dial 建立的连接做一次 SOCKS4/4a 请求。
+func DialSOCKS4Via(dial Dialer, user, host string, dstPort uint16, timeout time.Duration) (net.Conn, error) {
+	c, err := prepareSOCKS4Via(dial, timeout)
+	if err != nil {
+		return nil, err
+	}
+	if err := ConnectSOCKS4On(c, user, host, dstPort, timeout); err != nil {
+		c.Close()
+		return nil, err
+	}
+	return c, nil
+}
+
+// checkHost 域名长度必须校验：ATYP=域名是 1 字节长度，256 会变成 0（空域名）+ 后续字节错位。
+func checkHost(host string) error {
+	if strings.Contains(host, ":") {
+		return fmt.Errorf("域名里不该带端口: %q", host)
+	}
+	if len(host) == 0 || len(host) > 255 {
+		return fmt.Errorf("域名长度需在 1-255 字节: %q", host)
+	}
+	return nil
+}
+
+// Prepare 先连上代理并做完“不依赖目标”的握手（TCP + 可选 TLS + 方法协商/认证），
+// 返回一个**待用**的连接（还差一次 CONNECT）。
+//
+// 用途：预热连接池（A11）—— 把这三段提前做完并放着，业务来了只需发 CONNECT，
+// 省掉 TCP+TLS+招呼（实测 193～258ms）。
+func Prepare(proxy string, c Creds, tlsConf *tls.Config, timeout time.Duration) (net.Conn, error) {
+	return PrepareVia(tcpTLSDialer(proxy, tlsConf), c, timeout)
 }
 
 // ConnectOn 在已预备好的连接上发 CONNECT（IPv4）。
@@ -126,20 +213,7 @@ func ConnectOn(conn net.Conn, dstIP net.IP, dstPort uint16, timeout time.Duratio
 // addr 是 ATYP 对应的地址体（IPv4 4 字节 / 域名 = 长度+字节）。
 func dialWith(proxy string, c Creds, tlsConf *tls.Config, atyp byte, addr []byte,
 	dstPort uint16, timeout time.Duration) (net.Conn, error) {
-	if timeout <= 0 {
-		timeout = 10 * time.Second
-	}
-	conn, err := Prepare(proxy, c, tlsConf, timeout)
-	if err != nil {
-		return nil, err
-	}
-	// 域名目标的 CONNECT 走原来的 connect()，不经过 ConnectOn（它只收 IPv4）
-	if err := connect(conn, atyp, addr, dstPort); err != nil {
-		conn.Close()
-		return nil, err
-	}
-	_ = conn.SetDeadline(time.Time{})
-	return conn, nil
+	return dialWithVia(tcpTLSDialer(proxy, tlsConf), c, atyp, addr, dstPort, timeout)
 }
 
 // negotiate 方法协商 + 认证（RFC 1928 第 3 步 + RFC 1929）。
@@ -334,23 +408,7 @@ func socks4Text(code byte) string {
 // PrepareSOCKS4 先连上代理（+可选 TLS），不做 CONNECT —— 给预热连接池用。
 // SOCKS4 没有“方法协商”，所以预备阶段就是 TCP+TLS。
 func PrepareSOCKS4(proxy string, tlsConf *tls.Config, timeout time.Duration) (net.Conn, error) {
-	if timeout <= 0 {
-		timeout = 10 * time.Second
-	}
-	raw, err := net.DialTimeout("tcp", proxy, timeout)
-	if err != nil {
-		return nil, fmt.Errorf("连代理失败: %w", err)
-	}
-	_ = raw.SetDeadline(time.Now().Add(timeout))
-	if tlsConf == nil {
-		return raw, nil
-	}
-	tc := tls.Client(raw, tlsConf)
-	if err := tc.Handshake(); err != nil {
-		raw.Close()
-		return nil, fmt.Errorf("TLS 握手失败: %w", err)
-	}
-	return tc, nil
+	return prepareSOCKS4Via(tcpTLSDialer(proxy, tlsConf), timeout)
 }
 
 // ConnectSOCKS4On 在预备好的连接上发 SOCKS4/4a 请求。
@@ -369,15 +427,7 @@ func ConnectSOCKS4On(conn net.Conn, user, host string, dstPort uint16, timeout t
 // （SOCKS4 协议本身没有 TLS，这里是"TLS 传输层 + SOCKS4 协议"的组合，gost 也允许这么写。）
 func DialSOCKS4TLS(proxy, user, host string, dstPort uint16, tlsConf *tls.Config,
 	timeout time.Duration) (net.Conn, error) {
-	c, err := PrepareSOCKS4(proxy, tlsConf, timeout)
-	if err != nil {
-		return nil, err
-	}
-	if err := ConnectSOCKS4On(c, user, host, dstPort, timeout); err != nil {
-		c.Close()
-		return nil, err
-	}
-	return c, nil
+	return DialSOCKS4Via(tcpTLSDialer(proxy, tlsConf), user, host, dstPort, timeout)
 }
 
 // DialTLSHost 同 DialTLS，但把**域名**交给代理解析（SOCKS5 的 ATYP=域名）。
@@ -385,12 +435,8 @@ func DialSOCKS4TLS(proxy, user, host string, dstPort uint16, tlsConf *tls.Config
 // 用途："域名交给上游" —— 内网域名不必在本机解析得出，本机 DNS 也不会泄漏内网域名。
 func DialTLSHost(addr string, c Creds, tlsConf *tls.Config, host string, dstPort uint16,
 	timeout time.Duration) (net.Conn, error) {
-	if strings.Contains(host, ":") {
-		return nil, fmt.Errorf("域名里不该带端口: %q", host)
-	}
-	// 长度必须校验：ATYP=域名是 1 字节长度，256 会变成 0（空域名）+ 后续字节错位。
-	if len(host) == 0 || len(host) > 255 {
-		return nil, fmt.Errorf("域名长度需在 1-255 字节: %q", host)
+	if err := checkHost(host); err != nil {
+		return nil, err
 	}
 	body := append([]byte{byte(len(host))}, []byte(host)...)
 	return dialWith(addr, c, tlsConf, atypDomain, body, dstPort, timeout)
