@@ -7,7 +7,6 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/imgk/divert-go v0.1.0
 	github.com/wailsapp/wails/v2 v2.16.0
-	github.com/ying32/govcl v2.2.3+incompatible
 	github.com/zeebo/blake3 v0.2.4
 	golang.org/x/crypto v0.53.0
 	golang.org/x/sys v0.46.0
