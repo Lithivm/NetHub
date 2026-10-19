@@ -757,16 +757,28 @@ function drawTraffic() {
   const xOf = (i) => w - (pts.length - 1 - i) * step;
   const yOf = (val) => h - 1 - Math.min(Number(val) || 0, max) / max * (h - 3);
 
-  function line(key, color, alpha) {
-    g.beginPath();
-    for (let i = 0; i < pts.length; i++) {
-      const x = xOf(i), y = yOf(pts[i][key]);
-      if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+  // 路径：**过中点的二次贝塞尔**（轻平滑，2026-10-19 用户挑的）。
+  // 为什么不直接 lineTo：60 格落在 236px 上、每格 4px，折角在 41px 高里就是一排"锯齿山"，
+  // 尖峰段尤其像障碍物。过中点平滑**不移动任何采样点**（不是拟合/插值，只是把折角磨圆），
+  // 所以"哪一秒多高"仍然一眼可读 —— 别换成 Catmull-Rom 之类会过冲的曲线，那会画出数据里没有的峰。
+  function trace(key) {
+    const n = pts.length;
+    g.moveTo(xOf(0), yOf(pts[0][key]));
+    for (let i = 1; i < n; i++) {
+      const xc = (xOf(i - 1) + xOf(i)) / 2;
+      const yc = (yOf(pts[i - 1][key]) + yOf(pts[i][key])) / 2;
+      g.quadraticCurveTo(xOf(i - 1), yOf(pts[i - 1][key]), xc, yc);
     }
+    g.lineTo(xOf(n - 1), yOf(pts[n - 1][key]));
+  }
+
+  function line(key, color, alpha) {
+    g.beginPath(); trace(key);
     g.strokeStyle = color; g.lineWidth = 1.4; g.lineJoin = 'round'; g.lineCap = 'round';
     g.stroke();
     if (alpha) {
       // 面积用 globalAlpha 变淡，不另外写一个半透明色值：改色只改 :root（见 style.css 头）
+      g.beginPath(); trace(key);
       g.lineTo(xOf(pts.length - 1), h);
       g.lineTo(xOf(0), h);
       g.closePath();
@@ -775,6 +787,16 @@ function drawTraffic() {
   }
   line('up', colUp, 0);     // 先画上行（在下面），下行盖在上面
   line('down', colDown, 0.22);
+
+  // 右端"当前值"落点：曲线右端原来悬在读数左边、没有任何东西告诉眼睛"现在在哪里"。
+  // 点画在**下行**末端（有面积那条就是主数据），颜色同曲线。
+  // 横向往回让 2.4px：曲线末端正好落在 w 上（右边缘），爱着边画会有一半被裁掉；
+  // 让到"圆的最右边刚好贴住右边缘"的位置，读数又在它右边紧挨着，看着才是一个整体。
+  const dx = Math.max(2.4, xOf(pts.length - 1) - 2.4);
+  g.beginPath();
+  g.arc(dx, yOf(pts[pts.length - 1].down), 2.4, 0, Math.PI * 2);
+  g.fillStyle = colDown;
+  g.fill();
 }
 
 /* 顶栏尺寸变了（窗口缩放/页签变动）就重画一帧：不重画的话画布会被拉变形。 */
