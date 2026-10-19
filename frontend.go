@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -60,8 +61,12 @@ func redirectStderrTo(logDir string) {
 // 所有配置读写都归引擎进程一条路 —— 前端连路径都不知道，就不存在"两头写配置文件"的风险。
 //
 // startHidden：上次界面就是收在托盘里的（被杀之前），这次起来也别露出来。
-func runFrontend(logDir, themeMode string, startHidden bool) {
+// parentPID：拉起我的那个引擎进程。非 0 就盯着它 —— 它没了我也退出（见 watchParent）。
+func runFrontend(logDir, themeMode string, startHidden bool, parentPID uint32) {
 	redirectStderrTo(logDir)
+	if parentPID != 0 {
+		go watchParent(parentPID)
+	}
 
 	theme := wopts.Light
 	bg := uint32(0xffffffff)
@@ -169,17 +174,15 @@ func (f *frontendSupervisor) Stop() {
 
 // Show 托盘点「显示主界面」：在跑就把窗口叫到前面，不在跑就立刻拉起。
 func (f *frontendSupervisor) Show() {
-	if f.running() {
-		webui.ShowMainWindow(f.b)
+	// ① 已经有界面接着（**不管它是不是我亲手拉起来的那一个**）：请它把窗口露出来。
+	// 必须试这一步，否则会退化成"界面明明活着、管道明明通着，点托盘却一点反应没有"：
+	// 看护在"另一个界面实例占着单实例锁"时会进待命（见 loop 里退出码 0 那段），那时 f.proc
+	// 是 nil；只按"我有没有拉起过进程"判断就等于把活着的那一个当空气（2026-10-19 现场）。
+	if err := webui.ShowMainWindow(f.b); err == nil {
 		return
 	}
+	// ② 没有界面接着 / 叫不动：叫看护现在就拉一个（待命状态也会被这一声叫起来）。
 	f.wake()
-}
-
-func (f *frontendSupervisor) running() bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.proc != nil
 }
 
 func (f *frontendSupervisor) stoppingNow() bool {
@@ -197,8 +200,14 @@ func (f *frontendSupervisor) wake() {
 
 // loop 是唯一拉起界面的地方：拉起来 → 等它退出 → 决定要不要再拉。
 func (f *frontendSupervisor) loop() {
+	// standby = 上一轮是"让位"（退出码 0）而不是死了：不自己反复拉（那会每 1.5 秒起一个
+	// 立刻退出的进程），等下一次有人要界面（托盘 / 再次双击）再试。
+	standby := false
 	for {
 		if f.stoppingNow() {
+			return
+		}
+		if standby && !f.waitNudge() {
 			return
 		}
 		p, err := f.launch()
@@ -209,6 +218,7 @@ func (f *frontendSupervisor) loop() {
 			}
 			continue
 		}
+		started := time.Now()
 		code, known := f.superviseProcess(p)
 		f.mu.Lock()
 		f.proc = nil
@@ -217,10 +227,18 @@ func (f *frontendSupervisor) loop() {
 			return
 		}
 		if known && code == 0 {
-			// 正常退出 = 用户主动退出（托盘退出那条路会先把引擎一起收掉），不再拉起
-			f.bus.Info("界面进程正常退出，不再拉起")
-			return
+			// 退出码 0 ≠ 用户要我们收摊。托盘退出那条路会先把引擎一起收掉（stopping 已经为真，
+			// 上面就 return 了）。真正常见的是 Wails 的单实例锁：**另一个界面进程已经把窗口占着了**
+			// （典型：引擎被强杀过一次，旧界面变成孤儿活了下来，single_instance.go 里是
+			// SendMessage 之后 os.Exit(0)）。以前这里直接 return，从此再也没有界面 ——
+			// 托盘点了没反应、重启引擎也没界面，现场只能手工杀进程（2026-10-19 就是这么坏的）。
+			f.bus.Warn("界面进程一启动就退出了（退出码 0，跑了 %s）：多半是另一个界面实例占着单实例锁"+
+				"（Wails 单实例会让位给它，孤儿界面常见于引擎被强杀过）。看护进入待命 —— 点托盘会再拉一次；"+
+				"引擎与隧道不受影响。", time.Since(started).Round(time.Second))
+			standby = true
+			continue
 		}
+		standby = false
 		if known {
 			f.bus.Warn("界面进程被外部程序结束（退出码 %d）。已知原因之一：HIS/医保客户端启动器清理 "+
 				"WebView2 缓存时会按名字杀掉全系统所有 msedgewebview2；引擎与隧道不受影响，正在把界面拉回来。", code)
@@ -229,6 +247,24 @@ func (f *frontendSupervisor) loop() {
 				"缓存时会按名字杀掉全系统所有 msedgewebview2；引擎与隧道不受影响，正在把界面拉回来。")
 		}
 		f.backoff()
+	}
+}
+
+// watchParent 盯着发起我的那个引擎进程：它没了就自己也退出。
+//
+// 为什么必须做：引擎被外部强杀时（任务管理器 / 计划任务重启 / 崩溃）界面不会跟着死，
+// 它会变成**孤儿** —— 还连着管道、还占着 Wails 的单实例锁。之后的每一次拉起，新界面
+// 都会"让位"给这个孤儿然后退出 0，那就等于**永久**没有界面（而引擎照跑、隧道照通，
+// 现场看到的就是「双击托盘没反应」）。加这一个监视，孤儿在 2 秒内自己走人，锁就放开了。
+func watchParent(pid uint32) {
+	for {
+		time.Sleep(2 * time.Second)
+		if proc.Alive(pid) {
+			continue
+		}
+		os.Stderr.WriteString("引擎进程 " + strconv.Itoa(int(pid)) + " 已不在 —— 界面自己退出" +
+			"（不然会变成占着单实例锁的孤儿，下一次界面就永远起不来了）\n")
+		os.Exit(0)
 	}
 }
 
@@ -305,6 +341,14 @@ func (f *frontendSupervisor) superviseProcess(p *os.Process) (int, bool) {
 	}
 }
 
+// waitNudge 挂起直到有人要界面（托盘点了 / 又双击了一次）。返回 false = 看护该停了。
+//
+// Stop 也会 wake 一下，所以挂在这里不会漏掉退出信号。
+func (f *frontendSupervisor) waitNudge() bool {
+	<-f.nudge
+	return !f.stoppingNow()
+}
+
 // nap 等一会儿；中途有人要界面（wake）就提前结束。返回 false = 看护该停了。
 func (f *frontendSupervisor) nap(d time.Duration) bool {
 	select {
@@ -345,7 +389,9 @@ func (f *frontendSupervisor) launch() (*os.Process, error) {
 	// -theme 是"窗口刚出现那一下"的主题（连上引擎后后端还会再对齐一次，见 PushTheme）。
 	// **每次拉起都重新读配置** —— 不能在后端启动时抓一份留着用：用户中途切了主题，
 	// 下一次拉起来的窗口就会用旧主题（看着就像"没记住"）。
-	args := []string{"-frontend", "-logdir", f.logDir}
+	// -parent：引擎的 pid。引擎被强杀时界面不会跟着死，会变成占着 Wails 单实例锁的孤儿 ——
+	// 之后的每次拉起都会"让位"给孤儿然后退出 0（见 loop 里那段），界面就永久消失。
+	args := []string{"-frontend", "-logdir", f.logDir, "-parent", strconv.Itoa(os.Getpid())}
 	if theme := f.b.CurrentTheme(); theme != "" {
 		args = append(args, "-theme", theme)
 	}

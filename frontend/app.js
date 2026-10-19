@@ -326,6 +326,7 @@ function actionClass(r) {
 async function loadService() {
   const top = document.getElementById('svcInfo');
   const row = document.getElementById('svcStateRow');
+  const auto = document.getElementById('svcAuto');
   if (!top || !row) return;
   let v = null;
   try { v = await call('GetService'); } catch (e) { return; }
@@ -333,9 +334,16 @@ async function loadService() {
 
   const map = { running: '运行中', stopped: '已停止', starting: '启动中', stopping: '停止中', 'not installed': '未安装', unknown: '未知' };
   top.textContent = '服务状态：' + (map[v.state] || v.state) +
-    (v.elevated ? '' : '（非管理员，装/卸会失败）');
+    (v.elevated ? '' : '（非管理员，装/卸/改自启都会失败）');
 
-  // 最底下那行：装没装一眼能看出来
+  // 「安装 ≠ 启用」：装只是备着，拨开这个开关才是「以后每次开机都跑服务形态」。
+  // 查不准（非管理员）时**不能显示成关闭** —— 那会让人以为开关是关的，只能禁用并说清。
+  if (auto) {
+    auto.checked = !!v.autoStart;
+    auto.disabled = !v.installed || !v.autoStartKnown;
+  }
+
+  // 最底下那行：装没装、开没开自启，一眼能看出来
   row.replaceChildren();
   if (!v.known) {
     row.appendChild(el('span', 'hint', '? 查不到服务状态（需要管理员权限才能问服务管理器）'));
@@ -343,12 +351,17 @@ async function loadService() {
   }
   if (v.installed) {
     row.appendChild(el('span', 'svc-ok', '✓ 服务已安装'));
-    if (v.state !== 'running') {
-      row.appendChild(el('span', 'hint', '　—— 点「启动」让它跑起来（跑起来才有拦截）'));
+    if (!v.autoStartKnown) {
+      row.appendChild(el('span', 'hint', '　开机自启：查不到（需要管理员）'));
+    } else if (v.autoStart) {
+      row.appendChild(el('span', 'svc-ok',
+        v.state === 'running' ? '　开机自启：已开（现在就跑着）' : '　开机自启：已开（下次开机自己跑）'));
+    } else {
+      row.appendChild(el('span', 'hint', '　开机自启：关（只是备着，要用就拨上面的开关）'));
     }
   } else {
     row.appendChild(el('span', 'svc-bad', '✗ 服务未安装'));
-    row.appendChild(el('span', 'hint', '　—— 需要开机即启（不等登录）就点「安装服务」'));
+    row.appendChild(el('span', 'hint', '　—— 装一个留着，日后要无人值守再拨上面的开关'));
   }
 }
 
@@ -2641,10 +2654,11 @@ const HELP = {
   service: {
     title: '服务模式（headless）',
     paras: [
-      '安装为服务后：开机即启动（无需登录）、以 LocalSystem 运行、无界面（仅引擎）。',
-      '配置与日志与界面版共用同一份文件，两边读写一致。',
-      '安装与卸载需要管理员权限；本程序已以管理员权限运行，可直接操作。',
-      '开机自启建议二选一：计划任务（登录后静默启动，含托盘图标）或本服务（无人登录也可运行）。两者同时开启会产生两个实例。',
+      '安装 ≠ 启用：安装只是把它装好备着（开机也不会自己跑）。',
+      '要真用它，拨开「开机自启用服务形态」开关 —— 那一刻起服务就接管引擎（界面退出），以后每次开机都自动跑，无人登录也跑。',
+      '只想用一次、不想随开机：直接点「启动」（交棒给服务版）；点「停止」再点顶栏「接管引擎」就还回来。',
+      '服务以 LocalSystem 运行、没有界面与托盘；配置与日志与界面版共用同一份文件。',
+      '开机自启二选一：计划任务（登录后静默启动，带托盘图标）或本服务（无人登录也能跑）。拨开本开关时，界面版那条计划任务会被自动关掉 —— 两个都开着会在开机时抢引擎。',
     ],
   },
   whitelist: {
@@ -3114,12 +3128,43 @@ function wire() {
   document.getElementById('btnCopyPrecheck').onclick = copyPrecheck;
   document.getElementById('btnSvcInstall').onclick = async () => {
     if (!await confirmBox('安装为 Windows 服务',
-        '装成服务后会随开机自动启动（无人登录也跑，无界面）。确定吗？', false, '安装')) return;
+        '只把它「装好备着」：不会自己启动、也不随开机启动。\n' +
+        '要用它：把下面的「开机自启用服务形态」开关拨开（那一刻就生效），\n' +
+        '或者点一次「启动」只用这一次。', false, '安装')) return;
     try {
       await call('InstallService');
-      toast('已安装服务', '点「启动」让它跑起来', 'success');
+      toast('已安装服务', '想让它随开机跑，就拨开下面的开关', 'success');
     } catch (e) { fail(e); }
     await loadService();
+  };
+  // 「开机自启用服务形态」：安装 ≠ 启用（用户 2026-10-19 拍板，同 Clash 装网卡 ≠ 开 TUN）。
+  // 拨开就当场生效（不是「下次开机再说」）：服务接管引擎、界面退出；拨关则反之。
+  // 这条路拨一下就要退出界面，confirmBox 必须把副作用说清楚，不能让人以为没反应。
+  const svcAuto = document.getElementById('svcAuto');
+  if (svcAuto) svcAuto.onchange = async (ev) => {
+    if (ev.target.disabled) return; // 自检会对着禁用控件派发 change，别理它
+    const on = ev.target.checked;
+    if (on) {
+      if (!await confirmBox('打开「开机自启用服务形态」？',
+          '打开后会：\n' +
+          '· 服务随开机自动启动（无人登录也跑；没有界面 / 托盘）\n' +
+          '· 同时关掉界面版的开机自启（计划任务）—— 两个都开着会在开机时抢引擎\n' +
+          '· 现在就把引擎交给服务版（本界面会退出；之后双击 exe 打开的是只读界面，可随时「接管引擎」）',
+          false, '打开')) { ev.target.checked = false; return; }
+    } else {
+      if (!await confirmBox('关闭「开机自启用服务形态」？',
+          '关闭后会：\n' +
+          '· 服务不再随开机启动（注册保留，随时能再打开）\n' +
+          '· 服务要是正在跑：先停掉它，再把引擎接回界面版（不然内网就断了）', false, '关闭')) {
+        ev.target.checked = true; return;
+      }
+    }
+    try {
+      const msg = await call('SetServiceAutoStart', on);
+      toast(on ? '服务形态已启用' : '服务形态已停用', msg || '', 'success');
+    } catch (e) { ev.target.checked = !on; fail(e); }
+    await loadService();
+    loadRuntimeStatus();
   };
   document.getElementById('btnTakeover').onclick = () => doTakeover();
   document.getElementById('btnSvcStart').onclick = async () => {

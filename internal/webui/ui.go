@@ -18,7 +18,8 @@ import (
 // 或者测试里）换成 noUI —— 引擎照跑，不 panic、不报错。
 type UI interface {
 	Emit(event string, data any)
-	ShowWindow()
+	// ShowWindow 返回错误 = 没有界面接着（或叫不动）—— 调用方可以据此改走「重新拉起界面」。
+	ShowWindow() error
 	HideWindow()
 	SetTheme(dark bool)
 	QuitApp()
@@ -67,8 +68,11 @@ func (u *remoteUI) do(timeout time.Duration, op string, args ...any) (json.RawMe
 	return u.r.Request(ctx, op, args...)
 }
 
-func (u *remoteUI) ShowWindow()     { _, _ = u.do(uiOpTimeout, uiOpShowWindow) }
-func (u *remoteUI) HideWindow()     { _, _ = u.do(uiOpTimeout, uiOpHideWindow) }
+func (u *remoteUI) HideWindow() { _, _ = u.do(uiOpTimeout, uiOpHideWindow) }
+func (u *remoteUI) ShowWindow() error {
+	_, err := u.do(uiOpTimeout, uiOpShowWindow)
+	return err
+}
 func (u *remoteUI) SetTheme(d bool) { _, _ = u.do(uiOpTimeout, uiOpSetTheme, d) }
 func (u *remoteUI) QuitApp()        { _, _ = u.do(2*time.Second, uiOpQuitApp) } // 通知型：不等回执，见下
 
@@ -105,11 +109,11 @@ func (u *remoteUI) stringOp(op string, opts any) (string, error) {
 // noUI 是没有界面时用的空实现：事件丢掉，窗口操作当没发生，需要用户选的直接报错。
 type noUI struct{}
 
-func (noUI) Emit(string, any) {}
-func (noUI) ShowWindow()      {}
-func (noUI) HideWindow()      {}
-func (noUI) SetTheme(bool)    {}
-func (noUI) QuitApp()         {}
+func (noUI) Emit(string, any)  {}
+func (noUI) ShowWindow() error { return ErrUIDetached }
+func (noUI) HideWindow()       {}
+func (noUI) SetTheme(bool)     {}
+func (noUI) QuitApp()          {}
 
 func (noUI) OpenFile(wruntime.OpenDialogOptions) (string, error) { return "", ErrUIDetached }
 func (noUI) OpenDir(wruntime.OpenDialogOptions) (string, error)  { return "", ErrUIDetached }

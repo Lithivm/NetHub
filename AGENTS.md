@@ -4,15 +4,19 @@
 
 Go + **Wails v2**（WebView2 界面）+ **WinDivert**（内核驱动），**仅 Windows x64**。
 
-**一条 exe 两种形态，同一台机器只装一种**（2026-10-15 现场踩到）：
+**一条 exe 两种形态，同一台机器只开一种自启**（2026-10-15 现场踩到）：
 
 - **GUI**（有人在用的机器）—— 双击 `nethub.exe` 起界面+托盘，用 `-autostart` 装**计划任务**
   （挂在**登录**事件上，登录后延迟 20 秒）。有托盘、有系统通知。
-- **headless / 服务**（服务器、无人登录）—— `-service-install` 装**Windows 服务**
-  （挂在**开机**事件上，SCM 自动启动）。**本来就没有界面/托盘/系统通知**，那是它的定义不是缺陷。
+- **headless / 服务**（服务器、无人登录）—— `-service-install` 装**Windows 服务** +
+  `-service-autostart on`（或界面「服务模式」卡片的开关）让它随**开机**启动（SCM 拉起）。
+  **本来就没有界面/托盘/系统通知**，那是它的定义不是缺陷。
 
-两者都装的后果：服务在**开机**时先拿到引擎，登录后才起来的计划任务界面版只能当「只读失败者」
-（没托盘、没通知、刷权限报错）—— 看着像 bug，其实是形态装重复了。
+**安装 ≠ 启用**（用户 2026-10-19 拍板，同 Clash：装虚拟网卡 ≠ 开 TUN）：`-service-install` 只注册成
+**手动启动**（不随开机、不起进程），装好留着备用；拨开关才改 `StartType` 并当场交棒。
+所以"两种形态都装着"是无害的，**冲突的是两条自启**：服务在**开机**时先拿到引擎，登录后才起来的
+计划任务界面版只能当「只读失败者」（没托盘、没通知、刷权限报错）。
+开关打开时会**自动关掉计划任务那条自启**（`SetServiceAutoStart`），关掉时会把服务停掉并把引擎接回界面版。
 **别把它们当成"同一个设置的两个落法"**：GUI 的自启是"登录后延迟启动"，headless 的自启是"开机即启然后一直跑"。
 
 界面 `frontend/`：无框架、无构建步骤（`index.html` / `app.js` / `style.css`）；界面文案是**中文**，
@@ -47,6 +51,12 @@ Go + **Wails v2**（WebView2 界面）+ **WinDivert**（内核驱动），**仅 
     对外只承诺“杀界面不影响业务”。
   - 前端**卡死**也要能被处理：`os.Process.Wait()` 的退出码不在 error 里、Wails 的报错框会等人点，
     所以两边都用“自己名下的 msedgewebview2 还剩几个”当存活判据（`internal/proc.ChildrenByName`）。
+  - **孤儿界面是“双击托盘没反应”的根**（2026-10-19 现场：孤儿活了三天，期间每次重启都白重启）：
+    引擎被强杀时界面不会跟着死，它带着管道和 Wails 的单实例锁活下来；之后引擎拉起的每个界面都
+    在 30ms 内“让位”给孤儿（wails `single_instance.go` 是 `SendMessage` 后 `os.Exit(0)`）→ 退出码 0
+    被当成“用户主动退出”。所以：**界面带 `-parent <引擎pid>` 起来，宿主没了就自己退**（`watchParent`）；
+    看护遇到退出码 0 进**待命**而不是收工（`waitNudge`）；`Show` 先试“已经接上的界面”
+    （`ShowMainWindow` 返回错误才算叫不动），再唤醒看护 —— **别用“我拉起过进程没有”当界面在不在的判据**。
 - **日志三档（照抄 Proxifier 的 Normal / Verbose / Debug）**：运行日志页的三段滑块
   `normal | verbose | debug`（配置 `ui.log_level`，默认 normal）。normal 只写连接开/关、启停、
   状态翻转、错误；verbose 加**判定面**（每条连接的 `route.match`、DNS 请求与应答）；
@@ -114,6 +124,7 @@ go vet ./... && go test ./internal/...
 go build -tags production -ldflags "-H=windowsgui -s -w" -o run/nethub.exe .
 pwsh -NoProfile -File ./local/check-ui.ps1                  # 改完前端必须跑（boot 不报错 + 无未定义函数 + **结构断言**：标签成对 / tab↔页面一一对应 / main 下无孤儿）
 pwsh -NoProfile -File ./local/ui-controls-test.ps1          # 勾选/下拉真的调到了后端 + 卡片标题不被挤成两行
+pwsh -NoProfile -File ./local/tray-fix.ps1                   # 托盘回归（**需管理员**）：换 exe+重启，验「X 收进托盘→托盘能叫回」+「强杀引擎不留孤儿界面」
 pwsh -NoProfile -File ./local/restart.ps1                   # 快速优雅重启 + 复测内网目标
 pwsh -NoProfile -File ./local/accept.ps1                    # 验收门禁（重启→驱动→连通→热生效→还原）；**退出码 0/非0 可判，发版前必须跑**
 pwsh -NoProfile -File ./local/accept.ps1 -InjectFault        # 门禁自检：故意注入故障，证明它真会失败（防“永远绿灯的假门禁”）

@@ -164,6 +164,9 @@ type serviceDoc struct {
 	Installed bool   `json:"installed"`
 	Running   bool   `json:"running"`
 	State     string `json:"state,omitempty"`
+	// AutoStart = 服务形态是否随开机自启（**装 ≠ 启用**：装了但没开这个是常态）
+	AutoStart      bool `json:"autoStart"`
+	AutoStartKnown bool `json:"autoStartKnown"`
 }
 
 type chainDoc struct {
@@ -399,6 +402,9 @@ func serviceState() serviceDoc {
 	d.Installed = winsvc.Installed()
 	d.State = winsvc.State()
 	d.Running = d.State == "running"
+	if _, auto, err := winsvc.AutoStart(); err == nil {
+		d.AutoStart, d.AutoStartKnown = auto, true
+	}
 	return d
 }
 

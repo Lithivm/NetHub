@@ -93,6 +93,11 @@ func Installed() bool {
 }
 
 // Install 安装服务（幂等：已存在就更新可执行路径）。需要管理员权限。
+//
+// **安装 ≠ 启用**（用户 2026-10-19 拍的）：首次安装把 StartType 设成**手动**，不随开机启动 ——
+// 装只是“备好”，真要用它是把界面上的「开机自启用服务形态」拨开（或 `-service-autostart on`）。
+// 跟 Clash 装了虚拟网卡却不急着开 TUN 一个道理：装饰式一装就写死自动启动，换来的就是
+// “装来备用的服务在每次开机时抢走引擎，登录后起来的界面只能当只读失败者”。
 func Install(exePath, configPath string) error {
 	m, err := mgr.Connect()
 	if err != nil {
@@ -108,6 +113,12 @@ func Install(exePath, configPath string) error {
 
 	if s, err := m.OpenService(Name); err == nil {
 		defer s.Close()
+		// 已经装着的：**保留它现在的 StartType**，不要顺手改成手动 ——
+		// 重新部署（换了路径/参数）不该把用户拨好的“开机自启”开关冲掉。
+		startType := uint32(mgr.StartManual)
+		if cur, err := s.Config(); err == nil && cur.StartType != 0 {
+			startType = cur.StartType
+		}
 		// 这里的 ServiceType / ErrorControl **必须显式给**：UpdateConfig 不像
 		// CreateService 那样把 0 补成默认值，而是原样传给 ChangeServiceConfig，
 		// 而 0 不是 SERVICE_NO_CHANGE(0xFFFFFFFF) → 直接 ERROR_INVALID_PARAMETER。
@@ -117,7 +128,7 @@ func Install(exePath, configPath string) error {
 		if err := s.UpdateConfig(mgr.Config{
 			DisplayName: DisplayName, Description: Description,
 			ServiceType:    windows.SERVICE_WIN32_OWN_PROCESS,
-			StartType:      mgr.StartAutomatic,
+			StartType:      startType,
 			ErrorControl:   mgr.ErrorNormal,
 			BinaryPathName: quote(exePath) + " " + joinArgs(args),
 		}); err != nil {
@@ -133,7 +144,7 @@ func Install(exePath, configPath string) error {
 		DisplayName:  DisplayName,
 		Description:  Description,
 		ServiceType:  windows.SERVICE_WIN32_OWN_PROCESS,
-		StartType:    mgr.StartAutomatic,
+		StartType:    mgr.StartManual, // 装 ≠ 启用，见上
 		ErrorControl: mgr.ErrorNormal, // 同样不能留 0（= SERVICE_ERROR_IGNORE）
 	}, args...)
 	if err != nil {
@@ -142,6 +153,64 @@ func Install(exePath, configPath string) error {
 	defer s.Close()
 	if err := applyRecovery(s); err != nil {
 		return fmt.Errorf("设置失败恢复策略失败: %w", err)
+	}
+	return nil
+}
+
+// AutoStart 服务现在是不是“随开机自启”（StartType = AUTO_START）。
+//
+// 安装与启用是两件事（见 Install），界面上的开关问的就是这一个问题。
+// 返回 (installed, auto, err)：没装时 auto 无意义；拿不到（非管理员）时 err 非空 ——
+// 调用方要按“不知道”处理，**不能报成“未启用”**（那会让人误以为开关是关的）。
+func AutoStart() (bool, bool, error) {
+	m, err := mgr.Connect()
+	if err != nil {
+		return false, false, err
+	}
+	defer m.Disconnect()
+	s, err := m.OpenService(Name)
+	if err != nil {
+		if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+			return false, false, nil
+		}
+		return false, false, err
+	}
+	defer s.Close()
+	cur, err := s.Config()
+	if err != nil {
+		return true, false, err
+	}
+	return true, cur.StartType == mgr.StartAutomatic, nil
+}
+
+// SetAutoStart 开/关“随开机自启”（**不动服务现在跑不跑** —— 那是 Start/Stop 的事）。
+//
+// 关掉时用 DEMAND_START 而不是 DISABLED：注册还在、随时能手动起 —— 正是“装着备用”的样子。
+func SetAutoStart(auto bool) error {
+	m, err := mgr.Connect()
+	if err != nil {
+		return fmt.Errorf("连服务管理器失败（需要管理员权限）: %w", err)
+	}
+	defer m.Disconnect()
+	s, err := m.OpenService(Name)
+	if err != nil {
+		return fmt.Errorf("服务未安装: %w", err)
+	}
+	defer s.Close()
+	cur, err := s.Config()
+	if err != nil {
+		return fmt.Errorf("读服务配置失败: %w", err)
+	}
+	want := uint32(mgr.StartManual)
+	if auto {
+		want = mgr.StartAutomatic
+	}
+	if cur.StartType == want {
+		return nil
+	}
+	cur.StartType = want // 其余字段照抄，别把路径/账户冲掉（UpdateConfig 是全量写）
+	if err := s.UpdateConfig(cur); err != nil {
+		return fmt.Errorf("修改服务启动方式失败: %w", err)
 	}
 	return nil
 }

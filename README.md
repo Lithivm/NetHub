@@ -76,9 +76,11 @@ nethub.exe -check                # 只校验配置文件，逐条列出错误（
 nethub.exe -status               # 打印机器可读的 JSON 现状：版本/服务状态/链路/规则/开关/运行实例（含它在用哪份配置）
 nethub.exe -apply <新配置.yaml>   # 校验 → 落盘 → 让正在运行的实例热生效（不重启、不断已有连接）
 nethub.exe -headless             # 无界面只跑引擎（自动化用）
-nethub.exe -service-install      # 装成 Windows 服务（开机即启、无人登录也跑）
+nethub.exe -service-install      # 装成 Windows 服务（**只是备着**：不自己启动、也不随开机启动）
+nethub.exe -service-autostart on  # 启用服务形态：随开机启动、无人登录也跑（装 ≠ 启用）
+nethub.exe -service-autostart off # 停用：不再随开机（注册保留，随时能再打开）
 nethub.exe -service-uninstall    # 卸载服务
-nethub.exe -service-state        # 打印服务状态
+nethub.exe -service-state        # 打印服务状态（含「开机自启开没开」）
 nethub.exe -quit                 # 让正在运行的实例优雅退出
 nethub.exe -autostart            # 装成计划任务开机自启（GUI 形态用，登录后延迟启动）
 nethub.exe -clash-check          # 只检测系统代理会不会把内网送进代理
@@ -92,11 +94,16 @@ nethub.exe -version              # 打印版本号
 >
 > - **有人在用的机器** → **GUI 形态**：双击 `nethub.exe` + `-autostart`（计划任务，**登录后**延迟启动，
 >   有托盘、有系统通知）。登录后延迟默认 20 秒，改成别的值在界面「设置」里（`autostart_delay`）。
-> - **服务器 / 无人登录** → **服务形态**：`-service-install`（开机即启、不看登录；**没有**托盘和系统通知）。
+> - **服务器 / 无人登录** → **服务形态**：`-service-install` 装好 + 界面「服务模式」卡片里拨开
+>   **「开机自启用服务形态」**（或 `-service-autostart on`）。**安装 ≠ 启用**：只装不启用 =
+>   「留着备用」，开机不会跑（同 Clash 装了虚拟网卡但没开 TUN）。服务形态**没有**托盘和系统通知。
 >
-> 两个都装在同一台机器上的后果：服务在**开机**时先拿到引擎，登录后才起来的计划任务界面版
-> 只能当「只读失败者」——**没托盘、没通知、还会刷一串权限报错**（看着像 bug，其实是装重复了）。
-> 纠正：桌面机装错的 → `-service-uninstall` 再 `-autostart`；服务器装错的 → 去掉计划任务。
+> **两个自启都开着**的后果：服务在**开机**时先拿到引擎，登录后才起来的计划任务界面版
+> 只能当「只读失败者」——**没托盘、没通知、还会刷一串权限报错**（看着像 bug，其实是都开了）。
+> 两种形态**都装着**没问题（装只是备着）；冲突的是两条自启。
+> 纠正：桌面机 → `-service-autostart off`（注册留着）+ `-autostart`；
+> 服务器 → `-service-autostart on` + 去掉计划任务（界面里关掉开机自启即可）。
+> 界面里拨「开机自启用服务形态」时会**自动关掉计划任务那条自启**，不用两边手动对着改。
 
 **服务形态会自己从崩溃/被杀里恢复**（无人值守的机器靠这个）：装了服务之后，
 进程被外部结束或崩掉时 Windows 会在 5 秒、30 秒各拉一次，**本窗口（一天）内最多两次**

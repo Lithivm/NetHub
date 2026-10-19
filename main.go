@@ -53,10 +53,11 @@ func main() {
 	noAutostart := flag.Bool("no-autostart", false, "从开机启动中移除，随后退出")
 	noElevate := flag.Bool("no-elevate", false, "不要自动提权（调试用）")
 	serviceMode := flag.Bool("service", false, "以 Windows 服务方式运行（由 SCM 拉起，无界面）")
-	svcInstall := flag.Bool("service-install", false, "安装为 Windows 服务（自动启动，需管理员），随后退出")
+	svcInstall := flag.Bool("service-install", false, "安装为 Windows 服务（**不**自启——只是备着；启用用 -service-autostart on，需管理员），随后退出")
 	svcUninstall := flag.Bool("service-uninstall", false, "卸载 Windows 服务，随后退出")
 	svcState := flag.Bool("service-state", false, "打印 Windows 服务状态，随后退出")
 	svcStop := flag.Bool("service-stop", false, "停止 Windows 服务（不卸载），随后退出")
+	svcAuto := flag.String("service-autostart", "", "on|off：服务形态是否随开机自启（**装 ≠ 启用**；脚本/无人值守部署用），随后退出")
 	doQuit := flag.Bool("quit", false, "请已在运行的界面版优雅退出（会先停服务、移除托盘图标），随后退出")
 	verFlag := flag.Bool("version", false, "打印版本号，随后退出")
 	rollbackFlag := flag.Bool("rollback", false, "回滚到上一版本并重启（一键更新出问题时用），随后退出")
@@ -74,6 +75,7 @@ func main() {
 	themeFlag := flag.String("theme", "", "内部用：界面初始主题（light/dark），避开深色用户看到一闪的浅色")
 	logDirFlag := flag.String("logdir", "", "内部用：界面进程的日志目录（界面不读配置，只要这一个路径）")
 	hiddenFlag := flag.Bool("hidden", false, "内部用：界面起来时收在托盘里（上次就是收着的）")
+	parentFlag := flag.Int("parent", 0, "内部用：引擎进程的 pid（引擎没了界面就自己退出，别当孤儿占着单实例锁）")
 	flag.Parse()
 
 	if *verFlag {
@@ -123,10 +125,33 @@ func main() {
 		return
 	}
 
-	// 服务安装/卸载/启停/查状态：不需要配置，也不需要界面
-	if *svcInstall || *svcUninstall || *svcState || *svcStop {
+	// 服务安装/卸载/启停/查状态/自启开关：不需要配置，也不需要界面
+	if *svcInstall || *svcUninstall || *svcState || *svcStop || *svcAuto != "" {
 		if *svcState {
+			installed, auto, err := winsvc.AutoStart()
 			fmt.Println("NetHub 服务状态：" + winsvc.State())
+			fmt.Printf("已安装=%v 开机自启=%v", installed, auto)
+			if err != nil {
+				fmt.Printf("（查不准：%v）", err)
+			}
+			fmt.Println()
+			return
+		}
+		if *svcAuto != "" {
+			switch strings.ToLower(*svcAuto) {
+			case "on", "1", "true", "yes":
+				if err := winsvc.SetAutoStart(true); err != nil {
+					fatal("%v", err)
+				}
+				fmt.Printf("服务形态已设为随开机自启（无人登录也跑）。现在想立刻用就 net start %s，或去界面「服务模式」卡片点「启动」。\n", winsvc.Name)
+			case "off", "0", "false", "no":
+				if err := winsvc.SetAutoStart(false); err != nil {
+					fatal("%v", err)
+				}
+				fmt.Printf("服务形态不再随开机自启（注册保留，随时可用 -service-autostart on 再打开）。\n")
+			default:
+				fatal("-service-autostart 只认 on / off，收到 %q", *svcAuto)
+			}
 			return
 		}
 		if *svcStop {
@@ -157,7 +182,9 @@ func main() {
 		if err := winsvc.Install(exe, cfgPath); err != nil {
 			fatal("%v", err)
 		}
-		fmt.Printf("已安装 Windows 服务 %s（自动启动，无界面）\n用 net start %s 启动，或去服务管理器里操作。\n", winsvc.Name, winsvc.Name)
+		fmt.Printf("已安装 Windows 服务 %s（**不**随开机自启，只是备好）\n", winsvc.Name)
+		fmt.Printf("· 要无人值守（开机即跑、不等登录）：nethub.exe -service-autostart on，或界面「服务模式」卡片里拨开开关\n")
+		fmt.Printf("· 现在就想用一次：net start %s\n", winsvc.Name)
 		return
 	}
 
@@ -206,7 +233,7 @@ func main() {
 		if ld == "" {
 			ld = filepath.Join(filepath.Dir(config.DefaultPath()), "logs")
 		}
-		runFrontend(ld, *themeFlag, *hiddenFlag)
+		runFrontend(ld, *themeFlag, *hiddenFlag, uint32(*parentFlag))
 		return
 	}
 
@@ -282,7 +309,7 @@ func main() {
 		// 真正要避免的是**两种形态装在同一台机器上**：
 		// 服务在开机时就拿到引擎，登录后才起来的界面版只能当"只读失败者"。
 		ld := filepath.Join(filepath.Dir(config.DefaultPath()), "logs")
-		runFrontend(ld, "", false)
+		runFrontend(ld, "", false, 0)
 		return
 	}
 	defer releaseBackend()
@@ -378,7 +405,9 @@ func runBackend(a *app.App, bus *logbus.Bus, cfgPath string) {
 	// 托盘归引擎进程：界面被杀掉时图标不会变僵尸，而且它还能把界面叫回来
 	fw := newFrontendSupervisor(b, bus, filepath.Join(filepath.Dir(cfgPath), "logs"))
 	tray := webui.NewTray(filepath.Join(filepath.Dir(cfgPath), "nethub.ico"),
-		func() { fw.Show() }, // 显示主界面（不在跑就先拉起来）
+		// 显示主界面（不在跑就先拉起来）。**起 goroutine**：叫管道要等回执，
+		// 不能把托盘的消息循环堵在那里（界面卡死时那一等就是 30 秒）。
+		func() { go fw.Show() },
 		func() { go func() { _ = a.Start() }() },
 		func() { a.Stop() },
 		func() { b.Quit() },

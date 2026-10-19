@@ -453,8 +453,12 @@ func (b *Backend) TakeoverEngine() (string, error) {
 	}
 	b.clearReadOnly()
 	if stoppedService {
-		b.a.Bus.Info("接管完成：服务版已停止，引擎现由界面版运行（服务注册还留着，下次开机仍会自己跑）")
-		return "已接管：服务版已停止（注册保留，下次开机仍会自启）", nil
+		b.a.Bus.Info("接管完成：服务版已停止，引擎现由界面版运行")
+		// “下次开机还会不会自己跑”现在取决于那个开关（装 ≠ 启用），别一句话把钱归包死。
+		if _, auto, err := winsvc.AutoStart(); err == nil && auto {
+			return "已接管：服务版已停止（注册保留，且**开着开机自启** —— 下次开机还会自己跑；不想就关掉「开机自启用服务形态」开关）", nil
+		}
+		return "已接管：服务版已停止（注册保留；没开开机自启，下次开机不会自己跑）", nil
 	}
 	return "已接管引擎", nil
 }
@@ -2153,9 +2157,12 @@ var _ = runtime.GOOS
 func (b *Backend) SetTray(t *Tray) { b.tray = t }
 
 // ShowMainWindow 从托盘/第二实例唤回窗口。
-func ShowMainWindow(b *Backend) {
+//
+// 返回错误 = 没有界面接着（或叫不动）：调用方（看护者）据此改走「重新拉起一个界面」。
+// 不能只“尽力而为”就不看结果 —— 界面不在时那一下就是静默失败，现场看到的是「点了没反应」。
+func ShowMainWindow(b *Backend) error {
 	b.noteUIHidden(false)
-	b.uiOrNoop().ShowWindow()
+	return b.uiOrNoop().ShowWindow()
 }
 
 // ───────────────────────── 导出 / 导入设置 ─────────────────────────
