@@ -740,9 +740,17 @@ function drawTraffic() {
   const colDown = trafficColor('--primary', '#3a7bd5');
   const colUp = trafficColor('--muted', '#8a8f98');
 
+  // 右端那个"当前值"点是 2.2px 的整圆，所以**画布上下都要留出它的半径**：
+  // 以前零线贴着 h 画、峰值贴着 0 画，值一旦贴到最低/最高，点就有一半被画布边缘裁掉
+  // （2026-10-19 用户报的"最低端时被裁切"）。内框（topY..zeroY）之外只留点半径的余量。
+  // zeroY 取"整+半"像素：1px 的零线要落在半像素上才锐，不然会糊成两像素灰。
+  const DOT_R = 2.2;
+  const zeroY = Math.round(h - DOT_R - 0.6) - 0.5;
+  const topY = Math.min(DOT_R + 0.4, zeroY - 8);
+
   // 零线：没有流量时能看出“基线在哪”，不然空图就是一片空白
   g.strokeStyle = colLine; g.lineWidth = 1;
-  g.beginPath(); g.moveTo(0, h - 0.5); g.lineTo(w, h - 0.5); g.stroke();
+  g.beginPath(); g.moveTo(0, zeroY); g.lineTo(w, zeroY); g.stroke();
 
   const pts = (v.series || []).map((p) => trafficPoint(p, !!v.countDirect));
   if (pts.length < 2) return; // 刚起来：只有零线
@@ -755,7 +763,7 @@ function drawTraffic() {
     if (p.down > max) max = p.down;
   }
   const xOf = (i) => w - (pts.length - 1 - i) * step;
-  const yOf = (val) => h - 1 - Math.min(Number(val) || 0, max) / max * (h - 3);
+  const yOf = (val) => zeroY - Math.min(Number(val) || 0, max) / max * (zeroY - topY);
 
   // 路径：**过中点的二次贝塞尔**（轻平滑，2026-10-19 用户挑的）。
   // 为什么不直接 lineTo：60 格落在 236px 上、每格 4px，折角在 41px 高里就是一排"锯齿山"，
@@ -779,8 +787,8 @@ function drawTraffic() {
     if (alpha) {
       // 面积用 globalAlpha 变淡，不另外写一个半透明色值：改色只改 :root（见 style.css 头）
       g.beginPath(); trace(key);
-      g.lineTo(xOf(pts.length - 1), h);
-      g.lineTo(xOf(0), h);
+      g.lineTo(xOf(pts.length - 1), zeroY);
+      g.lineTo(xOf(0), zeroY);
       g.closePath();
       g.globalAlpha = alpha; g.fillStyle = color; g.fill(); g.globalAlpha = 1;
     }
@@ -790,11 +798,11 @@ function drawTraffic() {
 
   // 右端"当前值"落点：曲线右端原来悬在读数左边、没有任何东西告诉眼睛"现在在哪里"。
   // 点画在**下行**末端（有面积那条就是主数据），颜色同曲线。
-  // 横向往回让 2.4px：曲线末端正好落在 w 上（右边缘），爱着边画会有一半被裁掉；
-  // 让到"圆的最右边刚好贴住右边缘"的位置，读数又在它右边紧挨着，看着才是一个整体。
-  const dx = Math.max(2.4, xOf(pts.length - 1) - 2.4);
+  // 横向往回让一个半径：曲线末端正好落在 w 上（右边缘），贴着边画会被裁掉一半 ——
+  // 让到"圆的右缘刚好贴住右边缘"，读数又在它右边紧挨着，看着才是一个整体。
+  const dx = Math.max(DOT_R, xOf(pts.length - 1) - DOT_R);
   g.beginPath();
-  g.arc(dx, yOf(pts[pts.length - 1].down), 2.4, 0, Math.PI * 2);
+  g.arc(dx, yOf(pts[pts.length - 1].down), DOT_R, 0, Math.PI * 2);
   g.fillStyle = colDown;
   g.fill();
 }
