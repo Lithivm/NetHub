@@ -28,7 +28,7 @@
      （见 KB:决策/实时流量图放顶栏不放在页签带.md）。改这个值前先看一眼 .toolbar 的 padding。 */
   --toolbar-h: 64px;
   /* 顶栏流量图的宽度上限（用户 2026-10-14 两次要求：先"不占满左右宽度"，再把曲线缩短 30%）。
-     392px 之下画布约 250px（60 点 ≈ 4.2px/点）。不铺满整条顶栏：右边那截要留给操作按钮，
+     392px 之下画布约 236px（减去外面那层容器的边框与内边距后；60 点 ≈ 4.0px/点）。不铺满整条顶栏：右边那截要留给操作按钮，
      图的左边缘又必须紧跟着"累计/活跃"（同一类信息）—— 所以是定宽、不是 flex:1。 */
   --traffic-w: 392px;
   /* 流量图右侧两个速率数字的槽宽（每个一个槽）。
@@ -278,7 +278,21 @@ code, .mono { font-family: var(--font-mono); }
    下行主色（与曲线同色）、上行中性色，不拿警告色画数据（警告色在这套界面里有固定含义）。 */
 .traffic-rate .tr-up b { color: var(--body); font-weight: 600; }
 .traffic-rate .tr-down b { color: var(--primary); font-weight: 600; }
-.traffic canvas { flex: 1 1 0; min-width: 0; height: 100%; display: block; }
+/* 曲线外面这层容器（用户 2026-10-19 挑的方案②）：与顶栏里其它控件同一套语汇 ——
+   淡底 canvas-soft + 1px hairline + 6px 圆角。以前曲线直接铺在白底上，看着像"贴上去的一块色板"；
+   加了容器之后它与状态胶囊、"启动"按钮属于同一视觉族。
+   **底和边必须由这层 div 承载，不能直接写在 canvas 上**：drawTraffic 用 clientWidth/clientHeight
+   定画布尺寸，边/内边距写在 canvas 上会让曲线画到边框底下（也会让画布尺寸随 padding 变化而抖动）。 */
+.traffic-box {
+  flex: 1 1 0; min-width: 0;
+  align-self: stretch;
+  display: flex;
+  padding: 2px 6px;                 /* 竖向只留 2px：图要几乎占满顶栏内容高度（见 DESIGN.md） */
+  background: var(--canvas-soft);
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+}
+.traffic-box > canvas { flex: 1 1 0; min-width: 0; width: 100%; height: 100%; display: block; }
 .statusline { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; }
 .runstate {
   display: inline-flex; align-items: center; gap: var(--s2);

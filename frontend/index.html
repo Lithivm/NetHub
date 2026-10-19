@@ -38,7 +38,11 @@
        口径原文在 DESIGN.md「顶栏实时流量图」一节与 KB:决策/实时流量图放顶栏不放在页签带.md。 -->
   <div class="traffic" id="traffic">
     <span class="traffic-label">流量</span>
-    <canvas id="trafficCanvas" aria-label="实时流量曲线"></canvas>
+    <!-- canvas 外面这层是它的**容器**（淡底 + 1px 边 + 6px 圆角）：顶栏里的胶囊/按钮都是
+         "hairline + 圆角 + 淡底"，曲线直接铺在白底上会像贴上去的（2026-10-19 用户挑的方案②）。
+         别把底/边直接加在 canvas 上：drawTraffic 靠 clientWidth/clientHeight 定画布，
+         内边距写在 canvas 上等于把曲线画到边框底下。 -->
+    <div class="traffic-box"><canvas id="trafficCanvas" aria-label="实时流量曲线"></canvas></div>
     <!-- 读数**上下两行**（上行在上、下行在下），每行 =「箭头列 + 左对齐的数字列」
          —— 数字位数变化（含归零成 —）时箭头不滑、数字起始位不动；并排会在两槽之间留一大片空 -->
     <span class="traffic-rate" id="trafficRate"><span class="tr-up"><i>↑</i><b>—</b></span><span class="tr-down"><i>↓</i><b>—</b></span></span>
