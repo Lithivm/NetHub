@@ -769,8 +769,8 @@ html.is-tray *::after {
    只作用于 select，不影响同一套 .input 的文本框 / textarea。 */
 .field select.input { max-width: 260px; }
 /* .input-row 里的短下拉（如「显示内容」）：.input-row .input 默认 flex:1 会撑满整行，
-   而选项只有三四个字时那样太长。用这个类明确按内容宽度。 */
-.input-row select.input.sel-short { flex: 0 0 auto; width: 190px; }
+   而选项只有两三个字时那样太长。宽度刚好装下“总量”+ 下拉箭头。 */
+.input-row select.input.sel-short { flex: 0 0 auto; width: 88px; min-width: 0; }
 .input-sm { min-width: 160px; }
 .input.mono { font-family: var(--font-mono); font-size: var(--fs-xs); }
 .textarea {
