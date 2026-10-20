@@ -5,13 +5,13 @@ import (
 	"testing"
 )
 
-// 托盘流量图：空载时**不能全透明**（否则托盘上什么都看不见），有流量时柱子要长出来。
+// 托盘图（方案 5：面积 + 上沿线）：空载时**不能全透明**（否则托盘上什么都看不见）。
 func TestDrawTrayIconVisibleWhenIdle(t *testing.T) {
-	dib := drawTrayDIB(0, 0)
+	series := make([]uint64, traySeriesLen) // 全 0
+	dib := drawTrayDIB(series, trayPaletteDark)
 	if len(dib) < 40 {
 		t.Fatalf("DIB 太短：%d 字节", len(dib))
 	}
-	// BITMAPINFOHEADER：宽 32、高 2×32（XOR + AND）、32bpp
 	if w := binary.LittleEndian.Uint32(dib[4:]); w != trayIconSize {
 		t.Errorf("宽度应为 %d，得到 %d", trayIconSize, w)
 	}
@@ -21,56 +21,107 @@ func TestDrawTrayIconVisibleWhenIdle(t *testing.T) {
 	if bpp := binary.LittleEndian.Uint16(dib[14:]); bpp != 32 {
 		t.Errorf("应当 32bpp，得到 %d", bpp)
 	}
-	// 数据长度 = 头 + XOR(w*h*4) + AND(每行 4 字节对齐 × h)
 	xorLen := trayIconSize * trayIconSize * 4
 	maskRow := ((trayIconSize + 31) / 32) * 4
 	if want := 40 + xorLen + maskRow*trayIconSize; len(dib) != want {
 		t.Errorf("DIB 长度应为 %d，得到 %d", want, len(dib))
 	}
-	// 空载也必须有不透明像素（底线）—— 否则托盘上是个看不见的图标
-	opaque := 0
-	for i := 40; i < 40+xorLen; i += 4 {
-		if dib[i+3] != 0 {
-			opaque++
-		}
-	}
-	if opaque == 0 {
-		t.Error("空载时图标全透明 —— 托盘上会看不见这个图标")
+	if opaque := countOpaque(dib); opaque == 0 {
+		t.Error("空载时图标全透明 —— 托盘上会看不见这个图标（底线必须画出来）")
 	}
 }
 
-// 对数刻度：1 KB/s 起步、1 GB/s 满格；跨两个数量级都必须有可见的柱。
-func TestRateBarHeight(t *testing.T) {
-	if h := rateBarHeight(0); h != 0 {
-		t.Errorf("没流量应当不画柱，得到 %d", h)
+func countOpaque(dib []byte) int {
+	n := 0
+	xor := dib[40:]
+	for i := 3; i < len(xor); i += 4 {
+		if xor[i] != 0 {
+			n++
+		}
 	}
-	if h := rateBarHeight(512); h != 0 {
-		t.Errorf("低于 1 KB/s 不画柱，得到 %d", h)
+	return n
+}
+
+// 对数刻度：1 KB/s 起步、1 GB/s 满格；跨两个数量级都必须单调增长。
+func TestRateLevel(t *testing.T) {
+	if v := rateLevel(0); v != 0 {
+		t.Errorf("没流量应当是 0，得到 %v", v)
 	}
-	prev := 0
+	if v := rateLevel(512); v != 0 {
+		t.Errorf("低于 1 KB/s 应当是 0，得到 %v", v)
+	}
+	prev := 0.0
 	for _, bps := range []uint64{1 << 10, 1 << 15, 1 << 20, 1 << 25, 1 << 30} {
-		h := rateBarHeight(bps)
-		if h <= prev {
-			t.Errorf("速率变大柱高应当变大：%d B/s → %dpx（上一个 %dpx）", bps, h, prev)
+		v := rateLevel(bps)
+		if v <= prev {
+			t.Errorf("速率变大应当变大：%d B/s → %v（上一个 %v）", bps, v, prev)
 		}
-		prev = h
+		prev = v
 	}
-	if h := rateBarHeight(1 << 40); h != trayIconSize-5 {
-		t.Errorf("超量程应当封顶在 %d，得到 %d", trayIconSize-5, h)
+	if v := rateLevel(1 << 40); v != 1 {
+		t.Errorf("超量程应当封顶 1，得到 %v", v)
 	}
 }
 
-// 有流量时柱子所在的像素必须真的被点亮（防止“编码对了但画空了”）。
-func TestDrawTrayIconHasBars(t *testing.T) {
-	img := drawTrayImage(20<<20, 20<<20)
-	// 取靠近底部一行：两根柱都应该有颜色
-	row := trayIconSize - 5
-	upPix := img.RGBAAt(3, row)
-	downPix := img.RGBAAt(trayIconSize/2+2, row)
-	if upPix.A == 0 || downPix.A == 0 {
-		t.Fatalf("有流量时两根柱都该画出来：up=%v down=%v", upPix, downPix)
+// 有流量时面积必须真的画出来（防止“编码对了但画空了”），且流量越大画得越多。
+func TestDrawTrayIconGrowsWithRate(t *testing.T) {
+	idle := make([]uint64, traySeriesLen)
+	low := make([]uint64, traySeriesLen)
+	high := make([]uint64, traySeriesLen)
+	for i := range low {
+		low[i] = 2 << 10   // 2 KB/s
+		high[i] = 20 << 20 // 20 MB/s
 	}
-	if upPix == downPix {
-		t.Error("上行/下行应当用不同颜色（蓝/绿），否则分不出方向")
+	pal := trayPaletteDark
+	nIdle := countOpaque(drawTrayDIB(idle, pal))
+	nLow := countOpaque(drawTrayDIB(low, pal))
+	nHigh := countOpaque(drawTrayDIB(high, pal))
+	if !(nIdle < nLow && nLow < nHigh) {
+		t.Errorf("面积应当随速率增长：idle=%d low=%d high=%d", nIdle, nLow, nHigh)
+	}
+}
+
+// 三种显示模式：total = 上+下、up 只取上行、down 只取下行。
+func TestTraySeriesFor(t *testing.T) {
+	up := []uint64{100, 200, 300}
+	down := []uint64{1, 2, 3}
+	if got := traySeriesFor(up, down, trayModeTotal); got[0] != 101 || got[2] != 303 {
+		t.Errorf("总量应当是两条相加，得到 %v", got)
+	}
+	if got := traySeriesFor(up, down, trayModeUp); got[1] != 200 {
+		t.Errorf("上行模式应当只取上行，得到 %v", got)
+	}
+	if got := traySeriesFor(up, down, trayModeDown); got[1] != 2 {
+		t.Errorf("下行模式应当只取下行，得到 %v", got)
+	}
+	// 长度不等时按短的那条截断（不越界）
+	if got := traySeriesFor([]uint64{1, 2, 3}, []uint64{9}, trayModeTotal); len(got) != 1 || got[0] != 10 {
+		t.Errorf("长度不等应当按短的截断，得到 %v", got)
+	}
+}
+
+// 认不出的模式回 total（拼错的代价不能是“图变空了”）。
+func TestParseTrayMode(t *testing.T) {
+	for in, want := range map[string]trayMode{
+		"":   trayModeTotal,
+		"up": trayModeUp, "out": trayModeUp, "OUTGOING": trayModeUp,
+		"down": trayModeDown, "in": trayModeDown,
+		"total": trayModeTotal, "verbos": trayModeTotal,
+	} {
+		if got := parseTrayMode(in); got != want {
+			t.Errorf("parseTrayMode(%q) = %q，想要 %q", in, got, want)
+		}
+	}
+}
+
+// 浅色任务栏的调色板必须比深色版的蓝/绿更深（否则在 #f3f3f3 上看不清）。
+func TestPaletteLightIsDarker(t *testing.T) {
+	d, l := paletteFor(false, trayModeTotal), paletteFor(true, trayModeTotal)
+	lum := func(c uint8) int { return int(c) }
+	if lum(l.line.B)+lum(l.line.G)+lum(l.line.R) >= lum(d.line.B)+lum(d.line.G)+lum(d.line.R) {
+		t.Errorf("浅色版的线色应当更深：dark=%v light=%v", d.line, l.line)
+	}
+	if paletteFor(true, trayModeDown).line.G <= paletteFor(true, trayModeDown).line.R {
+		t.Error("下行模式应当用绿色（G > R）")
 	}
 }

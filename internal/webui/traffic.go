@@ -100,10 +100,11 @@ func (b *Backend) trafficWatch() {
 		// 托盘流量图开关跟着配置走：不管是从界面改的、还是外部改了 config.yaml
 		// （热重载会把配置换掉），这里每秒对齐一次就都覆盖了。
 		if b.tray != nil {
-			if want := b.a.Cfg.TrayTraffic(); b.tray.TrafficMode() != want {
-				b.tray.SetTrafficMode(want)
-				if want {
-					b.a.Bus.Info("托盘图标已切换为实时流量图")
+			wantOn, wantMode := b.a.Cfg.TrayTraffic(), b.a.Cfg.TrayTrafficMode()
+			if b.tray.TrafficMode() != wantOn || b.tray.TrafficKind() != wantMode {
+				b.tray.SetTraffic(wantOn, wantMode)
+				if wantOn {
+					b.a.Bus.Info("托盘图标：实时流量图（显示 %s）", trayModeLabel(wantMode))
 				} else {
 					b.a.Bus.Info("托盘图标已恢复为默认图标")
 				}

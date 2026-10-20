@@ -412,12 +412,16 @@ func runBackend(a *app.App, bus *logbus.Bus, cfgPath string) {
 		func() { a.Stop() },
 		func() { b.Quit() },
 		func(m string) { bus.Info("托盘: %s", m) },
-		// 托盘流量图的速率来源：与顶栏流量图同一份每秒采样，不另算一套。
-		b.CurrentRates,
+		// 托盘图的速率序列：与顶栏流量图同一份每秒采样，不另算一套。
+		b.CurrentSeries,
 	)
 	b.SetTray(tray)
 	// 设置里的「托盘图标显示实时流量」：默认关（用 nethub.ico 那个默认图标）。
-	tray.SetTrafficMode(a.Cfg.TrayTraffic())
+	tray.SetTraffic(a.Cfg.TrayTraffic(), a.Cfg.TrayTrafficMode())
+	// 启动时报一行：现场要回答“它现在画不画、画哪个方向”时，不用去翻配置文件。
+	if a.Cfg.TrayTraffic() {
+		bus.Info("托盘图标：实时流量图（显示 %s）", a.Cfg.TrayTrafficMode())
+	}
 	// 退出通道一：托盘菜单 → 退出（或别的收尾路径），关掉这个 channel 就结束主循环
 	done := make(chan struct{})
 	b.SetQuitHook(func() { close(done) })

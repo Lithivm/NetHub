@@ -10,6 +10,7 @@
 package webui
 
 import (
+	"math"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -18,6 +19,7 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 )
 
 const (
@@ -152,26 +154,30 @@ type Tray struct {
 	// 不然托盘出问题完全不可观测——只能靠盯屏幕猜。
 	onEvent func(string)
 
-	// onRates 取当前速率（字节/秒，上行、下行）。仅“托盘显示流量”开启时每秒调一次，
-	// 由 Backend 递给它自己那份 60 秒采样环的最后一张。
-	onRates func() (up, down uint64)
+	// onSeries 取最近 n 秒的**速率序列**（字节/秒，上行/下行各一条）。
+	// 托盘图是“面积 + 上沿线”，要的是趋势，两个标量不够（2026-10-20 换成方案 5 时改的）。
+	onSeries func(n int) (up, down []uint64)
 	// baseIcon 从 .ico 加载的原始图标；customIcon 当前自绘的（0 = 没在用）
 	baseIcon   windows.Handle
 	customIcon windows.Handle
 	// trafficOn 设置里的“托盘图标显示实时流量”（默认关 —— 行为不突变）
 	trafficOn atomic.Bool
-	stopIcon  chan struct{}
+	// trafficKind 显示哪个量（total | up | down），atomic.Value 存 string
+	trafficKind atomic.Value
+	stopIcon    chan struct{}
 	// lastIconErr 上次报告“图标更新失败”的时刻（只有托盘线程碰它，不用锁）
 	lastIconErr time.Time
 }
 
 // NewTray 创建托盘。回调必须传进来（避免 Tray 反向依赖 Backend）。
 //
-// onRates 可以为 nil（那就不画流量图，只有默认图标）。
-func NewTray(iconPath string, onShow, onStart, onStop, onQuit func(), onEvent func(string), onRates func() (up, down uint64)) *Tray {
+// onSeries 可以为 nil（那就不画流量图，只有默认图标）。
+func NewTray(iconPath string, onShow, onStart, onStop, onQuit func(), onEvent func(string), onSeries func(n int) (up, down []uint64)) *Tray {
 	t := &Tray{ready: make(chan struct{}), onShow: onShow, onStart: onStart, onStop: onStop, onQuit: onQuit,
-		onEvent: onEvent, onRates: onRates, stopIcon: make(chan struct{})}
+		onEvent: onEvent, onSeries: onSeries, stopIcon: make(chan struct{})}
+	t.trafficKind.Store(string(trayModeTotal))
 	go t.run(iconPath)
+	<-t.ready
 	<-t.ready
 	return t
 }
@@ -363,27 +369,81 @@ func (t *Tray) Remove() {
 	pPostMessageW.Call(uintptr(t.hwnd), wmClose, 0, 0)
 }
 
-// SetTrafficMode 开启/关掉“托盘图标显示实时流量”。
+// SetTraffic 开启/关掉“托盘图标显示实时流量”，并指定显示哪个量（total | up | down）。
 //
 // 关掉时要**当场换回默认图标**（不能等下一拍）：用户拨了开关就该看到变化。
-func (t *Tray) SetTrafficMode(on bool) {
+// 换模式也当场重画一帧，否则要等下一拍，看起来像“改了没生效”。
+func (t *Tray) SetTraffic(on bool, kind string) {
 	if t == nil {
 		return
 	}
+	prev := t.TrafficKind()
+	t.trafficKind.Store(string(parseTrayMode(kind)))
 	t.trafficOn.Store(on)
 	if !on {
 		t.post(wmTraySetIcon, uintptr(t.baseIcon))
+		return
+	}
+	if prev != t.TrafficKind() {
+		t.redrawNow()
 	}
 }
 
 // TrafficMode 当前是不是“流量图”模式。
 func (t *Tray) TrafficMode() bool { return t != nil && t.trafficOn.Load() }
 
-// iconLoop 每秒把速率画成图标（只在像素高度变化时重画）。
+// TrafficKind 当前显示哪个量（total | up | down）。
+func (t *Tray) TrafficKind() string {
+	if t == nil {
+		return string(trayModeTotal)
+	}
+	if v, ok := t.trafficKind.Load().(string); ok {
+		return v
+	}
+	return string(trayModeTotal)
+}
+
+// redrawNow 立刻重画一帧（不等下一拍）。
+func (t *Tray) redrawNow() {
+	if !t.trafficOn.Load() || t.onSeries == nil {
+		return
+	}
+	if h := t.renderIcon(systemUsesLightTheme()); h != 0 {
+		t.post(wmTraySetIcon, uintptr(h))
+	}
+}
+
+// renderIcon 画一帧并转成 HICON（失败返回 0）。
+func (t *Tray) renderIcon(light bool) windows.Handle {
+	if t.onSeries == nil {
+		return 0
+	}
+	up, down := t.onSeries(traySeriesLen)
+	series := traySeriesFor(up, down, trayMode(t.TrafficKind()))
+	return createIconFromDIB(drawTrayDIB(series, paletteFor(light, trayMode(t.TrafficKind()))))
+}
+
+// iconSig 把这一帧“量化成像素高度”做个签名：数值微变不该触发重绘（每秒 NIM_MODIFY 会闪）。
+func iconSig(series []uint64, light bool) string {
+	b := make([]byte, 0, len(series)+1)
+	if light {
+		b = append(b, 1)
+	} else {
+		b = append(b, 0)
+	}
+	for _, v := range series {
+		b = append(b, byte(math.Round(rateLevel(v)*float64(trayIconSize-6))))
+	}
+	return string(b)
+}
+
+// iconLoop 每秒把速率序列画成图标（只在像素高度或明暗变化时真重绘）。
 func (t *Tray) iconLoop() {
 	tk := time.NewTicker(time.Second)
 	defer tk.Stop()
-	lastU, lastD := -1, -1
+	last := ""
+	light := systemUsesLightTheme()
+	nextThemeCheck := time.Now().Add(30 * time.Second)
 	for {
 		select {
 		case <-t.stopIcon:
@@ -391,19 +451,24 @@ func (t *Tray) iconLoop() {
 		case <-tk.C:
 		}
 		if !t.trafficOn.Load() {
-			lastU, lastD = -1, -1 // 下次开启时先画一帧
+			last = ""
 			continue
 		}
-		var up, down uint64
-		if t.onRates != nil {
-			up, down = t.onRates()
+		// 系统任务栏明暗每 30 秒复查一次（用户切了系统主题要跟得上；读注册表很便宜但别每秒读）
+		if time.Now().After(nextThemeCheck) {
+			light = systemUsesLightTheme()
+			nextThemeCheck = time.Now().Add(30 * time.Second)
 		}
-		hu, hd := rateBarHeight(up), rateBarHeight(down)
-		if hu == lastU && hd == lastD {
+		if t.onSeries == nil {
 			continue
 		}
-		data := drawTrayDIB(up, down)
-		h := createIconFromDIB(data)
+		up, down := t.onSeries(traySeriesLen)
+		series := traySeriesFor(up, down, trayMode(t.TrafficKind()))
+		sig := iconSig(series, light)
+		if sig == last {
+			continue
+		}
+		h := t.renderIcon(light)
 		if h == 0 {
 			// 生成失败不是致命错（继续用当前图标），但得可观测 —— 否则“开了开关没反应”
 			// 只能靠猜。每秒重试一次，日志不能每秒一行。
@@ -413,7 +478,7 @@ func (t *Tray) iconLoop() {
 			}
 			continue
 		}
-		lastU, lastD = hu, hd
+		last = sig
 		t.post(wmTraySetIcon, uintptr(h))
 	}
 }
@@ -629,4 +694,25 @@ func RequestShowWindow() bool {
 		return true
 	}
 	return signalEvent(showEventGlobal)
+}
+
+// traySeriesLen 托盘图用最近多少秒（16 秒：32px 图标上每列一个采样，太多也看不出）。
+const traySeriesLen = 16
+
+// systemUsesLightTheme Windows 任务栏是不是浅色。
+//
+// 读的是 **SystemUsesLightTheme**（系统 UI / 任务栏），不是 AppsUseLightTheme（应用窗口）——
+// 托盘图标贴在任务栏上，跟的是前者的明暗。只读注册表，不写任何键（与 clash.go 同一条口径）。
+func systemUsesLightTheme() bool {
+	k, err := registry.OpenKey(registry.CURRENT_USER,
+		`Software\Microsoft\Windows\CurrentVersion\Themes\Personalize`, registry.QUERY_VALUE)
+	if err != nil {
+		return false // 读不到就当深色（Win11 默认）
+	}
+	defer k.Close()
+	v, _, err := k.GetIntegerValue("SystemUsesLightTheme")
+	if err != nil {
+		return false
+	}
+	return v == 1
 }

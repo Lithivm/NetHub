@@ -290,6 +290,8 @@ type SettingsView struct {
 	Theme        string   `json:"theme"`
 	// TrayTraffic 托盘图标是否显示实时流量图（默认关 = 默认图标）
 	TrayTraffic bool `json:"trayTraffic"`
+	// TrayTrafficMode 托盘图显示哪个量：total | up | down（默认 total）
+	TrayTrafficMode string `json:"trayTrafficMode"`
 	// LogLevel 日志档位：normal（默认）| verbose | debug。
 	// 三档各装什么见 logbus.Level 的注释（照抄 Proxifier）。
 	LogLevel string `json:"logLevel"`
@@ -1208,6 +1210,7 @@ func (b *Backend) GetSettings() SettingsView {
 		HostsEntries:       entries,
 		Theme:              b.a.Cfg.Theme(),
 		TrayTraffic:        b.a.Cfg.TrayTraffic(),
+		TrayTrafficMode:    b.a.Cfg.TrayTrafficMode(),
 		LogLevel:           b.a.Cfg.LogLevel(),
 		LogLevelFile:       b.a.Cfg.LogLevelFile(),
 		LogLevelFileSet:    b.a.Cfg.LogLevelFileSet(),
@@ -1270,7 +1273,7 @@ func (b *Backend) SetTrayTraffic(on bool) error {
 		return err
 	}
 	if b.tray != nil {
-		b.tray.SetTrafficMode(on)
+		b.tray.SetTraffic(on, b.a.Cfg.TrayTrafficMode())
 	}
 	b.afterSave(res, "托盘图标")
 	if on {
@@ -1279,6 +1282,64 @@ func (b *Backend) SetTrayTraffic(on bool) error {
 		b.a.Bus.Info("托盘图标已恢复为默认图标")
 	}
 	return nil
+}
+
+// SetTrayTrafficMode 切换托盘图显示的量：total（上+下）| up | down。
+//
+// 只影响图标画哪个量，不动任何统计口径（累计/连接列表/顶栏图都不变）。
+func (b *Backend) SetTrayTrafficMode(mode string) error {
+	old := b.a.Cfg.TrayTrafficMode()
+	b.a.Cfg.SetTrayTrafficMode(mode)
+	res, err := b.a.SaveConfig()
+	if err != nil {
+		b.a.Cfg.SetTrayTrafficMode(old)
+		return err
+	}
+	if b.tray != nil {
+		b.tray.SetTraffic(b.a.Cfg.TrayTraffic(), b.a.Cfg.TrayTrafficMode())
+	}
+	b.afterSave(res, "托盘显示内容")
+	b.a.Bus.Info("托盘流量图改为显示：%s", trayModeLabel(b.a.Cfg.TrayTrafficMode()))
+	return nil
+}
+
+// trayModeLabel 给日志用的中文名。
+//
+// 刻意不写「上行（出）」这种带解释的写法：上行/下行在运维嘴里就是常识，
+// 括号只会把干净的一行搞脏（用户 2026-10-20 明确要求）。
+func trayModeLabel(mode string) string {
+	switch mode {
+	case "up":
+		return "上行"
+	case "down":
+		return "下行"
+	default:
+		return "总量"
+	}
+}
+
+// CurrentSeries 最近 n 秒的上行/下行字节序列（每秒一格，旧的在前）—— 托盘画面积/折线用。
+//
+// 口径与顶栏流量图完全一致：关着“也统计直连流量”时不把直连算进去。
+func (b *Backend) CurrentSeries(n int) (up, down []uint64) {
+	if b == nil || n <= 0 {
+		return nil, nil
+	}
+	series := b.traffic.snapshot(false, b.a.Running()).Series
+	withDirect := b.countDirect()
+	if len(series) > n {
+		series = series[len(series)-n:]
+	}
+	up = make([]uint64, len(series))
+	down = make([]uint64, len(series))
+	for i, pt := range series {
+		up[i], down[i] = pt.TunUp, pt.TunDown
+		if withDirect {
+			up[i] += pt.DirUp
+			down[i] += pt.DirDown
+		}
+	}
+	return up, down
 }
 
 // CurrentRates 最近一秒的速率（字节/秒，上行、下行）—— 给托盘流量图用。

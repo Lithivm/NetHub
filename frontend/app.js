@@ -2589,6 +2589,8 @@ async function loadSettings() {
   // 那会抛 TypeError 把 boot() 整个搞挂，导致状态轮询都注册不上）
   setChecked('setHostsManage', s.hostsManage);
   setChecked('setTrayTraffic', s.trayTraffic);
+  setValue('setTrayTrafficMode', s.trayTrafficMode || 'total');
+  syncTrayModeEnabled();
   applyLogLevelUI(s);
   applyThemePref(s.theme || 'system');   // 偏好（system/light/dark）：进设置页时滑块要对
   setValue('setHostsEntries', (s.hostsEntries || []).join('\n'));
@@ -2845,6 +2847,14 @@ function setChecked(id, v) {
   const e = document.getElementById(id);
   if (e) e.checked = !!v;
 }
+// syncTrayModeEnabled 开关没开时把“显示内容”置灰（它不是独立的设置，只在开图时有用）。
+function syncTrayModeEnabled() {
+  const on = document.getElementById('setTrayTraffic');
+  const sel = document.getElementById('setTrayTrafficMode');
+  if (!sel) return;
+  sel.disabled = !!(on && !on.checked);
+}
+
 function setValue(id, v) {
   const e = document.getElementById(id);
   if (e) e.value = v;
@@ -3375,11 +3385,26 @@ function wire() {
       const on = trayTraffic.checked;
       try {
         await call('SetTrayTraffic', on);
+        syncTrayModeEnabled();
         toast('托盘图标：' + (on ? '实时流量图' : '默认图标'),
-              on ? '上行/下行两根柱，每秒更新' : '', 'success');
+              on ? '面积 + 上沿线，最近 16 秒' : '', 'success');
       } catch (e) {
         fail(e);
         trayTraffic.checked = !on;
+      }
+    };
+  }
+  // 显示内容（总量 / 上行 / 下行）：只在“显示实时流量”开着时有意义 —— 关着就禁用，
+  // 免得用户改了半天以为生效了。
+  const trayMode = document.getElementById('setTrayTrafficMode');
+  if (trayMode) {
+    trayMode.onchange = async () => {
+      try {
+        await call('SetTrayTrafficMode', trayMode.value);
+        toast('托盘显示内容：' + trayMode.options[trayMode.selectedIndex].text, '', 'success');
+      } catch (e) {
+        fail(e);
+        loadLogLevel();   // 失败拉回真实值（与文件档同一个约定）
       }
     };
   }

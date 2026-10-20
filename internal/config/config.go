@@ -309,6 +309,11 @@ type UICfg struct {
 	// 默认**关** = 用 nethub.ico 那个默认图标：换图标这件事不替用户做主
 	// （托盘是系统级外观，有人就想要品牌图标）。开了才每秒重绘一张。
 	TrayTraffic bool `yaml:"tray_traffic,omitempty"`
+	// TrayTrafficMode 托盘图显示哪个量：total（上行+下行，默认）| up | down。
+	//
+	// 为什么做成三选：小图标里同时画两个方向必然有一方被压扁（面积方案尤其明显），
+	// 而现场有时只关心"是不是在回传影像"（up）或"是不是在拉资料"（down）。
+	TrayTrafficMode string `yaml:"tray_traffic_mode,omitempty"`
 
 	// LogLevel 日志档位：normal（默认）| verbose | debug。
 	//
@@ -2511,6 +2516,18 @@ func (c *Config) Theme() string {
 	return c.UI.Theme
 }
 
+// themeOr 归一化主题字面量：认不出的值回 system（跟随系统在任何机器上都不会错）。
+func themeOr(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "dark":
+		return "dark"
+	case "light":
+		return "light"
+	default:
+		return "system"
+	}
+}
+
 // TrayTraffic 托盘图标是否显示实时流量图。
 func (c *Config) TrayTraffic() bool {
 	c.mu.RLock()
@@ -2523,6 +2540,33 @@ func (c *Config) SetTrayTraffic(on bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.UI.TrayTraffic = on
+}
+
+// TrayTrafficMode 托盘图显示哪个量：total（默认）| up | down。
+func (c *Config) TrayTrafficMode() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return trayTrafficModeOr(c.UI.TrayTrafficMode)
+}
+
+// SetTrayTrafficMode 设置托盘图显示的量；认不出的值落成 total。
+func (c *Config) SetTrayTrafficMode(mode string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.UI.TrayTrafficMode = trayTrafficModeOr(mode)
+}
+
+// trayTrafficModeOr 归一化托盘显示模式。认不出的值回 total ——
+// 宁可显示总量，也不要因为一个拼写把图变成空的。
+func trayTrafficModeOr(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "up", "out", "outgoing":
+		return "up"
+	case "down", "in", "incoming":
+		return "down"
+	default:
+		return "total"
+	}
 }
 
 // LogLevel 日志档位的字面量（normal | verbose | debug）。
@@ -2608,13 +2652,24 @@ type LocalPrefs struct {
 	LogLevel string
 	// LogLevelFile 文件档（空 = 跟随 LogLevel）
 	LogLevelFile string
+	// Theme 界面主题偏好（system | light | dark）
+	Theme string
+	// TrayTraffic 托盘图标是否显示实时流量图
+	TrayTraffic bool
+	// TrayTrafficMode 托盘图显示哪个量（total | up | down）
+	TrayTrafficMode string
 }
 
 // LocalPrefs 取本机偏好快照。
 func (c *Config) LocalPrefs() LocalPrefs {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	p := LocalPrefs{LogLevel: logLevelOr(c.UI.LogLevel, c.UI.LogVerbose)}
+	p := LocalPrefs{
+		LogLevel:        logLevelOr(c.UI.LogLevel, c.UI.LogVerbose),
+		Theme:           c.UI.Theme,
+		TrayTraffic:     c.UI.TrayTraffic,
+		TrayTrafficMode: trayTrafficModeOr(c.UI.TrayTrafficMode),
+	}
 	if c.UI.LogLevelFile != "" {
 		p.LogLevelFile = logLevelOr(c.UI.LogLevelFile, false)
 	}
@@ -2642,6 +2697,20 @@ func (c *Config) SetLocalPrefs(p LocalPrefs) bool {
 	if fileNow != file {
 		c.UI.LogLevelFile = file
 		c.UI.logLevelFileDirty = ""
+		changed = true
+	}
+	// 主题、托盘流量图（开关 + 显示内容）同理：它们是“这台机器怎么看”的偏好，
+	// 不是要派发给别人的配置内容 —— 换一份配置不该把它们换掉。
+	if th := themeOr(p.Theme); th != c.UI.Theme {
+		c.UI.Theme = th
+		changed = true
+	}
+	if c.UI.TrayTraffic != p.TrayTraffic {
+		c.UI.TrayTraffic = p.TrayTraffic
+		changed = true
+	}
+	if mode := trayTrafficModeOr(p.TrayTrafficMode); mode != c.UI.TrayTrafficMode {
+		c.UI.TrayTrafficMode = mode
 		changed = true
 	}
 	return changed

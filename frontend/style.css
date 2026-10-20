@@ -768,6 +768,9 @@ html.is-tray *::after {
 /* 设置页里的下拉：不撑满整行 —— 选项就那么几个字，满宽会看着像个文本输入框。
    只作用于 select，不影响同一套 .input 的文本框 / textarea。 */
 .field select.input { max-width: 260px; }
+/* .input-row 里的短下拉（如「显示内容」）：.input-row .input 默认 flex:1 会撑满整行，
+   而选项只有三四个字时那样太长。用这个类明确按内容宽度。 */
+.input-row select.input.sel-short { flex: 0 0 auto; width: 190px; }
 .input-sm { min-width: 160px; }
 .input.mono { font-family: var(--font-mono); font-size: var(--fs-xs); }
 .textarea {

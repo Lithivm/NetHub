@@ -234,3 +234,46 @@ func TestLocalPrefsCarryFileLevel(t *testing.T) {
 		t.Errorf("文件档没跟着搬：屏幕 %q / 文件 %q", incoming.LogLevel(), incoming.LogLevelFile())
 	}
 }
+
+// 托盘流量图（开关 + 显示内容）与主题也是“本机偏好”：
+// 换一份别人的配置（-apply / 导入 / 回滚 / 部署）不该把它们换掉。
+//
+// 这条是 2026-10-20 补的：原先 LocalPrefs 只管日志档位，而“显示内容”这种
+// 改一次就一直有效的偏好被配置替换洗掉，用户看到的是“明明设过，换完配置就没了”。
+func TestLocalPrefsCarryTrayAndTheme(t *testing.T) {
+	old := Default()
+	old.SetTheme("dark")
+	old.SetTrayTraffic(true)
+	old.SetTrayTrafficMode("up")
+
+	incoming := Default() // 别人那份：浅色主题、托盘图关着、total
+	if !incoming.KeepLocalPrefsFrom(old) {
+		t.Fatal("偏好不同，应当报告改动")
+	}
+	if incoming.Theme() != "dark" {
+		t.Errorf("主题没保住：%q", incoming.Theme())
+	}
+	if !incoming.TrayTraffic() {
+		t.Error("托盘流量图开关没保住")
+	}
+	if got := incoming.TrayTrafficMode(); got != "up" {
+		t.Errorf("托盘显示内容没保住：%q", got)
+	}
+}
+
+// 认不出的值都要回落成安全的默认，而不是原样写回。
+func TestTrayTrafficModeNormalize(t *testing.T) {
+	c := Default()
+	c.SetTrayTrafficMode("outgoing")
+	if got := c.TrayTrafficMode(); got != "up" {
+		t.Errorf("outgoing 应当认成 up，得到 %q", got)
+	}
+	c.SetTrayTrafficMode("verbos")
+	if got := c.TrayTrafficMode(); got != "total" {
+		t.Errorf("认不出的值应当回落 total，得到 %q", got)
+	}
+	c.SetTheme("VERBOS")
+	if got := c.Theme(); got != "system" {
+		t.Errorf("主题认不出应当回落 system，得到 %q", got)
+	}
+}
