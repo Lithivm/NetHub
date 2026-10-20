@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"nethub/internal/dnsmap"
+	"nethub/internal/fakeip"
 	"nethub/internal/logbus"
 )
 
@@ -122,29 +124,96 @@ func TestHitText(t *testing.T) {
 // 它们是仪器不是应用流量 —— 与「不进连接列表、不计累计」同一条原则。
 //
 // 2026-10-14 用户报“一启动就打印了这么多日志”：开机那串 `proc=nethub.exe` 的
-// intercept/relay.done 就是它们（界面一加载就做一次共存检测），
+// open/close 就是它们（界面一加载就做一次共存检测），
 // 日志里看不出“这是我们自己发的”，看着像应用在连。
 func TestSelfProbeConnLogOnlyInVerboseTier(t *testing.T) {
 	e := newTestEngine()
 	n := len(e.bus.Snapshot())
 
-	e.connInfo(true, "intercept: chain=sjy target=10.100.100.99:443 action=relay")
-	e.connInfo(true, "relay.done: chain=sjy target=10.100.100.99:443 up=0 B down=0 B")
+	e.connInfo(true, "open: nethub.exe (1) → 10.100.100.99:443 via sjy")
+	e.connInfo(true, "close: nethub.exe (1) → 10.100.100.99:443 via sjy ↑0 B ↓0 B 1ms/2ms")
 	if got := newLines(e.bus, n); got != "" {
 		t.Fatalf("normal 档不该写自己的探针连接：%q", got)
 	}
 
 	e.bus.SetLevel(logbus.LevelVerbose)
-	e.connInfo(true, "intercept: chain=sjy target=10.100.100.99:443 action=relay")
-	if got := newLines(e.bus, n); !strings.Contains(got, "intercept: chain=sjy target=10.100.100.99:443") {
+	e.connInfo(true, "open: nethub.exe (1) → 10.100.100.99:443 via sjy")
+	if got := newLines(e.bus, n); !strings.Contains(got, "open: nethub.exe (1) → 10.100.100.99:443") {
 		t.Errorf("verbose 档要能看到探针（否则自检排查没线索）：%q", got)
 	}
 
 	// 真实应用流量照旧：normal 档必须可见
 	n = len(e.bus.Snapshot())
-	e.connInfo(false, "relay.done: chain=etyy target=172.30.4.217:443 up=1 B down=2 B")
-	if got := newLines(e.bus, n); !strings.Contains(got, "relay.done: chain=etyy") {
+	e.connInfo(false, "close: chrome.exe (999) → 172.30.4.217:443 via etyy ↑1 B ↓2 B 5ms/9ms")
+	if got := newLines(e.bus, n); !strings.Contains(got, "close: chrome.exe (999) → 172.30.4.217:443 via etyy") {
 		t.Errorf("应用流量的连接必须在 normal 档可见：%q", got)
+	}
+}
+
+// 连接行对齐 Proxifier：`谁 (pid) → 目标 via 链`，名字已知时要写名字。
+//
+// 为什么：`172.30.4.217:80` 运维认不出是哪个业务，`main.his.com` 一眼就懂；
+// 而 pid 0 是 Windows 的空闲进程（不可能拥有 TCP 连接），打出来只会骗人。
+func TestConnLineFormat(t *testing.T) {
+	if got := connWho("curl.exe", 12376); got != "curl.exe (12376)" {
+		t.Errorf("connWho = %q", got)
+	}
+	if got := connWho("curl.exe", 0); got != "curl.exe" {
+		t.Errorf("pid 0 不该写出来：%q", got)
+	}
+	if got := connWho("", 1234); got != "未知进程" {
+		t.Errorf("进程查不到时要说不知道：%q", got)
+	}
+
+	e := newTestEngine()
+	e.names = dnsmap.New()
+	ip := net.ParseIP("172.30.4.217")
+	if got := e.connTarget(ip, 80); got != "172.30.4.217:80" {
+		t.Errorf("名字不知道时只写地址：%q", got)
+	}
+	e.names.Set("main.his.com", []string{ip.String()}, dnsmap.PrioObserved)
+	if got := e.connTarget(ip, 80); got != "main.his.com(172.30.4.217):80" {
+		t.Errorf("名字已知时带上名字：%q", got)
+	}
+	// 假 IP 只写名字（假 IP 是我们自己发的临时地址，写进日志只会让人去查一个不存在的地址）
+	if pool, perr := fakeip.NewPool("198.19.0.0/16"); perr == nil {
+		e.fake = pool
+	}
+	fake := net.ParseIP("198.19.0.1")
+	e.names.Set("main.xamjyy.com", []string{fake.String()}, dnsmap.PrioObserved)
+	if got := e.connTargetDial(fake, net.ParseIP("10.100.100.99"), 443); got != "main.xamjyy.com:443" {
+		t.Errorf("假 IP 应当只写名字：%q", got)
+	}
+}
+
+// normal 档只留 errors + 连接 open/close（Proxifier 的定义）；
+// 判定面（stats / DNS 请求与应答 / ECH / 建隧道的方式）一律归 verbose。
+//
+// 这条用例是分档的守门人：加日志行时很容易顺手写成 bus.Info，
+// 而“normal 又变吵了”要到现场才发现（那时日志已经没有可读性）。
+func TestJudgementLinesStayOutOfNormal(t *testing.T) {
+	e := newTestEngine()
+	n := len(e.bus.Snapshot())
+
+	// 每一行都写成“最容易被误写成 Info”的形态
+	e.bus.Detail("stats: total=1 new=1 active=0 names=0 fake=0/65534 chain=") // 周期快照
+	e.bus.Detail("dns.query: name=a.example type=A from=127.0.0.1:53")        // DNS 请求
+	e.bus.Detail("upstream.pick: chain=etyy upstream=#1/1 socks5://x:10080 现拨 lat_ms=12")
+	e.bus.Detail("conn.stage: a.exe (1) → x:80 via etyy resolve=1ms dial=2ms first_byte=3ms total=9ms")
+	if got := newLines(e.bus, n); got != "" {
+		t.Fatalf("normal 档不该写判定面：%q", got)
+	}
+	// verbose 档：这四类都要看得见
+	e.bus.SetLevel(logbus.LevelVerbose)
+	e.bus.Detail("stats: total=1 new=1 active=0 names=0 fake=0/65534 chain=")
+	e.bus.Detail("dns.query: name=a.example type=A from=127.0.0.1:53")
+	e.bus.Detail("upstream.pick: chain=etyy upstream=#1/1 socks5://x:10080 现拨 lat_ms=12")
+	e.bus.Detail("conn.stage: a.exe (1) → x:80 via etyy resolve=1ms dial=2ms first_byte=3ms total=9ms")
+	got := newLines(e.bus, n)
+	for _, want := range []string{"stats:", "dns.query:", "upstream.pick:", "conn.stage:"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("verbose 档应当看到 %s：%q", want, got)
+		}
 	}
 }
 

@@ -413,7 +413,7 @@ func (e *Engine) startSniffers(filter string) {
 		f = strings.ReplaceAll(f, "{i}", strconv.Itoa(idx))
 		e.startLoop(fmt.Sprintf("perfSniff%d", idx), func() { e.perfSniffLoop(idx, f) })
 	}
-	e.bus.Info("性能探针：已开 %d 个只读嗅探句柄（只计数，不影响放行）filter_bytes=%d", e.perf.sniffN, len(filter))
+	e.bus.Debug("性能探针：已开 %d 个只读嗅探句柄（只计数，不影响放行）filter_bytes=%d", e.perf.sniffN, len(filter))
 }
 
 func (e *Engine) perfSniffLoop(idx int, filter string) {

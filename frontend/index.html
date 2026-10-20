@@ -86,15 +86,14 @@
     <div class="card card-fill">
       <div class="card-head">
         <h2>运行日志</h2>
-        <span class="hint">同时写到程序目录的 nethub.log</span>
+        <span class="hint" id="logFileHint">同时写到程序目录的 nethub.log</span>
         <div class="spacer"></div>
-        <div class="seg" id="segLogLevel" title="日志档位：normal 只记连接与错误 · verbose 加每条连接的判定与 DNS · debug 加引擎内部状态">
+        <div class="seg" id="segLogLevel" title="日志档位：normal 只记连接与错误 · verbose 加每条连接的判定、DNS、走了哪个上游 · debug 加引擎内部状态。档位会记住，重启不变">
           <span class="seg-thumb"></span>
           <button type="button" class="seg-btn" data-level="normal">normal</button>
           <button type="button" class="seg-btn" data-level="verbose">verbose</button>
           <button type="button" class="seg-btn" data-level="debug">debug</button>
         </div>
-        <button class="btn btn-sm" id="btnOpenLog">打开日志目录</button>
         <button class="btn btn-sm btn-ghost" id="btnClearLog">清空</button>
       </div>
       <div class="logbox" id="logBox"></div>
@@ -153,6 +152,7 @@
           <span class="hint">同目标合并成一行（×N），点开看每条</span>
           <div class="spacer"></div>
           <span class="hint" id="connSummary">—</span>
+          <button class="btn btn-sm" id="btnConnVerbose" title="打开详细日志（verbose）：每条连接为什么这么走、DNS、实际走了哪个上游">详细日志</button>
           <button class="btn btn-sm" id="btnConnRefresh">刷新</button>
           <button class="info-btn" id="btnHelpConn" title="列表口径与操作">i</button>
         </div>
@@ -420,6 +420,46 @@
               <button class="seg3-btn" id="btnThemeDark" data-pref="dark">深色</button>
             </div>
           </div>
+          <label class="check">
+            <input type="checkbox" id="setTrayTraffic">
+            <span>托盘图标显示实时流量<em>画成两根柱（上/下行），每秒更新；关掉就用默认图标。
+              空载时只剩一条底线 —— 收起窗口后一眼能看出它还在不在干活。</em></span>
+          </label>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>文件与日志</h2>
+          <span class="hint">文件都在程序目录里</span>
+        </div>
+        <div class="card-body form">
+          <div class="pathline"><span class="hint">配置文件</span><code id="pathConfig">-</code></div>
+          <div class="pathline"><span class="hint">日志文件</span><code id="pathLog">-</code></div>
+          <div class="input-row">
+            <button class="btn btn-sm" id="btnOpenConfig">打开配置文件</button>
+            <button class="btn btn-sm" id="btnOpenLog">打开日志目录</button>
+            <button class="btn btn-sm" id="btnOpenDir">打开程序目录</button>
+          </div>
+
+          <div class="form-div"></div>
+
+          <!-- 屏幕档（日志页那个滑块）与文件档是**两个受众**：现场看着要清爽，
+               事后把日志发出去要有料。文件档是“改一次就一直有效的偏好”，
+               与“这些文件在哪/怎么打开”是同一件事（都是日志），所以跟它们同卡。 -->
+          <div class="field">
+            <label>文件详细程度
+              <em>只管 logs/nethub.log，不影响界面；「跟随界面」= 用日志页那个档</em>
+            </label>
+            <select class="input input-sm" id="selLogFile">
+              <option value="">跟随界面</option>
+              <option value="normal">normal</option>
+              <option value="verbose">verbose</option>
+              <option value="debug">debug</option>
+            </select>
+          </div>
+          <div class="hint">改完立即生效（不用点保存）。日志页那个滑块只管屏幕：
+            把这里设成 verbose、屏幕留 normal，就是“看着清爽，出事把 nethub.log 发出去还有料”。</div>
         </div>
       </div>
 
@@ -475,6 +515,14 @@
             <label>竞速起跑<span class="unit-wrap"><input type="number" min="0" max="2000" step="50" class="input input-sm" id="setRaceAfter"><span class="unit">毫秒</span></span></label>
             <label>预热会话<span class="unit-wrap"><input type="number" min="0" max="8" step="1" class="input input-sm" id="setWarm"><span class="unit">条</span></span></label>
           </div>
+          <div class="field">
+            <label>强制本机解析的域名
+              <em>一行一个，支持 *.his.com 通配。命中这些域名的连接一律用本机 DNS 解析，
+                不管上面的解析策略 —— 客户内网域名只有本机能解答时用它</em>
+            </label>
+            <textarea id="setDomainResolveLocal" class="input textarea mono" spellcheck="false" rows="3"
+              placeholder="main.his.com&#10;*.hospital.cn"></textarea>
+          </div>
           <div class="hint">改完立即生效（从下一次拨号开始按新值走）</div>        </div>
       </div>
 
@@ -515,18 +563,6 @@
           </div>
           <div class="input-row"><span class="hint">最近三份备份:</span></div>
           <div id="backupList" class="hint">—</div>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-head"><h2>文件位置</h2></div>
-        <div class="card-body form">
-          <div class="pathline"><span class="hint">配置文件</span><code id="pathConfig">-</code></div>
-          <div class="pathline"><span class="hint">日志文件</span><code id="pathLog">-</code></div>
-          <div class="input-row">
-            <button class="btn btn-sm" id="btnOpenConfig">打开配置文件</button>
-            <button class="btn btn-sm" id="btnOpenDir">打开程序目录</button>
-          </div>
         </div>
       </div>
 

@@ -5,9 +5,9 @@ package engine
 // 为什么加这两个（2026-09-28）：两件事以前都做得很绕。
 //
 //	SOCKET  —— socket 操作事件（bind/connect/listen/accept/close）里**直接带 ProcessID**。
-//	           以前只能靠「每 500ms 全量枚举 TCP 表」反查端口→PID，于是 `intercept:` 那行
+//	           以前只能靠「每 500ms 全量枚举 TCP 表」反查端口→PID，于是 `open:` 那行
 //	           日志（连接建立那一刻写的）实测 **60.7% 是 proc=unknown**，而连接结束的
-//	           `relay.done:` 大多已经有名字 —— 名字晚到几百毫秒，可运维要回答"谁连的"
+//	           `close:` 大多已经有名字 —— 名字晚到几百毫秒，可运维要回答"谁连的"
 //	           读的正是第一行。现在 connect() 那一刻就把 PID 写进同一张表。
 //	REFLECT —— WinDivert **自身**的事件：谁开了/关了句柄，**包括我们启动之前就存在的**。
 //	           以前遇到《拦截成功但没到中转是静默失败》只能猜（安全软件？Clash 的 TUN？

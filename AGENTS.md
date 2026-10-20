@@ -58,13 +58,27 @@ Go + **Wails v2**（WebView2 界面）+ **WinDivert**（内核驱动），**仅 
     看护遇到退出码 0 进**待命**而不是收工（`waitNudge`）；`Show` 先试“已经接上的界面”
     （`ShowMainWindow` 返回错误才算叫不动），再唤醒看护 —— **别用“我拉起过进程没有”当界面在不在的判据**。
 - **日志三档（照抄 Proxifier 的 Normal / Verbose / Debug）**：运行日志页的三段滑块
-  `normal | verbose | debug`（配置 `ui.log_level`，默认 normal）。normal 只写连接开/关、启停、
-  状态翻转、错误；verbose 加**判定面**（每条连接的 `route.match`、DNS 请求与应答）；
-  debug 加**内部面**（名字表/假 IP 池维护、内核层、规则表编译、过滤器原文）；
+  `normal | verbose | debug`（配置 `ui.log_level`，默认 normal）。normal **只**写连接 open/close、
+  直连/阻断、启停、配置变更、上游状态翻转与错误 —— 连接行是 Proxifier 那种
+  `open: chrome.exe (8804) → main.his.com(172.30.4.217):80 via etyy`（命中哪条规则不进这行）；
+  verbose 加**判定面**（`route.match`、DNS 请求与应答、`upstream.pick` 实际走了哪个上游、
+  `conn.stage` 分段耗时、`direct.done` 直连收尾、`stats` 周期快照）；
+  debug 加**内部面**（名字表/假 IP 池维护、内核层、规则表编译、过滤器原文、装配细节）；
   **切到 debug 时立刻转储一份当前内部状态**（`Engine.DumpState`）—— 那些内容本来只在启动时写，
   不转储就等于“只有重启才看得到”。诊断包那个功能已删（2026-10-08）：要交现场材料就发 nethub.log。
   分档是**靠人自觉**的：新增日志行时必须先问“这一行回答的是‘发生了什么’还是‘为什么’”，
   并有测试钉住（`internal/engine/loglevel_test.go`）。被去重的重复项必须补 `suppressed: count=N`。
+  排查入口在**用到它的那一页**：连接页右上角有「详细日志」开关（点一下就是 verbose，
+  不用跳去日志页——对齐 Proxifier 连接面板上的 enable verbose output）。两个控件管同一个屏幕档，
+  改完必须互相同步（`updateVerboseToggle`）。
+  **档位必须持久化，且算“本机偏好”**（`config.LocalPrefs`）：重启保持；`-apply` / 导入 / 回滚 /
+  `deploy.ps1` 都不许把它打回 normal（换配置不该换掉这台机器看日志的习惯）——
+  任何新加的“整份配置替换”路径都要调 `KeepLocalPrefsFrom`；启动打一行档位、`-status` 报 `logLevel`。
+  **屏幕与文件是两个档**（Proxifier 的 Screen Log / File Log，`Bus.SetLevels`）：
+  `ui.log_level` 管界面（环形缓冲/订阅者）、`ui.log_level_file` 管 `logs/nethub.log`（空 = 跟随屏幕）。
+  `Detail`/`Debug` 的写入门槛是“**任一 sink 达档**”，分流在 `log()` 里按 sink 各判 ——
+  所以屏幕 normal + 文件 verbose 是允许的（现场最常用的就是这个组合）。
+  `local/memwatch.ps1` 采的是 `stats` 行，所以它切的是**文件档**，不动屏幕。
   **我们自己的探针在 normal 档一行都不写**（自检、共存检测走 `DialSelf` 的连接）：它们是仪器不是
   业务 —— 与“不进连接列表、不计累计、不进顶栏流量图”同一条原则；开机一串 `proc=nethub.exe`
   的 `intercept`/`relay.done` 会被当成“应用在连”（2026-10-14 用户报的），要看就切 verbose。

@@ -204,10 +204,46 @@ func (k NotifyKind) String() string {
 // 不转储就等于“切到 debug 档什么也看不到，只能重启重现”—— 而重启会断掉现场正在跑的业务连接。
 // 界面切档与外部改文件（热重载）都从这里走，不会一边做一边忘。
 func (a *App) SetLogLevel(lv logbus.Level) {
-	a.Bus.SetLevel(lv)
-	if lv >= logbus.LevelDebug {
+	wasDebug := a.Bus.IsDebug()
+	a.applyLogLevels(false)
+	// 切到 debug 就立刻转储一份当前状态：debug 的内容平时只在启动时写，
+	// 不转储就等于“切了也看不到”。判据是**现在有 sink 到了 debug** ——
+	// 哪怕只是文件档到了 debug，那份文件也该拿到一份内部快照。
+	if !wasDebug && a.Bus.IsDebug() {
 		a.Engine.DumpState("切到 debug 档")
 	}
+}
+
+// applyLogLevels 把配置里的档位装到总线上（屏幕档 + 文件档），返回是否变了。
+//
+// 分开定档是 Proxifier 的做法（Screen Log / File Log）：现场最常用的是
+// “屏幕 normal（看着清爽）+ 文件 verbose（事后有判定面）”。
+// announce=true 时把“现在是什么档”写进日志 —— 现场报“档位存不住”时，
+// 第一句要能回答的就是这一行（以前只能靠“日志里有没有 verbose 专属行”反推）。
+func (a *App) applyLogLevels(announce bool) bool {
+	screen := logbus.ParseLevel(a.Cfg.LogLevel())
+	file := logbus.ParseLevel(a.Cfg.LogLevelFile())
+	changed := screen != a.Bus.Level() || file != a.Bus.FileLevel()
+	a.Bus.SetLevels(screen, file)
+	if !announce {
+		return changed
+	}
+	if bad := a.Cfg.LogLevelDirty(); bad != "" {
+		a.Bus.Warn("配置里的日志档位「%s」认不出，已按 normal 处理（可选：normal / verbose / debug）", bad)
+	}
+	if bad := a.Cfg.LogLevelFileDirty(); bad != "" {
+		a.Bus.Warn("配置里的日志文件档位「%s」认不出，已按 normal 处理（可选：normal / verbose / debug）", bad)
+	}
+	src := "配置里没写，用默认值"
+	if a.Cfg.LogLevelExplicit() {
+		src = "来自 config.yaml"
+	}
+	if a.Cfg.LogLevelFile() == a.Cfg.LogLevel() {
+		a.Bus.Info("日志档位：%s（%s；屏幕与文件同档）", screen, src)
+	} else {
+		a.Bus.Info("日志档位：屏幕 %s / 文件 %s（%s）", screen, file, src)
+	}
+	return changed
 }
 
 // Running 返回是否已启动。
@@ -296,8 +332,10 @@ func (a *App) startLockedInner() error {
 		a.notify("启动失败", err.Error(), NotifyError)
 		return err
 	}
-	// 日志档位是配置里的一项，启动时按它给总线定档（界面上的三档滑块可直接改，见 SetLogLevel）
-	a.Bus.SetLevel(logbus.ParseLevel(a.Cfg.LogLevel()))
+	// 日志档位是配置里的一项，启动时按它给总线定档（界面上的三档滑块可直接改，见 SetLogLevel）。
+	//
+	// 定档后立刻把“现在是什么档”写进日志（屏幕与文件可以不同，见 applyLogLevels）。
+	a.applyLogLevels(true)
 	// 旧版加过密的配置 + 保险箱丢了 → 这条链必然认证失败，先把话说清楚
 	if legacy := a.Cfg.LegacySecretWarning(); len(legacy) > 0 {
 		a.Bus.Error("⚠ 这些链还引用着旧版加密口令，但解不开（secrets.dat 丢了或换了机器）：%v", legacy)

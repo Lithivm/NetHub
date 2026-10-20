@@ -33,8 +33,14 @@ type Bus struct {
 	maxBytes int64 // 单文件上限，超过就轮转
 	keep     int   // 保留几个历史文件（nethub.log.1 … .keep）
 
-	// level 日志档位（见 Level / SetLevel）
-	level Level
+	// levelScreen 屏幕档（环形缓冲 + 订阅者：界面「运行日志」页看的就是它）
+	// levelFile 日志文件档（logs/nethub.log）
+	//
+	// 为什么是两个（照 Proxifier 的 Screen Log / File Log 分开设档）：
+	// 现场要的是“界面上清爽、事后查的时候有料”。以前一个档位一把拖，
+	// 想要一份详细的文件就得让屏幕一起变吵，于是没人愿意长期开 verbose。
+	levelScreen Level
+	levelFile   Level
 	// throttled 去重+计数表：key → 状态（见 Throttle）
 	throttled map[string]*throttleState
 }
@@ -212,19 +218,31 @@ func (b *Bus) Snapshot() []Line {
 	return out
 }
 
-func (b *Bus) log(level, format string, args ...any) {
+func (b *Bus) log(tier Level, level, format string, args ...any) {
 	l := Line{Time: time.Now(), Level: level, Text: fmt.Sprintf(format, args...)}
 
 	b.mu.Lock()
-	b.ring = append(b.ring, l)
-	if len(b.ring) > b.max {
-		b.ring = b.ring[len(b.ring)-b.max:]
+	// 两个 sink 各自判断档位（Proxifier 的 Screen Log / File Log 可以分开设）：
+	// 同一行日志可能只进文件、不进屏幕，反之亦然。
+	screen := tier <= b.levelScreen
+	file := tier <= b.levelFile
+	if screen {
+		b.ring = append(b.ring, l)
+		if len(b.ring) > b.max {
+			b.ring = b.ring[len(b.ring)-b.max:]
+		}
 	}
-	f := b.file
+	var f *os.File
+	if file {
+		f = b.file
+	}
 	b.mu.Unlock()
 
 	if f != nil {
 		b.writeFile(l)
+	}
+	if !screen {
+		return // 只进文件的那条不进屏幕（界面不该看到它）
 	}
 	// 在 RLock 下发送：Unsubscribe（持写锁）要么在发送前把通道摘掉，
 	// 要么等发送完才关 —— 否则往已关闭的通道发送会直接 panic。
@@ -239,31 +257,53 @@ func (b *Bus) log(level, format string, args ...any) {
 	b.mu.RUnlock()
 }
 
-func (b *Bus) Info(format string, a ...any)  { b.log("INFO", format, a...) }
-func (b *Bus) Warn(format string, a ...any)  { b.log("WARN", format, a...) }
-func (b *Bus) Error(format string, a ...any) { b.log("ERROR", format, a...) }
+func (b *Bus) Info(format string, a ...any)  { b.log(LevelNormal, "INFO", format, a...) }
+func (b *Bus) Warn(format string, a ...any)  { b.log(LevelNormal, "WARN", format, a...) }
+func (b *Bus) Error(format string, a ...any) { b.log(LevelNormal, "ERROR", format, a...) }
 
-// SetLevel 定档（界面上的三档滑块与配置文件都走这里）。
+// SetLevel 定档（两档一起定：屏幕与文件用同一个档）。
 //
 // 只影响**之后**写下的行：已经在档位之下的行不会补出来，也不碰过滤器、不重启。
-func (b *Bus) SetLevel(l Level) {
+func (b *Bus) SetLevel(l Level) { b.SetLevels(l, l) }
+
+// SetLevels 分开定屏幕档与文件档（Proxifier 的 Screen Log / File Log）。
+//
+// 典型用法：屏幕 normal（现场看着清爽）+ 文件 verbose（出事回去查有判定面）。
+// 反过来（屏幕 debug、文件 normal）也允许 —— 不替用户做主。
+func (b *Bus) SetLevels(screen, file Level) {
 	b.mu.Lock()
-	b.level = l
+	b.levelScreen, b.levelFile = screen, file
 	b.mu.Unlock()
 }
 
-// Level 当前档位。
+// Level 屏幕档（界面上那个滑块显示的就是它）。
 func (b *Bus) Level() Level {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return b.level
+	return b.levelScreen
 }
 
-// Verbose 现在到没到 verbose 档（判定面）。
-func (b *Bus) Verbose() bool { return b.Level() >= LevelVerbose }
+// FileLevel 日志文件档。
+func (b *Bus) FileLevel() Level {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.levelFile
+}
 
-// IsDebug 现在到没到 debug 档（内部面）。
-func (b *Bus) IsDebug() bool { return b.Level() >= LevelDebug }
+// anyAtLeast 任一 sink 要到这个档位 → 这条日志至少得写给谁。
+//
+// Detail/Debug 的前置判断用它（避免白做 Sprintf）；真正的分流在 log 里按 sink 各自判断。
+func (b *Bus) anyAtLeast(l Level) bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.levelScreen >= l || b.levelFile >= l
+}
+
+// Verbose 有 sink 到了 verbose 档（判定面）。
+func (b *Bus) Verbose() bool { return b.anyAtLeast(LevelVerbose) }
+
+// IsDebug 有 sink 到了 debug 档（内部面）。
+func (b *Bus) IsDebug() bool { return b.anyAtLeast(LevelDebug) }
 
 // Detail 记一条 verbose 档以上才写的日志（级别仍是 INFO，脚本按级别过滤不会漏）。
 //
@@ -273,7 +313,7 @@ func (b *Bus) Detail(format string, a ...any) {
 	if !b.Verbose() {
 		return
 	}
-	b.log("INFO", format, a...)
+	b.log(LevelVerbose, "INFO", format, a...)
 }
 
 // Debug 记一条 debug 档才写的日志（级别仍是 INFO）。
@@ -285,7 +325,7 @@ func (b *Bus) Debug(format string, a ...any) {
 	if !b.IsDebug() {
 		return
 	}
-	b.log("INFO", format, a...)
+	b.log(LevelDebug, "INFO", format, a...)
 }
 
 // Throttle 同一个 key 在窗口内只放行一次，其余只计数。
@@ -318,9 +358,9 @@ func (b *Bus) Throttle(key string, window time.Duration, format string, a ...any
 
 	if sup > 0 {
 		// 先补上“上一窗口吞了多少”，再写这一条 —— 顺序反了就对不上了
-		b.log("INFO", "%s", fmt.Sprintf("suppressed: key=%s count=%d window=%s", key, sup, win))
+		b.log(LevelNormal, "INFO", "%s", fmt.Sprintf("suppressed: key=%s count=%d window=%s", key, sup, win))
 	}
-	b.log("INFO", format, a...)
+	b.log(LevelNormal, "INFO", format, a...)
 	return true
 }
 
@@ -348,7 +388,7 @@ func (b *Bus) FlushThrottled() {
 	}
 	b.mu.Unlock()
 	for _, p := range out {
-		b.log("INFO", "%s", fmt.Sprintf("suppressed: key=%s count=%d window=%s", p.key, p.count, p.window))
+		b.log(LevelNormal, "INFO", "%s", fmt.Sprintf("suppressed: key=%s count=%d window=%s", p.key, p.count, p.window))
 	}
 }
 

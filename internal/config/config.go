@@ -304,6 +304,12 @@ type HostsCfg struct {
 type UICfg struct {
 	Theme string `yaml:"theme"` // system | light | dark
 
+	// TrayTraffic 托盘图标是否显示实时流量（迷你柱图）。
+	//
+	// 默认**关** = 用 nethub.ico 那个默认图标：换图标这件事不替用户做主
+	// （托盘是系统级外观，有人就想要品牌图标）。开了才每秒重绘一张。
+	TrayTraffic bool `yaml:"tray_traffic,omitempty"`
+
 	// LogLevel 日志档位：normal（默认）| verbose | debug。
 	//
 	// 三档的语义、每档装什么，见 logbus.Level 的注释（照抄 Proxifier 的
@@ -311,8 +317,26 @@ type UICfg struct {
 	//
 	// 旧字段（v0.5.x）：log_verbose bool。下面还留着读取兼容，读到 true
 	// 就在 normalize 里折成 verbose，写回时就不再出现。
-	LogLevel   string `yaml:"log_level,omitempty"`
+	//
+	// **不带 omitempty**：这是本机偏好，必须每次都写进文件。带了 omitempty 时
+	// “默认 normal”的配置里根本没有这个键，于是谁也分不清“用户选了 normal”与
+	// “这份配置没提到档位”（比如导入/回滚/部署一份别人的配置）—— 而后者应当
+	// 保住本机现有档位（见 LocalPrefs）。
+	LogLevel   string `yaml:"log_level"`
 	LogVerbose bool   `yaml:"log_verbose,omitempty"` // 已弃用，只读
+
+	// LogLevelFile 日志**文件**的档位（光标照 Proxifier 的 Screen Log / File Log 分开设）。
+	//
+	// 空 = 跟随屏幕档（旧配置与“一个档位就够”的人不用管它）。
+	// 典型用法：屏幕 normal（现场看着清爽）+ 文件 verbose（出事回去查有判定面）。
+	LogLevelFile string `yaml:"log_level_file,omitempty"`
+
+	// logLevelSeen 这份配置里**明确写了** log_level（不落盘，只在内存里用）。
+	logLevelSeen bool
+	// logLevelDirty 配置里那个认不出、已被落成 normal 的原始值（不落盘）。
+	// 启动时 WARN 一行用 —— 静默降档会让人以为“档位存不住”。
+	logLevelDirty     string
+	logLevelFileDirty string
 }
 
 // defaultAutostartDelay 开机自启的默认登录后延迟。
@@ -371,7 +395,10 @@ func Default() *Config {
 		// 两者都在设置里一键可开，默认值不替用户做主。
 		Patrol: Patrol{Interval: "off"},
 		Hosts:  HostsCfg{Manage: false},
-		UI:     UICfg{Theme: "system"}, // 默认跟随系统：Windows 自己管深/浅色，用户在那里改一次比在我们这里改一次更自然
+		// 默认跟随系统：Windows 自己管深/浅色，用户在那里改一次比在我们这里改一次更自然。
+		// 日志档位显式写 normal：不带 omitempty 后它总会落盘，默认配置里就该看得见这一项，
+		// 现场打开 config.yaml 才知道“这个开关存在”。
+		UI: UICfg{Theme: "system", LogLevel: "normal", logLevelSeen: true},
 	}
 }
 
@@ -402,8 +429,7 @@ func Load(path string) (*Config, error) {
 	if c.UI.Theme != "dark" && c.UI.Theme != "light" {
 		c.UI.Theme = "system"
 	}
-	if _, err := c.Normalize(); err != nil { // 旧写法/手写配置也安全进来
-		return nil, err
+	if _, err := c.Normalize(); err != nil { // 旧写法/手写配置也安全进来		return nil, err
 	}
 	if err := c.Validate(); err != nil {
 		return nil, err
@@ -460,8 +486,11 @@ func (c *Config) normalizeLocked() (bool, error) {
 		}
 		changed = changed || ch
 	}
-	// 日志档位：认不出的值落成 normal；旧的 log_verbose: true 折成 verbose 后清掉
-	// （空 = normal，不再多写一行进配置文件）。
+	// 日志档位：认不出的值落成 normal；旧的 log_verbose: true 折成 verbose 后清掉。
+	//
+	// 顺带记两件**不落盘**的事（见 UICfg.logLevelSeen / logLevelDirty）：
+	//   · 这个档位是不是配置里明确写的 → 决定整份替换要不要保住本机档位；
+	//   · 原来是哪个认不出的值 → 启动时 WARN，别让它静默变成 normal。
 	if c.UI.LogLevel == "" && c.UI.LogVerbose {
 		c.UI.LogLevel = "verbose"
 	}
@@ -470,8 +499,18 @@ func (c *Config) normalizeLocked() (bool, error) {
 		changed = true
 	}
 	if c.UI.LogLevel != "" {
+		c.UI.logLevelSeen = true
 		if lv := logLevelOr(c.UI.LogLevel, false); lv != c.UI.LogLevel {
+			c.UI.logLevelDirty = c.UI.LogLevel
 			c.UI.LogLevel = lv
+			changed = true
+		}
+	}
+	// 文件档：空 = 跟随屏幕档（不落盘也就不会把“跟随”变成固定值）
+	if c.UI.LogLevelFile != "" {
+		if lv := logLevelOr(c.UI.LogLevelFile, false); lv != c.UI.LogLevelFile {
+			c.UI.logLevelFileDirty = c.UI.LogLevelFile
+			c.UI.LogLevelFile = lv
 			changed = true
 		}
 	}
@@ -1046,6 +1085,14 @@ type Tuning struct {
 	// 实测教训：我们这套环境里内网域名（main.his.com）**只有客户网内的 DNS 能解答**，
 	// 上游是公网中转服务器、根本解析不到 —— 所以默认必须是 local，不能默认透传。
 	DomainResolve string `yaml:"domain_resolve,omitempty"`
+	// DomainResolveLocal 这些域名**强制本机解析**（一行一个，支持 `*.his.com` 通配）。
+	//
+	// 为什么需要它：DomainResolve 是**全局**一个策略，而现场常见的是混合的 ——
+	// 公网域名交给上游解析（域名不出本机），客户内网域名却只有客户网内的 DNS
+	// 能解答。二选一那种配置在这个场景下总是错的。
+	// 命中这里就压过 DomainResolve（除了一种例外：假 IP 又没本机真实 IP 时，
+	// 只能交给上游 —— 本机解不开时白名单也无能为力）。
+	DomainResolveLocal []string `yaml:"domain_resolve_local,omitempty"`
 	// Secrets 上游凭据是否加密保存（默认 true；显式写 false 才关）。
 	Secrets *bool `yaml:"secrets_encrypted,omitempty"`
 	// WarmSessions 每条上游预热几条"已握手、只差 CONNECT"的会话（默认 2；0 = 关）。
@@ -1804,6 +1851,9 @@ func (c *Config) backupsLocked() []string {
 func (c *Config) RestoreBackup(name string) (*Config, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// 回滚的是“配置内容”，不是“这台机器看日志的习惯”：
+	// 备份是几天前的，里面的档位不该把现在切好的 verbose / debug 拖回 normal。
+	prefs := LocalPrefs{LogLevel: logLevelOr(c.UI.LogLevel, c.UI.LogVerbose), LogLevelFile: c.UI.LogLevelFile}
 	src := filepath.Join(c.BackupDir(), filepath.Base(name))
 	b, err := os.ReadFile(src)
 	if err != nil {
@@ -1815,7 +1865,17 @@ func (c *Config) RestoreBackup(name string) (*Config, error) {
 	if err := os.WriteFile(c.path, b, 0o600); err != nil {
 		return nil, err
 	}
-	return Load(c.path)
+	nc, err := Load(c.path)
+	if err != nil {
+		return nil, err
+	}
+	if nc.SetLocalPrefs(prefs) {
+		// 备份里的档位与本机不同 -> 写回文件，别只改内存（否则重启又变回备份那份的档位）
+		if err := nc.Save(); err != nil {
+			return nil, fmt.Errorf("已回滚，但保不住本机日志档位（%s）：%w", prefs.LogLevel, err)
+		}
+	}
+	return nc, nil
 }
 
 // backupLocked 把当前配置文件复制进 backups/，并只保留最新的 keepBackups 份。
@@ -2070,6 +2130,39 @@ func (c *Config) DomainResolveMode() string {
 	default:
 		return "local"
 	}
+}
+
+// LocalResolveDomains 强制本机解析的域名列表（配置原样，界面展示用）。
+func (c *Config) LocalResolveDomains() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if len(c.Tuning.DomainResolveLocal) == 0 {
+		return nil
+	}
+	return append([]string(nil), c.Tuning.DomainResolveLocal...)
+}
+
+// ForceLocalResolve 这个域名是不是被指定为“必须本机解析”。
+//
+// 匹配用通配（`*.his.com` 不包含裸域名 `his.com`，与规则里的通配域名同一个语义）。
+func (c *Config) ForceLocalResolve(host string) bool {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false
+	}
+	c.mu.RLock()
+	list := c.Tuning.DomainResolveLocal
+	c.mu.RUnlock()
+	for _, pat := range list {
+		pat = strings.TrimSpace(pat)
+		if pat == "" || strings.HasPrefix(pat, "#") {
+			continue
+		}
+		if dnsmap.MatchWildcard(pat, host) {
+			return true
+		}
+	}
+	return false
 }
 
 // WarmTarget 每条上游预热几条"已握手、只差 CONNECT"的会话。
@@ -2418,6 +2511,20 @@ func (c *Config) Theme() string {
 	return c.UI.Theme
 }
 
+// TrayTraffic 托盘图标是否显示实时流量图。
+func (c *Config) TrayTraffic() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.UI.TrayTraffic
+}
+
+// SetTrayTraffic 开启/关掉托盘流量图（下次读取时生效，具体重绘在 Tray.iconLoop 里）。
+func (c *Config) SetTrayTraffic(on bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.UI.TrayTraffic = on
+}
+
 // LogLevel 日志档位的字面量（normal | verbose | debug）。
 func (c *Config) LogLevel() string {
 	c.mu.RLock()
@@ -2425,11 +2532,128 @@ func (c *Config) LogLevel() string {
 	return logLevelOr(c.UI.LogLevel, c.UI.LogVerbose)
 }
 
-// SetLogLevel 定档。认不出的值一律落成 normal。
+// SetLogLevel 定档（屏幕）。认不出的值一律落成 normal（并且算“明确写了”—— 这是界面/命令的选择）。
+// 文件档不跟着动：它有自己的设置（空 = 跟随屏幕，见 SetLogLevelFile）。
 func (c *Config) SetLogLevel(s string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.UI.LogLevel = logLevelOr(s, false)
+	c.UI.logLevelSeen = true
+	c.UI.logLevelDirty = ""
+}
+
+// LogLevelFile 日志**文件**档位；没单独设就跟随屏幕档。
+func (c *Config) LogLevelFile() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.UI.LogLevelFile == "" {
+		return logLevelOr(c.UI.LogLevel, c.UI.LogVerbose)
+	}
+	return logLevelOr(c.UI.LogLevelFile, false)
+}
+
+// SetLogLevelFile 定文件档；传空串 = 跟随屏幕档（写回文件时也就不留这个键）。
+func (c *Config) SetLogLevelFile(s string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if strings.TrimSpace(s) == "" {
+		c.UI.LogLevelFile = ""
+		c.UI.logLevelFileDirty = ""
+		return
+	}
+	c.UI.LogLevelFile = logLevelOr(s, false)
+	c.UI.logLevelFileDirty = ""
+}
+
+// LogLevelFileSet 日志文件档是不是单独设的（false = 跟随屏幕档）。
+func (c *Config) LogLevelFileSet() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.UI.LogLevelFile != ""
+}
+
+// LogLevelFileDirty 文件档里那个认不出、已落成 normal 的原始值。
+func (c *Config) LogLevelFileDirty() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.UI.logLevelFileDirty
+}
+
+// LogLevelExplicit 这份配置里**明确写了**日志档位（而不是“没写、默认 normal”）。
+//
+// 为什么要区分：档位是本机偏好 —— 文件里压根没这个键时，整份替换（导入/回滚/部署）
+// 不该把本机正在用的档位打回 normal；而明确写了 normal 的，就该按 normal 走。
+func (c *Config) LogLevelExplicit() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.UI.logLevelSeen
+}
+
+// LogLevelDirty 配置里那个认不出、已被落成 normal 的原始值（没有就是空串）。
+//
+// 留着它是为了启动时 WARN 一行：静默降档的后果是“我明明存了 verbose，一重启就没了”，
+// 而真正的原因只是拼写不对。
+func (c *Config) LogLevelDirty() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.UI.logLevelDirty
+}
+
+// LocalPrefs 本机偏好：描述“这台机器上怎么看”，不是“要派发给谁的配置内容”。
+//
+// 目前只有日志档位。凡是整份配置被替换的地方（-apply / 导入 / 回滚 / 部署），
+// 都要用 KeepLocalPrefsFrom 把旧值搬回来 —— 否则现场每换一次配置，日志档位就被
+// 打回 normal，事后回去查“当时为什么不通”时连判定面都没有了。
+type LocalPrefs struct {
+	LogLevel string
+	// LogLevelFile 文件档（空 = 跟随 LogLevel）
+	LogLevelFile string
+}
+
+// LocalPrefs 取本机偏好快照。
+func (c *Config) LocalPrefs() LocalPrefs {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	p := LocalPrefs{LogLevel: logLevelOr(c.UI.LogLevel, c.UI.LogVerbose)}
+	if c.UI.LogLevelFile != "" {
+		p.LogLevelFile = logLevelOr(c.UI.LogLevelFile, false)
+	}
+	return p
+}
+
+// SetLocalPrefs 应用一份本机偏好，返回是否真的改了。
+func (c *Config) SetLocalPrefs(p LocalPrefs) bool {
+	lv := logLevelOr(p.LogLevel, false)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	changed := logLevelOr(c.UI.LogLevel, c.UI.LogVerbose) != lv
+	c.UI.LogLevel = lv
+	c.UI.logLevelSeen = true
+	c.UI.logLevelDirty = ""
+	// 文件档：空 = 跟随（与“没设过”同一语义）
+	file := ""
+	if strings.TrimSpace(p.LogLevelFile) != "" {
+		file = logLevelOr(p.LogLevelFile, false)
+	}
+	fileNow := ""
+	if c.UI.LogLevelFile != "" {
+		fileNow = logLevelOr(c.UI.LogLevelFile, false)
+	}
+	if fileNow != file {
+		c.UI.LogLevelFile = file
+		c.UI.logLevelFileDirty = ""
+		changed = true
+	}
+	return changed
+}
+
+// KeepLocalPrefsFrom 把 old 的本机偏好搬到 c 身上（old 为 nil 时什么都不做）。
+// 返回是否改了 —— 调用方据此决定要不要重写文件、要不要打一行说明。
+func (c *Config) KeepLocalPrefsFrom(old *Config) bool {
+	if old == nil {
+		return false
+	}
+	return c.SetLocalPrefs(old.LocalPrefs())
 }
 
 // logLevelOr 归一化档位字面量，并把旧的 log_verbose: true 折成 verbose。

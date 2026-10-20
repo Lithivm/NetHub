@@ -241,6 +241,7 @@ func (e *Engine) dialWarm(ch config.Chain, idx int, dst net.IP, dport uint16) (n
 		return nil, false
 	}
 	to := e.cfg.DialTimeoutDur()
+	t0 := time.Now()
 	if err := w.up.ConnectOn(w.conn, dst, dport, to); err != nil {
 		// 会话坏了（上游掐了闲置连接等）→ 丢掉，回落到现拨
 		w.conn.Close()
@@ -249,6 +250,7 @@ func (e *Engine) dialWarm(ch config.Chain, idx int, dst net.IP, dport uint16) (n
 		return nil, false
 	}
 	e.markUp(ch.Name, idx, true, 0, "", false)
+	e.logUpstreamPick(ch, idx, true, time.Since(t0)) // verbose：这条连接用的是池子里的预热会话
 	return w.conn, true
 }
 

@@ -26,7 +26,6 @@ import (
 
 	"nethub/internal/config"
 	"nethub/internal/engine"
-	"nethub/internal/logbus"
 	"nethub/internal/rules"
 )
 
@@ -105,15 +104,19 @@ func (a *App) ApplyFromDisk() (ApplyResult, error) {
 	if err != nil {
 		return ApplyResult{}, err
 	}
+	// 档位是本机偏好：文件里**没写** log_level 就别把它打回 normal
+	// （导入/部署一份别人的配置常常不带这个键）。明确写了的才按文件走。
+	if !cfg.LogLevelExplicit() {
+		cfg.SetLocalPrefs(a.Cfg.LocalPrefs())
+	}
 	a.Cfg.ReplaceFrom(cfg) // 内存也换成新的一份（链/上游是实时读内存的，热重载只管规则）
 	// 日志档位也得跟着走：它是配置里的一项，外部改文件（或 -apply）改到它时必须生效，
 	// 否则改了档位却什么都没发生（只能重启才能看到区别）。
 	//
 	// 档位**变了才写一行**（切到 normal 也写）：v0.5.x 这里是静默的，
 	// 于是“从文件改开关”看起来像没生效 —— 那正是现场会踩的一个坑。
-	if lv := logbus.ParseLevel(a.Cfg.LogLevel()); lv != a.Bus.Level() {
-		a.SetLogLevel(lv)
-		a.Bus.Info("日志: 档位已切到 %s（配置文件改动热生效）", lv)
+	if a.applyLogLevels(false) {
+		a.Bus.Info("日志: 档位已切到 屏幕 %s / 文件 %s（配置文件改动热生效）", a.Bus.Level(), a.Bus.FileLevel())
 	}
 	if err := a.Rules.Load(toRules(cfg.RoutesSnapshot())); err != nil {
 		return ApplyResult{}, err

@@ -13,6 +13,7 @@ package tlsname
 
 import (
 	"bytes"
+	"net"
 	"strings"
 )
 
@@ -194,7 +195,11 @@ func HTTP(b []byte) (string, bool) {
 		if h == "" {
 			return "", false
 		}
-		return normalize(h), true
+		// normalize 对 IP 字面量返回空串：那种 Host 头不携带任何名字信息（见 normalize 的注释）
+		if n := normalize(h); n != "" {
+			return n, true
+		}
+		return "", false
 	}
 	return "", false
 }
@@ -233,6 +238,12 @@ func Name(b []byte) (Result, bool) {
 	return Result{}, false
 }
 
+// normalize 域名归一化；**IP 字面量一律拒掉**（返回空串）。
+//
+// 为什么：明文 HTTP 的 `Host:` 头经常就是个 IP（`Host: 172.30.4.217`），
+// 那不是“名字” —— 放进去会把名字表写成 `172.30.4.217 → 172.30.4.217`，
+// 于是日志里会出现 `172.30.4.217(172.30.4.217):80` 这种废话，而且这条假名字
+// 还会被当成“已知名字”送进通配规则去匹配。IP 目标的写头信息 = 0。
 func normalize(s string) string {
 	s = strings.TrimSpace(s)
 	s = strings.TrimSuffix(s, ".")
@@ -247,5 +258,17 @@ func normalize(s string) string {
 	if strings.ContainsAny(s, "/\\") || len(s) > 253 {
 		return ""
 	}
+	if isIPLiteral(s) {
+		return ""
+	}
 	return s
+}
+
+// isIPLiteral 这个字符串是不是一个 IP 字面量（IPv4 / 带方括号或不带的 IPv6）。
+func isIPLiteral(s string) bool {
+	s = strings.TrimPrefix(strings.TrimSuffix(s, "]"), "[")
+	if i := strings.LastIndex(s, "%"); i > 0 { // IPv6 zone（fe80::1%eth0）
+		s = s[:i]
+	}
+	return net.ParseIP(s) != nil
 }

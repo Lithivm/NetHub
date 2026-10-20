@@ -12,7 +12,9 @@ package webui
 import (
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -27,7 +29,12 @@ const (
 	wmDestroy   = 0x0002
 	wmClose     = 0x0010
 
+	// wmTraySetIcon 把“换图标”投递到托盘自己的消息循环上做：
+	// hIcon 的归属与 Shell_NotifyIcon 都在那个线程，跨线程直接改容易出竞态。
+	wmTraySetIcon = wmApp + 2
+
 	nimAdd    = 0x00000000
+	nimModify = 0x00000001
 	nimDelete = 0x00000002
 
 	nifMessage = 0x00000001
@@ -90,6 +97,8 @@ var (
 	pSetForegroundWnd   = user32.NewProc("SetForegroundWindow")
 	pLoadImageW         = user32.NewProc("LoadImageW")
 	pPostMessageW       = user32.NewProc("PostMessageW")
+	pCreateIconFromRes  = user32.NewProc("CreateIconFromResourceEx")
+	pDestroyIcon        = user32.NewProc("DestroyIcon")
 	pShellNotifyIconW   = shell32.NewProc("Shell_NotifyIconW")
 	pGetModuleHandleW   = kernel32.NewProc("GetModuleHandleW")
 	pGetCurrentThreadID = kernel32.NewProc("GetCurrentThreadId")
@@ -142,11 +151,26 @@ type Tray struct {
 	// onEvent 上报托盘生命周期事件（注册成功、任务栏重启后重注册…），
 	// 不然托盘出问题完全不可观测——只能靠盯屏幕猜。
 	onEvent func(string)
+
+	// onRates 取当前速率（字节/秒，上行、下行）。仅“托盘显示流量”开启时每秒调一次，
+	// 由 Backend 递给它自己那份 60 秒采样环的最后一张。
+	onRates func() (up, down uint64)
+	// baseIcon 从 .ico 加载的原始图标；customIcon 当前自绘的（0 = 没在用）
+	baseIcon   windows.Handle
+	customIcon windows.Handle
+	// trafficOn 设置里的“托盘图标显示实时流量”（默认关 —— 行为不突变）
+	trafficOn atomic.Bool
+	stopIcon  chan struct{}
+	// lastIconErr 上次报告“图标更新失败”的时刻（只有托盘线程碰它，不用锁）
+	lastIconErr time.Time
 }
 
 // NewTray 创建托盘。回调必须传进来（避免 Tray 反向依赖 Backend）。
-func NewTray(iconPath string, onShow, onStart, onStop, onQuit func(), onEvent func(string)) *Tray {
-	t := &Tray{ready: make(chan struct{}), onShow: onShow, onStart: onStart, onStop: onStop, onQuit: onQuit, onEvent: onEvent}
+//
+// onRates 可以为 nil（那就不画流量图，只有默认图标）。
+func NewTray(iconPath string, onShow, onStart, onStop, onQuit func(), onEvent func(string), onRates func() (up, down uint64)) *Tray {
+	t := &Tray{ready: make(chan struct{}), onShow: onShow, onStart: onStart, onStop: onStop, onQuit: onQuit,
+		onEvent: onEvent, onRates: onRates, stopIcon: make(chan struct{})}
 	go t.run(iconPath)
 	<-t.ready
 	return t
@@ -209,6 +233,7 @@ func (t *Tray) run(iconPath string) {
 		uCallbackMessage: wmTrayMsg,
 		hIcon:            hIcon,
 	}
+	t.baseIcon = hIcon
 	// 悬停提示只留名字：托盘提示长了会遮住旁边一片图标，而且那个“怎么办”用户不需要（有菜单）。
 	copyUTF16(t.nid.szTip[:], "NetHub")
 	if r, _, _ := pShellNotifyIconW.Call(nimAdd, uintptr(unsafe.Pointer(&t.nid))); r == 0 {
@@ -218,6 +243,10 @@ func (t *Tray) run(iconPath string) {
 	}
 
 	close(t.ready)
+
+	// 流量图模式：每秒看一次速率，只有“柱高像素变了”才重画（画画并不贵，
+	// 但每秒都 NIM_MODIFY 在部分 Windows 版本上会看到图标闪）。
+	go t.iconLoop()
 
 	var m msgStruct
 	for {
@@ -248,6 +277,9 @@ func (t *Tray) wndProc(hwnd windows.Handle, msg uint32, wParam, lParam uintptr) 
 	}
 
 	switch msg {
+	case wmTraySetIcon:
+		t.applyIcon(windows.Handle(lParam))
+		return 0
 	case wmTrayMsg:
 		switch uint32(lParam) & 0xffff {
 		case wmRButtonUp:
@@ -321,9 +353,124 @@ func (t *Tray) Remove() {
 	if t == nil || t.hwnd == 0 {
 		return
 	}
+	select {
+	case <-t.stopIcon: // 已经关过
+	default:
+		close(t.stopIcon)
+	}
 	pShellNotifyIconW.Call(nimDelete, uintptr(unsafe.Pointer(&t.nid)))
 	// 关掉消息循环
 	pPostMessageW.Call(uintptr(t.hwnd), wmClose, 0, 0)
+}
+
+// SetTrafficMode 开启/关掉“托盘图标显示实时流量”。
+//
+// 关掉时要**当场换回默认图标**（不能等下一拍）：用户拨了开关就该看到变化。
+func (t *Tray) SetTrafficMode(on bool) {
+	if t == nil {
+		return
+	}
+	t.trafficOn.Store(on)
+	if !on {
+		t.post(wmTraySetIcon, uintptr(t.baseIcon))
+	}
+}
+
+// TrafficMode 当前是不是“流量图”模式。
+func (t *Tray) TrafficMode() bool { return t != nil && t.trafficOn.Load() }
+
+// iconLoop 每秒把速率画成图标（只在像素高度变化时重画）。
+func (t *Tray) iconLoop() {
+	tk := time.NewTicker(time.Second)
+	defer tk.Stop()
+	lastU, lastD := -1, -1
+	for {
+		select {
+		case <-t.stopIcon:
+			return
+		case <-tk.C:
+		}
+		if !t.trafficOn.Load() {
+			lastU, lastD = -1, -1 // 下次开启时先画一帧
+			continue
+		}
+		var up, down uint64
+		if t.onRates != nil {
+			up, down = t.onRates()
+		}
+		hu, hd := rateBarHeight(up), rateBarHeight(down)
+		if hu == lastU && hd == lastD {
+			continue
+		}
+		data := drawTrayDIB(up, down)
+		h := createIconFromDIB(data)
+		if h == 0 {
+			// 生成失败不是致命错（继续用当前图标），但得可观测 —— 否则“开了开关没反应”
+			// 只能靠猜。每秒重试一次，日志不能每秒一行。
+			if time.Since(t.lastIconErr) > 10*time.Minute {
+				t.lastIconErr = time.Now()
+				t.event("生成托盘流量图标失败（CreateIconFromResourceEx 返回 0）—— 继续用当前图标")
+			}
+			continue
+		}
+		lastU, lastD = hu, hd
+		t.post(wmTraySetIcon, uintptr(h))
+	}
+}
+
+// post 把“换图标”投到托盘线程去做（hIcon 归属那个线程）。
+func (t *Tray) post(msg uint32, lp uintptr) {
+	if t == nil || t.hwnd == 0 {
+		return
+	}
+	pPostMessageW.Call(uintptr(t.hwnd), uintptr(msg), 0, lp)
+}
+
+// applyIcon 真正改图标（只能从托盘线程调）。
+func (t *Tray) applyIcon(h windows.Handle) {
+	if h == 0 {
+		return
+	}
+	d := t.nid
+	d.uFlags = nifIcon
+	d.hIcon = h
+	if r, _, _ := pShellNotifyIconW.Call(nimModify, uintptr(unsafe.Pointer(&d))); r == 0 {
+		// 没换上去：自绘的句柄要自己销毁，否则每秒漏一个句柄
+		if h != t.baseIcon {
+			pDestroyIcon.Call(uintptr(h))
+		}
+		// 每秒重试一次，日志不能每秒一行（Explorer 重启那几秒就会刷满）
+		if time.Since(t.lastIconErr) > 10*time.Minute {
+			t.lastIconErr = time.Now()
+			t.event("托盘图标更新失败（Shell_NotifyIconW 返回 0；Explorer 重启中会这样，会自动重试）")
+		}
+		return
+	}
+	old := t.customIcon
+	t.nid.hIcon = h
+	if h == t.baseIcon {
+		t.customIcon = 0
+	} else {
+		t.customIcon = h
+	}
+	if old != 0 {
+		pDestroyIcon.Call(uintptr(old))
+	}
+}
+
+// createIconFromDIB 把 RT_ICON 格式的 DIB 数据变成 HICON。
+func createIconFromDIB(dib []byte) windows.Handle {
+	if len(dib) == 0 {
+		return 0
+	}
+	r, _, _ := pCreateIconFromRes.Call(
+		uintptr(unsafe.Pointer(&dib[0])), uintptr(len(dib)),
+		1,       // fIcon
+		0x30000, // dwVer = 3.0
+		0, 0,    // cx/cy 期望尺寸：0 = 用资源自带的尺寸（DIB 头里有）
+		0, // LR_DEFAULTCOLOR
+	)
+	return windows.Handle(r)
 }
 
 func copyUTF16(dst []uint16, s string) {

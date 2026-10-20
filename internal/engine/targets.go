@@ -164,7 +164,7 @@ func (e *Engine) probeOneTarget(ref targetRef) {
 		return
 	}
 	if flipped {
-		e.bus.Info("target.up: target=%s chain=%s rtt=%s", ref.target, ref.chain, lat.Round(time.Millisecond))
+		e.bus.Detail("target.up: target=%s chain=%s rtt=%s", ref.target, ref.chain, lat.Round(time.Millisecond))
 	}
 }
 

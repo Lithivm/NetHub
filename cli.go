@@ -147,6 +147,14 @@ type statusDoc struct {
 	// UpdateProxy 一键更新的请求会走哪条网络路径（系统代理 / 直连）。
 	// 现场排查"更新按钮点了没反应"第一句就问这个：只读注册表，不发请求。
 	UpdateProxy string `json:"updateProxy"`
+	// LogLevel 日志档位（normal | verbose | debug）与它是不是配置里明确写的。
+	// 现场报"档位存不住"时，先看这两个字段，不用去翻 logs。
+	LogLevel string `json:"logLevel"`
+	// LogLevelSource config.yaml / 默认值 / 认不出的值（已回落 normal）
+	LogLevelSource string `json:"logLevelSource"`
+	// LogLevelFile 日志**文件**档（空串 = 跟随屏幕档）。两者可以不同：
+	// 屏幕 normal + 文件 verbose 是现场最常用的组合。
+	LogLevelFile string `json:"logLevelFile,omitempty"`
 	// Runtime 运行实例的自报（runtime.json）：不在跑就没有这个字段。
 	Runtime *runtimeDoc `json:"runtime,omitempty"`
 	Notes   []string    `json:"notes,omitempty"`
@@ -259,6 +267,21 @@ func cmdStatus(cfgPath string) int {
 		doc.Rules = append(doc.Rules, d)
 	}
 	doc.Hosts = hostsDoc{Manage: cfg.Hosts.Manage, Entries: cfg.Hosts.Entries}
+	switch {
+	case cfg.LogLevelDirty() != "":
+		doc.LogLevel = cfg.LogLevel()
+		doc.LogLevelSource = fmt.Sprintf("认不出的值 %q，已按 normal 处理", cfg.LogLevelDirty())
+		doc.Notes = append(doc.Notes, fmt.Sprintf("配置里的日志档位 %q 认不出，实际生效 %s", cfg.LogLevelDirty(), cfg.LogLevel()))
+	case cfg.LogLevelExplicit():
+		doc.LogLevel = cfg.LogLevel()
+		doc.LogLevelSource = "config.yaml"
+	default:
+		doc.LogLevel = cfg.LogLevel()
+		doc.LogLevelSource = "默认值（配置里没写）"
+	}
+	if cfg.LogLevelFileSet() {
+		doc.LogLevelFile = cfg.LogLevelFile()
+	}
 	if _, inFile, _, err := hostsmgr.Read(); err == nil {
 		doc.Hosts.InFile = inFile
 	}
@@ -340,6 +363,16 @@ func cmdApply(srcPath, cfgPath string, force bool) int {
 		}
 	}
 
+	// 本机偏好（日志档位）不跟着 -apply 走：-apply 派发的是“配置内容”，
+	// 而这台机器看日志的习惯是操作人自己选的。目标文件存在就把它的档位搬过来。
+	// （不带 omitempty 后默认配置总会写这一项，所以这里不能靠“源文件有没有这个键”判断。）
+	prefsKept := ""
+	if old, oerr := config.LoadExisting(cfgPath); oerr == nil {
+		if p := old.LocalPrefs(); cfg.SetLocalPrefs(p) {
+			prefsKept = p.LogLevel
+		}
+	}
+
 	if err := cfg.SaveFile(cfgPath); err != nil {
 		fmt.Println("apply: FAIL 写入失败")
 		fmt.Printf("  - %s\n", err)
@@ -348,6 +381,9 @@ func cmdApply(srcPath, cfgPath string, force bool) int {
 	sum := app.FileHash(cfgPath)
 	fmt.Printf("apply: 已写入 %s（%d 条链 %d 条规则，旧配置已备份到 backups\\）\n",
 		cfgPath, len(cfg.Chains), len(cfg.Routes))
+	if prefsKept != "" {
+		fmt.Printf("apply: 日志档位保留本机设置 %s（源文件里是别的值）\n", prefsKept)
+	}
 
 	// 等运行实例吃进去（最坏 6 秒：轮询 2 秒 + 应用 + 自报）
 	deadline := time.Now().Add(6 * time.Second)

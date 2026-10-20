@@ -288,9 +288,16 @@ type SettingsView struct {
 	HostsManage  bool     `json:"hostsManage"`
 	HostsEntries []string `json:"hostsEntries"`
 	Theme        string   `json:"theme"`
+	// TrayTraffic 托盘图标是否显示实时流量图（默认关 = 默认图标）
+	TrayTraffic bool `json:"trayTraffic"`
 	// LogLevel 日志档位：normal（默认）| verbose | debug。
 	// 三档各装什么见 logbus.Level 的注释（照抄 Proxifier）。
 	LogLevel string `json:"logLevel"`
+	// LogLevelFile / LogLevelFileSet 是**只读**的（SaveSettings 不看它们）：
+	// 文件档走 SetLogLevelFile。它与屏幕档分开设是 Proxifier 的做法 ——
+	// 屏幕 normal 看着清爽，文件 verbose 让事后查有判定面。
+	LogLevelFile    string `json:"logLevelFile"`
+	LogLevelFileSet bool   `json:"logLevelFileSet"`
 	// 上游拨号（秒）。0 表示前端没传 → 保持原值，不当成“设成 0”。
 	DialTimeout int `json:"dialTimeout,omitempty"`
 	DialBudget  int `json:"dialBudget,omitempty"`
@@ -300,6 +307,9 @@ type SettingsView struct {
 	RaceAfter *int `json:"raceAfter"`
 	// WarmSessions 预热会话条数：0 = 关闭（同样用指针区分“没传”）。
 	WarmSessions *int `json:"warmSessions"`
+	// DomainResolveLocal 强制本机解析的域名（一行一个，支持 `*.his.com` 通配）。
+	// 用切片而不是指针：nil = 前端没传（旧前端，不改）；空切片 = 用户清空了。
+	DomainResolveLocal []string `json:"domainResolveLocal"`
 	// AutostartDelay 开机自启的登录后延迟（秒）；nil = 前端没传 → 不改。
 	// 0 是合法值（登录后立即启动），所以用指针。
 	AutostartDelay *int `json:"autostartDelay"`
@@ -1194,16 +1204,102 @@ func (b *Backend) GetSettings() SettingsView {
 		entries = defaultHostsEntries()
 	}
 	return SettingsView{
-		HostsManage:    hosts.Manage,
-		HostsEntries:   entries,
-		Theme:          b.a.Cfg.Theme(),
-		LogLevel:       b.a.Cfg.LogLevel(),
-		DialTimeout:    int(b.a.Cfg.DialTimeoutDur() / time.Second),
-		DialBudget:     int(b.a.Cfg.DialBudgetDur() / time.Second),
-		RaceAfter:      intPtr(int(b.a.Cfg.RaceAfterDur() / time.Millisecond)),
-		WarmSessions:   intPtr(b.a.Cfg.WarmTarget()),
-		AutostartDelay: intPtr(int(b.a.Cfg.AutostartDelayDur() / time.Second)),
+		HostsManage:        hosts.Manage,
+		HostsEntries:       entries,
+		Theme:              b.a.Cfg.Theme(),
+		TrayTraffic:        b.a.Cfg.TrayTraffic(),
+		LogLevel:           b.a.Cfg.LogLevel(),
+		LogLevelFile:       b.a.Cfg.LogLevelFile(),
+		LogLevelFileSet:    b.a.Cfg.LogLevelFileSet(),
+		DialTimeout:        int(b.a.Cfg.DialTimeoutDur() / time.Second),
+		DialBudget:         int(b.a.Cfg.DialBudgetDur() / time.Second),
+		RaceAfter:          intPtr(int(b.a.Cfg.RaceAfterDur() / time.Millisecond)),
+		WarmSessions:       intPtr(b.a.Cfg.WarmTarget()),
+		DomainResolveLocal: b.a.Cfg.LocalResolveDomains(),
+		AutostartDelay:     intPtr(int(b.a.Cfg.AutostartDelayDur() / time.Second)),
 	}
+}
+
+// cleanDomainList 清理“强制本机解析”的域名列表：去空白、去空行与 # 注释、去重。
+//
+// 为什么要清洗：这串是给匹配器逐条跑的，空串会变成“永远不命中”的垃圾项；
+// 重复项也不算错但让人以为配了两条。
+func cleanDomainList(in []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		for _, line := range strings.Split(s, "\n") { // 允许前端一次贴多行
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			if seen[line] {
+				continue
+			}
+			seen[line] = true
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// KillConn 结束一条连接（连接列表里点「结束」）。
+//
+// 为什么要从界面做：现场最常见的诉求是“这条卡死了，让它重连”——没这个入口只能
+// 等应用自己超时。对直连/阻断的不给结束（那些不经过我们，关了什么也停不了）。
+func (b *Backend) KillConn(sport int) error {
+	if sport <= 0 || sport > 65535 {
+		return fmt.Errorf("端口号不对：%d", sport)
+	}
+	if b.a.Engine == nil {
+		return fmt.Errorf("引擎没在运行")
+	}
+	return b.a.Engine.KillConn(uint16(sport))
+}
+
+// SetTrayTraffic 切换托盘图标：默认图标 / 实时流量图（迷你柱图）。
+//
+// 即时生效（不用重启）：Tray 里那个开关是个 atomic，下一拍就换图标；
+// 关掉时**当场**换回默认图标，不给用户“拨了没反应”的感觉。
+func (b *Backend) SetTrayTraffic(on bool) error {
+	old := b.a.Cfg.TrayTraffic()
+	b.a.Cfg.SetTrayTraffic(on)
+	res, err := b.a.SaveConfig()
+	if err != nil {
+		b.a.Cfg.SetTrayTraffic(old)
+		return err
+	}
+	if b.tray != nil {
+		b.tray.SetTrafficMode(on)
+	}
+	b.afterSave(res, "托盘图标")
+	if on {
+		b.a.Bus.Info("托盘图标已切换为实时流量图（上行/下行两根柱，每秒重绘；空载时只剩一条底线）")
+	} else {
+		b.a.Bus.Info("托盘图标已恢复为默认图标")
+	}
+	return nil
+}
+
+// CurrentRates 最近一秒的速率（字节/秒，上行、下行）—— 给托盘流量图用。
+//
+// 口径与顶栏流量图完全一致（那边也是每秒一格）：关着「也统计直连流量」时
+// 不把直连算进去，否则托盘上会显示一笔“界面上看不到来源”的流量。
+func (b *Backend) CurrentRates() (up, down uint64) {
+	if b == nil {
+		return 0, 0
+	}
+	series := b.traffic.snapshot(false, b.a.Running()).Series
+	if len(series) == 0 {
+		return 0, 0
+	}
+	p := series[len(series)-1]
+	up, down = p.TunUp, p.TunDown
+	if b.countDirect() {
+		up += p.DirUp
+		down += p.DirDown
+	}
+	return up, down
 }
 
 // defaultHostsEntries 不做任何预置：内置默认里绝不能出现真实环境的映射。
@@ -1674,6 +1770,10 @@ func (b *Backend) SaveSettings(s SettingsView) error {
 			} else {
 				t.WarmSessions = fmt.Sprintf("%d", *s.WarmSessions)
 			}
+		}
+		// 强制本机解析的域名：nil = 前端没传（不改）；空切片 = 清空（用户确实想清）
+		if s.DomainResolveLocal != nil {
+			t.DomainResolveLocal = cleanDomainList(s.DomainResolveLocal)
 		}
 	})
 	res, err := b.a.SaveConfig()
@@ -2264,12 +2364,16 @@ func (b *Backend) SetCountDirect(on bool) error {
 // 档位没变就不重复写行（界面上点回当前档位时不该多一行噪声）。
 func (b *Backend) SetLogLevel(level string) error {
 	lv := logbus.ParseLevel(level)
+	old := b.a.Cfg.LocalPrefs()
+	changed := lv != b.a.Bus.Level()
 	b.a.Cfg.SetLogLevel(lv.String())
 	res, err := b.a.SaveConfig()
 	if err != nil {
-		return err
+		// 存不下去就把**内存里的档位也退回去**：否则界面显示新档、总线还是旧档，
+		// 看起来像“切了但没生效”，重启后又变回旧值 —— 那正是“档位存不住”的观感来源。
+		b.a.Cfg.SetLocalPrefs(old)
+		return fmt.Errorf("日志档位没改成（配置没存下去，已退回 %s）：%w", old.LogLevel, err)
 	}
-	changed := lv != b.a.Bus.Level()
 	b.a.SetLogLevel(lv) // 先落盘再切，保证“界面看到的 = 日志的”；切到 debug 会顺带转储一份当前状态
 	b.afterSave(res, "日志档位")
 	if changed {
@@ -2278,11 +2382,34 @@ func (b *Backend) SetLogLevel(level string) error {
 	return nil
 }
 
+// SetLogLevelFile 切**日志文件**的档位（传空串 = 跟随屏幕档）。
+//
+// 为什么单独一个：屏幕与文件是两个受众 —— 现场看着要清爽（normal），
+// 事后把日志发给 agent 时要能看到“为什么”（verbose）。不能分开设就只能二选一。
+// 持久化与屏幕档一样走本机偏好（见 config.LocalPrefs）。
+func (b *Backend) SetLogLevelFile(level string) error {
+	old := b.a.Cfg.LocalPrefs()
+	b.a.Cfg.SetLogLevelFile(level)
+	res, err := b.a.SaveConfig()
+	if err != nil {
+		b.a.Cfg.SetLocalPrefs(old) // 存不下去就退回去，别让界面显示一个没保存的值
+		return fmt.Errorf("日志文件档位没改成（配置没存下去，已退回）：%w", err)
+	}
+	b.a.SetLogLevel(logbus.ParseLevel(b.a.Cfg.LogLevel())) // 让文件档立即生效
+	b.afterSave(res, "日志文件档位")
+	if strings.TrimSpace(level) == "" {
+		b.a.Bus.Info("日志文件档位：跟随屏幕档（%s）", b.a.Cfg.LogLevelFile())
+	} else {
+		b.a.Bus.Info("日志文件档位：%s（屏幕的是 %s）", b.a.Cfg.LogLevelFile(), b.a.Cfg.LogLevel())
+	}
+	return nil
+}
+
 // logLevelBlurb 给档位配一句“这一档多出什么”（Proxifier 的菜单说明那类）。
 func logLevelBlurb(lv logbus.Level) string {
 	switch lv {
 	case logbus.LevelVerbose:
-		return " —— 会多出每条连接的规则判定、DNS 请求与应答"
+		return " —— 会多出每条连接为什么这么走、DNS 请求与应答、实际走了哪个上游、分段耗时"
 	case logbus.LevelDebug:
 		return " —— 会多出引擎内部状态与装配细节（过滤器原文、名字表/假 IP 池、内核层）"
 	default:

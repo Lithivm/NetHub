@@ -342,7 +342,7 @@ func (e *Engine) healthLoop() {
 	defer e.wg.Done()
 	tk := time.NewTicker(5 * time.Second)
 	defer tk.Stop()
-	e.bus.Info("health.start: chains=%d interval=5s", len(e.cfg.ChainsSnapshot()))
+	e.bus.Detail("health.start: chains=%d interval=5s", len(e.cfg.ChainsSnapshot()))
 	last := map[string]time.Time{}
 	// 先立即探一轮：否则刚打开界面的那几十秒里，链路页全是“未探过”的灰点，
 	// 用户会以为没生效（实际只是还在等第一个 tick）。

@@ -199,7 +199,7 @@ function showPage(name) {
   document.querySelectorAll('.page').forEach(p => p.classList.toggle('is-active', p.id === 'page-' + name));
   positionTabThumb();
   if (name === 'log') { scrollLogToEnd(); loadLogLevel(); }
-  if (name === 'conn') { loadConns(); loadCountDirect(); loadQuicBlock(); }
+  if (name === 'conn') { loadConns(); loadCountDirect(); loadQuicBlock(); loadLogLevel(); }
   if (name === 'stats') {
     loadStats();
     // 两个分段滑块的指示块要重新量一次宽度（这一页平时不可见，量出来是 0）
@@ -1152,11 +1152,52 @@ function connDetailRow(g) {
       line.appendChild(el('span', 'csub', '第 ' + c.ruleNo + ' 条' +
         (c.ruleName ? '「' + c.ruleName + '」' : '')));
     }
+    // 只对“进行中”的给结束按钮：直连/阻断/已结束的结束了也没意义（后端也会拒）
+    if (c.state === '进行中' && c.sport) line.appendChild(connKillBtn(c));
     cell.appendChild(line);
     if (c.error) cell.appendChild(el('div', 'cerr', c.error));
   });
   row.appendChild(cell);
   return row;
+}
+
+// 手动结束一条连接（Proxifier 的 close a connection）。
+//
+// 为什么放在展开后的每一条上、而且要二次确认：它是**不可撤销**的（应用会立刻重连，
+// 但当前这条的会话状态没了）。所以第一次点只换成“确认结束”，3 秒不点自己复原 ——
+// 比弹一个 modal 轻，但不会手滑就断。
+//
+// 不动规则：这不是“拉黑”，应用重连后还走同一套规则。
+function connKillBtn(c) {
+  const b = el('button', 'btn btn-sm btn-ghost conn-kill', '结束');
+  b.title = '手动断开这条连接（应用会自己重连；不改规则、不拉黑）';
+  let timer = 0;
+  const reset = () => {
+    clearTimeout(timer); timer = 0;
+    b.textContent = '结束';
+    b.classList.remove('btn-danger');
+  };
+  b.onclick = async (ev) => {
+    ev.stopPropagation();   // 不要连带把整行折叠/展开
+    if (!timer) {
+      b.textContent = '确认结束';
+      b.classList.add('btn-danger');
+      timer = setTimeout(reset, 3000);
+      return;
+    }
+    clearTimeout(timer); timer = 0;
+    b.disabled = true; b.textContent = '结束中…';
+    try {
+      await call('KillConn', c.sport);
+      toast('已结束', '本地端口 ' + c.sport + ' 这条连接（应用会自己重连）', 'success');
+      loadConns();
+    } catch (e) {
+      fail(e);
+      b.disabled = false;
+      reset();
+    }
+  };
+  return b;
 }
 
 /* ═══════════════ 统计（谁在占通道；就在「连接」页里的那两块） ═══════════════
@@ -2547,7 +2588,8 @@ async function loadSettings() {
   // 只用界面上确实存在的字段（别再引用已被移除的 setRelay，
   // 那会抛 TypeError 把 boot() 整个搞挂，导致状态轮询都注册不上）
   setChecked('setHostsManage', s.hostsManage);
-  setLogLevel(s.logLevel || 'normal', true);
+  setChecked('setTrayTraffic', s.trayTraffic);
+  applyLogLevelUI(s);
   applyThemePref(s.theme || 'system');   // 偏好（system/light/dark）：进设置页时滑块要对
   setValue('setHostsEntries', (s.hostsEntries || []).join('\n'));
   loadAbout();
@@ -2555,13 +2597,15 @@ async function loadSettings() {
   setValue('setDialBudget', s.dialBudget || 10);
   setValue('setRaceAfter', s.raceAfter === 0 ? 0 : (s.raceAfter || 300));
   setValue('setWarm', s.warmSessions === 0 ? 0 : (s.warmSessions || 2));
+  setValue('setDomainResolveLocal', (s.domainResolveLocal || []).join('\n'));
   setValue('setAutoDelay', s.autostartDelay === 0 ? 0 : (s.autostartDelay || 20));
 }
 
 /* ══ 日志档位（三段滑块）══
    档位定义照抄 Proxifier 的 Normal / Verbose / Debug（见 logbus.Level 的注释）：
-     normal  = 现场面：连接开/关、启停、状态翻转、错误
-     verbose = 判定面：+ 每条连接的规则判定、DNS 请求与应答、名字学习
+     normal  = 现场面：连接开/关（open/close 两行，照 Proxifier）、启停、状态翻转、错误
+     verbose = 判定面：+ 每条连接的规则判定（route.match）、DNS 请求与应答、名字学习、
+               实际走了哪个上游（upstream.pick）、分段耗时（conn.stage）、直连收尾
      debug   = 内部面：+ 引擎内部状态与装配（过滤器原文、名字表 / 假 IP 池、内核层）
    只影响**之后**写下的行：不碰过滤器、不重启、也不动已在跑的连接。
 
@@ -2571,7 +2615,7 @@ async function loadSettings() {
 const LOG_LEVELS = ['normal', 'verbose', 'debug'];
 const LEVEL_BLURB = {
   normal: '只记连接开/关、启停、状态翻转与错误',
-  verbose: '加上每条连接的规则判定、DNS 请求与应答、名字学习',
+  verbose: '加上每条连接的规则判定、DNS 请求与应答、实际走了哪个上游、分段耗时',
   debug: '再加上引擎内部状态与装配（过滤器原文、名字表 / 假 IP 池、内核层）',
 };
 
@@ -2601,8 +2645,44 @@ async function loadLogLevel() {
   if (!seg) return;
   try {
     const s = await call('GetSettings');
-    if (s) setLogLevel(s.logLevel || 'normal', true);
+    if (s) applyLogLevelUI(s);
   } catch (e) { /* 读不到就维持现状，不打断日志页 */ }
+}
+
+// 档位相关的界面状态一次刷完：屏幕滑块 + 文件档下拉 + 日志页那句提示。
+// 都从同一份 GetSettings 来 —— 分开刷会在“保存失败”时出现半新半旧的界面。
+function applyLogLevelUI(s) {
+  setLogLevel(s.logLevel || 'normal', true);
+  updateVerboseToggle(s.logLevel || 'normal');
+  const sel = document.getElementById('selLogFile');
+  if (sel) sel.value = s.logLevelFileSet ? (s.logLevelFile || '') : '';
+  refreshLogFileHint(s);
+}
+
+// 连接页的「详细日志」按钮：把“看到一条可疑连接 → 我想知道它为什么这么走”压成一次点击。
+//
+// 以前得跑到日志页拨滑块、再回来找那条连接（Proxifier 在连接面板工具栏就摆着这个开关）。
+// 它切的是**屏幕档**（与日志页那个滑块是同一个设置），所以两边必须互相同步：
+// 任何一处改完都调 updateVerboseToggle。
+function updateVerboseToggle(level) {
+  const btn = document.getElementById('btnConnVerbose');
+  if (!btn) return;
+  const on = level === 'verbose' || level === 'debug';
+  // 激活态用主色按钮（.btn 没有 is-on 样式，别拿 rule-switch 的类硬套）
+  btn.classList.toggle('btn-primary', on);
+  btn.title = on
+    ? '当前是 ' + level + '：点一下回到 normal（只写连接开/关）'
+    : '打开详细日志（verbose）：每条连接为什么这么走、DNS、实际走了哪个上游';
+}
+
+// 日志页那句小字要说清“文件里记的是哪一档”：
+// 用户把屏幕档拨到 normal 后，日志页看不到 route.match 是正常的 —— 不说清楚会以为功能坏了。
+function refreshLogFileHint(s) {
+  const el = document.getElementById('logFileHint');
+  if (!el) return;
+  const eff = s.logLevelFileSet ? (s.logLevelFile || '') : (s.logLevel || 'normal');
+  el.textContent = '同时写到程序目录的 nethub.log（文件档 ' + (eff || 'normal') +
+                   (s.logLevelFileSet ? '' : '，跟随界面') + '；在设置 › 文件与日志 里改）';
 }
 
 // 长说明统一放这里；界面上的小字只留一句概括 + 一个“i”按钮。
@@ -2802,6 +2882,11 @@ async function saveSettings() {
       const n = e ? parseInt(e.value, 10) : NaN;
       return Number.isFinite(n) && n >= 0 ? n : 2;
     })(),
+    // 强制本机解析的域名：清洗在**后端**做（去空行/去重/去注释），这里只按行拆
+    domainResolveLocal: (function () {
+      const e = document.getElementById('setDomainResolveLocal');
+      return e ? e.value.split('\n').map(s => s.trim()).filter(Boolean) : [];
+    })(),
   };
   const btn = document.getElementById('btnSaveSettings');
   const btnText = btn ? btn.textContent : '';
@@ -2851,6 +2936,8 @@ async function resetSettings() {
   setValue('setDialBudget', 10);
   setValue('setRaceAfter', 300);
   setValue('setWarm', 2);
+  setValue('setDomainResolveLocal', '');
+  setChecked('setTrayTraffic', false);
   applyThemeSoft('light');
   applyThemePref('system');
 
@@ -2992,7 +3079,6 @@ function wire() {
   document.getElementById('btnClearLog').onclick = () => {
     document.getElementById('logBox').replaceChildren();
   };
-  document.getElementById('btnOpenLog').onclick = () => call('OpenLogDir').catch(fail);
   // 白名单卡：把驱动路径复制出去（火绒的「添加例外驱动」是个文件选择框，粘路径/按路径找都行）
   document.getElementById('btnCopySysPath').onclick = async () => {
     const p = state.driverPath || 'WinDivert64.sys';
@@ -3015,6 +3101,23 @@ function wire() {
         } catch (e) { fail(e); }
       };
     });
+  }
+  // 文件档下拉（在**设置页 › 日志**）：值只管 logs/nethub.log（日志页那个滑块只管界面）。
+  // 空值 = 跟随屏幕档（旧配置与“一个档位就够”的人不用管它）。
+  const selLogFile = document.getElementById('selLogFile');
+  if (selLogFile) {
+    selLogFile.onchange = async () => {
+      const v = selLogFile.value;
+      try {
+        await call('SetLogLevelFile', v);
+        toast('文件日志档位：' + (v || '跟随界面'),
+              v ? (LEVEL_BLURB[v] || '') : '沿用日志页那个档位（界面显示不受影响）', 'success');
+        loadLogLevel();   // 把日志页那句提示（文件档 X）同步过来
+      } catch (e) {
+        fail(e);
+        loadLogLevel();   // 失败就把界面退回真实值（别让下拉停在一个没保存的状态）
+      }
+    };
   }
   document.getElementById('btnSelfTest').onclick = () => {
     const out = document.getElementById('selfTestOut');
@@ -3061,6 +3164,21 @@ function wire() {
 
   // 连接页
   document.getElementById('btnConnRefresh').onclick = () => loadConns();
+  // 「详细日志」开关（连接页）：不切页就能拿到判定面。
+  // 切完要同步日志页滑块 —— 两个控件管的是同一个屏幕档，不能让它们显示不一致。
+  const btnVerbose = document.getElementById('btnConnVerbose');
+  if (btnVerbose) {
+    btnVerbose.onclick = async () => {
+      const on = btnVerbose.classList.contains('btn-primary');
+      const want = on ? 'normal' : 'verbose';
+      try {
+        await call('SetLogLevel', want);
+        setLogLevel(want);          // 日志页滑块
+        updateVerboseToggle(want);  // 本按钮
+        toast('日志档位：' + want, (LEVEL_BLURB[want] || '') + '（已记住这一档）', 'success');
+      } catch (e) { fail(e); }
+    };
+  }
   // ── 历史连接（展开区） ──
   const histBtn = document.getElementById('btnConnHist');
   if (histBtn) histBtn.onclick = () => setConnHistOpen(!histOpen);
@@ -3247,10 +3365,30 @@ function wire() {
   // 规则页
   document.getElementById('btnRuleAdd').onclick = () => ruleForm(null);
 
-  // 设置页
+	// 设置页
   document.getElementById('btnSaveSettings').onclick = () => saveSettings();
+  // 托盘流量图（外观卡）：**即时生效**（不用点保存）—— 拨完就换图标。
+  // 失败就把勾选拨回去，别让界面停在一个没生效的状态（与其它开关同一个约定）。
+  const trayTraffic = document.getElementById('setTrayTraffic');
+  if (trayTraffic) {
+    trayTraffic.onchange = async () => {
+      const on = trayTraffic.checked;
+      try {
+        await call('SetTrayTraffic', on);
+        toast('托盘图标：' + (on ? '实时流量图' : '默认图标'),
+              on ? '上行/下行两根柱，每秒更新' : '', 'success');
+      } catch (e) {
+        fail(e);
+        trayTraffic.checked = !on;
+      }
+    };
+  }
   document.getElementById('btnResetSettings').onclick = () => resetSettings();
   document.getElementById('btnOpenConfig').onclick = () => call('OpenConfigFile').catch(fail);
+  document.getElementById('btnOpenDir').onclick = () => call('OpenProgramDir').catch(fail);
+  // 「打开日志目录」在**设置 › 文件与日志**卡里（与文件档同处），不在日志页：
+  // 看日志时用不到它；“要把日志发出去/看看原文”时才找得到 —— 跟日志档位是同一件事。
+  document.getElementById('btnOpenLog').onclick = () => call('OpenLogDir').catch(fail);
   document.getElementById('btnOpenDir').onclick = () => call('OpenProgramDir').catch(fail);
   wireAbout();
   document.getElementById('btnExportCfg').onclick = async () => {

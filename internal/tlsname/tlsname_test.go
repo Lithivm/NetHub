@@ -187,3 +187,23 @@ func TestNoPanicOnGarbage(t *testing.T) {
 		_, _ = HTTP(b)
 	}
 }
+
+// Host: 是一个 IP 字面量时**没有名字信息**，不能当域名学进名字表。
+//
+// 实证（2026-10-20）：curl 访问 http://172.30.4.217/ 时 Host 头就是那个 IP，
+// 于是名字表被写成 `172.30.4.217 → 172.30.4.217`，日志里出现
+// `172.30.4.217(172.30.4.217):80` 这种废话；更糟的是这条“假名字”还会被当成
+// 已知名字送进通配规则去匹配。
+func TestHTTPHostIPLiteralIsNotAName(t *testing.T) {
+	for _, host := range []string{"172.30.4.217", "172.30.4.217:80", "10.100.100.99:8080", "[::1]", "fe80::1%eth0"} {
+		req := "GET / HTTP/1.1\r\nHost: " + host + "\r\n\r\n"
+		if name, ok := HTTP([]byte(req)); ok {
+			t.Errorf("Host: %s 是 IP 字面量，不该被当成域名（拿到 %q）", host, name)
+		}
+	}
+	// 真域名照旧
+	req := "GET / HTTP/1.1\r\nHost: opm.his.com:8443\r\n\r\n"
+	if name, ok := HTTP([]byte(req)); !ok || name != "opm.his.com" {
+		t.Errorf("真域名要照常认出来，得到 %q, %v", name, ok)
+	}
+}

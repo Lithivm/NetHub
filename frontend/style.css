@@ -740,6 +740,8 @@ html.is-tray *::after {
 /* ═══════════════ 表单 ═══════════════ */
 
 .form { gap: var(--s3); }
+/* 卡片内的小分隔：一个卡里装两组内容时用（比拆成两张单薄的小卡好看，设置页卡片已经很多） */
+.form-div { height: 1px; background: var(--hairline); margin: var(--s2) 0; }
 .field { display: flex; flex-direction: column; gap: var(--s1); }
 .field > label { font-size: var(--fs-sm); font-weight: 600; color: var(--ink); }
 .field > label em, .check em {
@@ -763,6 +765,9 @@ html.is-tray *::after {
   box-shadow: 0 0 0 3px var(--primary-ring);
 }
 .input::placeholder { color: var(--muted-soft); }
+/* 设置页里的下拉：不撑满整行 —— 选项就那么几个字，满宽会看着像个文本输入框。
+   只作用于 select，不影响同一套 .input 的文本框 / textarea。 */
+.field select.input { max-width: 260px; }
 .input-sm { min-width: 160px; }
 .input.mono { font-family: var(--font-mono); font-size: var(--fs-xs); }
 .textarea {
@@ -1264,3 +1269,10 @@ html.theme-anim .seg3-thumb { transition: transform 220ms var(--ease-soft) !impo
 }
 .seg3-btn.is-active { color: var(--on-primary); }
 .seg3-btn:not(.is-active):hover { color: var(--ink); }
+
+/* 连接明细里的「结束」按钮：靠右、不跟那行等宽文字的基线打架 */
+.conn-detail .cline .conn-kill {
+  margin-left: auto;
+  padding: 2px var(--s2);
+  font-family: inherit; font-size: var(--fs-xs); line-height: 1.4;
+}

@@ -106,6 +106,15 @@ type connState struct {
 	fakeName string
 	realDst  atomic.Value // net.IP：本机解析出的真实 IP（未解析到时为 nil）
 
+	// killMu 保护下面三个字段：用户**手动结束一条连接**用（不在包路径上，所以加锁不影响性能）。
+	//
+	// c   = 应用侧那条（relay accept 来的）；up = 上游侧（拨通后才有，拨号期间为 nil）。
+	// killed = 已经结束过了（防手滑连点，也防“拨号期间点结束”后白连一条上游）。
+	killMu sync.Mutex
+	c      net.Conn
+	upConn net.Conn
+	killed bool
+
 	last    atomic.Int64  // unix nano：最后一次看到包/数据的时间
 	up      atomic.Uint64 // 应用 → 目标 的字节（直连只能统计出方向）
 	down    atomic.Uint64 // 目标 → 应用 的字节
@@ -154,6 +163,42 @@ func (st *connState) displayTarget() net.IP {
 
 func (st *connState) fail(msg string) { st.errText.Store(msg) }
 
+// setClient 登记“应用侧那条连接”（用户手动结束它时要用）。
+func (st *connState) setClient(c net.Conn) {
+	if st == nil || c == nil {
+		return
+	}
+	st.killMu.Lock()
+	if st.killed {
+		// 用户在建链路期间已经点了结束：直接把它关了，不往下跑
+		st.killMu.Unlock()
+		c.Close()
+		return
+	}
+	st.c = c
+	st.killMu.Unlock()
+}
+
+// setUpstream 登记上游连接；返回值表示“已经被用户结束过了”（调用方要立刻收摊）。
+//
+// 为什么需要这个返回值：拨号要几百毫秒到几秒，用户完全可能在这段时间点“结束”。
+// 不告诉调用方的话，拨通后会把一条已经没人要的上游会话留在池子/协程里。
+func (st *connState) setUpstream(up net.Conn) bool {
+	if st == nil {
+		return false
+	}
+	st.killMu.Lock()
+	defer st.killMu.Unlock()
+	if st.killed {
+		if up != nil {
+			up.Close()
+		}
+		return true
+	}
+	st.upConn = up
+	return false
+}
+
 func (st *connState) err() string {
 	if v, ok := st.errText.Load().(string); ok {
 		return v
@@ -182,6 +227,21 @@ func (e *Engine) finish(st *connState) {
 	// 幂等性由**上面那次 CAS** 保证：只有把 ended 从 false 翻成 true 的那一条路径会走到这里，
 	// 所以 janitor 回收同一条条目时那次 CAS 一定失败，不会重复计数。
 	e.noteStatEnd(st)
+	// 直连/阻断的连接不走中转，也就永远不会有一行 close —— “这条直连了多少字节、
+	// 活了多久”在日志里查不到。归 verbose（normal 只留开头那行 [直连]/[阻断]，不翻倍）。
+	if e.bus.Verbose() && st.action != rules.ActionChain && !st.self {
+		e.mu.Lock()
+		procName, pid, action := st.procName, st.pid, st.action
+		dst, dport := st.dst, st.dport
+		e.mu.Unlock()
+		kind := "direct.done"
+		if action == rules.ActionBlock {
+			kind = "block.done"
+		}
+		e.bus.Detail("%s: %s → %s ↑%s ↓%s dur=%dms", kind, connWho(procName, pid),
+			e.connTarget(dst, dport), humanBytes(st.up.Load()), humanBytes(st.down.Load()),
+			time.Since(st.start).Milliseconds())
+	}
 	// 只有建条目时**真的加过**活跃数的那条才扣：
 	// 直连/阻断的条目以前不加只扣（用了 block 规则后，界面“活跃”会被持续偷走）。
 	if !st.counted {
@@ -391,7 +451,10 @@ func (e *Engine) logStatsSummary() {
 	if e.fake != nil {
 		fakeUsed, fakeCap = e.fake.Stats()
 	}
-	e.bus.Info("stats: total=%d new=%d active=%d names=%d fake=%d/%d chain=%s",
+	// 周期快照：这是**仪表盘数据**（界面上的连接/名字表/假 IP 池本来就显示着），
+	// 不是“刚发生了什么事”—— 按 Proxifier 的三档定义归 verbose。
+	// 要看它时切 verbose（local/memwatch.ps1 就是这么采样的）。
+	e.bus.Detail("stats: total=%d new=%d active=%d names=%d fake=%d/%d chain=%s",
 		total, total-prev, active, names, fakeUsed, fakeCap, b.String())
 }
 
@@ -862,7 +925,7 @@ func (e *Engine) Start() error {
 		return fmt.Errorf("没有需要拦截的规则（只填了直连规则时无事可做）")
 	}
 	if fakeRange != nil {
-		e.bus.Info("DNS 接管：假 IP 段 %s 已并入过滤器", fakeRange)
+		e.bus.Debug("DNS 接管：假 IP 段 %s 已并入过滤器", fakeRange)
 	}
 	// 汇总写一行，**完整原文只在 debug 档里**（见 DumpState —— 切档时也会补一份，
 	// 不再只有启动那一下能看到）。
@@ -900,7 +963,7 @@ func (e *Engine) Start() error {
 	// 规则表 / 链表 / 过滤器原文这些**装配信息**现在由 DumpState 统一写（debug 档）：
 	// 启动时调一次，切档时再调一次 —— 两处共用一份实现，不会再“只有重启才看得到”。
 	if e.cfg.BuiltinDirectEnabled() {
-		e.bus.Info("builtin.direct: tcp dport=%d 直连（Windows 更新传递优化；关掉：tuning.builtin_direct_disabled: true）",
+		e.bus.Debug("builtin.direct: tcp dport=%d 直连（Windows 更新传递优化；关掉：tuning.builtin_direct_disabled: true）",
 			builtinDirectPort)
 	}
 
@@ -913,7 +976,7 @@ func (e *Engine) Start() error {
 	if len(handles) > 1 {
 		// 分片是**非默认**状态（默认单句柄）：开着的时候值得在 normal 档说一声 ——
 		// 否则现场看到“多核都吃满”会以为是别的东西。
-		e.bus.Info("engine.shards: %d 个包循环（每片一个句柄；改回单线程：perf.cfg 写 shards=1）", len(handles))
+		e.bus.Debug("engine.shards: %d 个包循环（每片一个句柄；改回单线程：perf.cfg 写 shards=1）", len(handles))
 	}
 	// 性能探针（perf.cfg 打开时才真的做事）：分层读数的输出循环 + 只读嗅探句柄。
 	// 放这里是因为嗅探要**复用主过滤器** —— 它必须和主句柄看同一批包，否则那一组数不对应。
@@ -976,9 +1039,9 @@ func (e *Engine) Start() error {
 			if dh != nil {
 				if e.cfg.DNSBlackboxEnabled() {
 					e.dnsBox = openDNSBlackbox(dnsBlackboxPath(), 4<<20)
-					e.bus.Info("DNS 接管：黑匣子已开启（%s）—— 每个查询/每次回答都记在里面", dnsBlackboxPath())
+					e.bus.Debug("DNS 接管：黑匣子已开启（%s）—— 每个查询/每次回答都记在里面", dnsBlackboxPath())
 				}
-				e.bus.Info("dns.takeover: started observe=shared-sniff inject=filter-false range=%s"+
+				e.bus.Debug("dns.takeover: started observe=shared-sniff inject=filter-false range=%s"+
 					"（只答命中通配规则的名字：A 给假 IP；其余类型一律答“没有这条记录”——"+
 					"AAAA 是防应用走 IPv6 绕过我们，其它类型是防 SVCB/HTTPS 的 ipv4hint 把真实地址漏出去）", e.fake.Range())
 				e.startLoop("dnsTakeoverGuard", e.dnsTakeoverGuard)
@@ -1236,6 +1299,23 @@ func (e *Engine) acceptLoop() {
 	}
 }
 
+// resolveModeFor 决定一条连接的解析策略：全局 domain_resolve + domain_resolve_local 白名单。
+//
+// 抽成函数是为了能单测（它决定“域名是本机解还是交给上游解”，现场最容易配错的地方）：
+//   - 白名单命中 → 一律 local（压过全局策略）
+//   - 例外：没有域名（直接按 IP 连）时白名单无意义
+//   - 假 IP 且本机解不出真实 IP 的情况不在这里 —— 那种只能交给上游（调用方另有分支）
+func (e *Engine) resolveModeFor(host string, hasName bool) string {
+	mode := e.cfg.DomainResolveMode()
+	if hasName && e.cfg.ForceLocalResolve(host) {
+		if mode != "local" {
+			e.bus.Detail("resolve.force_local: name=%s（命中 domain_resolve_local，按本机解析；全局策略是 %s）", host, mode)
+		}
+		return "local"
+	}
+	return mode
+}
+
 // dialUpstream 建立到目标的上游连接。
 //
 // 一条链可能有多个上游（故障转移/轮询/随机）：按策略拿候选顺序，依次试，
@@ -1247,6 +1327,29 @@ func (e *Engine) acceptLoop() {
 //     所以它直接决定“业务等多久才换下一条”。老的硬编码 10s 是实测 TTFB 偏高的主因。
 //   - 总预算：一整次连接最多花多久，防止候选多时逐个等满。
 //     拒绝型失败（端口不通）只花几毫秒，所以不会触发截断；只有超时型才吃预算。
+//
+// logUpstreamPick 记一行“这条连接实际用了哪个上游”（verbose 档）。
+//
+// 以前这一片完全是空白：链里配了多条上游、又开着故障转移/竞速/预热池时，
+// 事后没有人知道流量到底走了谁 —— “两条上游都是通的，为什么这条特别慢”无从查起。
+// 地址用 maskUpstream（保留协议/主机/端口、去掉凭据），日志可以往外发。
+func (e *Engine) logUpstreamPick(ch config.Chain, idx int, warm bool, lat time.Duration) {
+	if !e.bus.Verbose() {
+		return
+	}
+	raws := e.cfg.UpstreamsResolved(ch)
+	raw := "?"
+	if idx >= 0 && idx < len(raws) {
+		raw = maskUpstream(raws[idx])
+	}
+	how := "现拨"
+	if warm {
+		how = "预热会话"
+	}
+	e.bus.Detail("upstream.pick: chain=%s upstream=#%d/%d %s %s lat_ms=%d",
+		ch.Name, idx+1, len(raws), raw, how, lat.Milliseconds())
+}
+
 func (e *Engine) dialUpstream(ch config.Chain, dst net.IP, dport uint16) (net.Conn, error) {
 	return e.dialUpstreamKeyed(ch, dst, dport, "")
 }
@@ -1336,6 +1439,7 @@ func (e *Engine) tryUpstream(ch config.Chain, raw string, idx int, dst net.IP, d
 	if err == nil {
 		// 真拨通了：这是比探测更硬的证据，可以直接把状态正过来（也顺带消掉假警报）
 		e.markUp(ch.Name, idx, true, lat, "", false)
+		e.logUpstreamPick(ch, idx, false, lat)
 		return c, nil, ""
 	}
 	// 失败：只升级“疑似”，等下一次探测确认。否则一条坏业务目标
@@ -1398,7 +1502,7 @@ func (e *Engine) dialRacing(ch config.Chain, raws []string, cands []int,
 			rest <- dialAttempt{c, err, msg}
 		}(idx)
 	}
-	e.bus.Info("链 %s：第一条上游还没连上（等满 %.0fms），并发试其余 %d 条",
+	e.bus.Detail("链 %s：第一条上游还没连上（等满 %.0fms），并发试其余 %d 条",
 		ch.Name, race.Seconds()*1000, n)
 
 	errs := []string{}
@@ -1471,6 +1575,8 @@ func (e *Engine) handleConn(c net.Conn) {
 	// 看门狗：relay 确实收到了这条连接（这一步以前没有任何记录，
 	// 导致“包没到 relay”这种故障在日志里完全看不出来）。
 	st.relayed.Store(true)
+	// 登记应用侧连接：用户在连接列表里点「结束」时要能把它关掉。
+	st.setClient(c)
 	// 建链耗时（握手 + 认证 + CONNECT）单独量：一条连接慢到底是“上游慢”
 	// 还是“传输慢”，只看总耗时是分不清的 —— 专业日志（HAProxy 的 Tc、squid 的 %tr）也都分开记。
 	dialStart := time.Now()
@@ -1512,12 +1618,15 @@ func (e *Engine) handleConn(c net.Conn) {
 			//     看起来像“这条规则什么都不拦”—— 而它刚刚才拦过）；
 			//  ② 应用第二次直接用缓存里的**真实 IP** 连过来时，也能按名字命中这条规则。
 			e.noteRealIP(name, real)
-			e.bus.Info("DNS 接管：假 IP %s → %s 的真实 IP %s", st.fakeName, name, real)
+			e.bus.Detail("DNS 接管：假 IP %s → %s 的真实 IP %s", st.fakeName, name, real)
 		} else {
-			e.bus.Info("DNS 接管：假 IP %s → %s 本机解不开，交给上游解析", st.dst, name)
+			e.bus.Detail("DNS 接管：假 IP %s → %s 本机解不开，交给上游解析", st.dst, name)
 		}
 	}
 	dialDst := st.displayTarget() // 假 IP 已解析则用真实 IP，否则保持原地址
+	// “域名→IP”这一段到此结束：它是本机解析（可能走 DNS），与“连上游”是两件事。
+	// 两者分开量，慢的时候才知道该查 DNS 还是查上游（见下方 conn.stage / close 行）。
+	resolveEnd := time.Now()
 
 	// 假 IP 阶段只能按“名字”选链，可能把本该按 IP 走的连接选错
 	// （宽通配如 main.*.com 抢走 10.100.100.0/24 的连接）。真实 IP 到手后，
@@ -1527,7 +1636,7 @@ func (e *Engine) handleConn(c net.Conn) {
 			if chain2, act2, hit := e.ruleSet().MatchName(host, real, st.dport, st.procName); hit && chain2 != st.chain {
 				switch act2 {
 				case rules.ActionChain:
-					e.bus.Info("route.fixup: target=%s real_ip=%s %s → %s（真实 IP 命中更靠前的规则）",
+					e.bus.Detail("route.fixup: target=%s real_ip=%s %s → %s（真实 IP 命中更靠前的规则）",
 						host, real, st.chain, chain2)
 					st.chain = chain2
 					if c2, ok2 := e.cfg.ChainByName(chain2); ok2 {
@@ -1541,7 +1650,7 @@ func (e *Engine) handleConn(c net.Conn) {
 			}
 		}
 	}
-	mode := e.cfg.DomainResolveMode()
+	mode := e.resolveModeFor(host, hasName)
 	var up net.Conn
 	var err error
 	tryName := func() bool {
@@ -1550,7 +1659,7 @@ func (e *Engine) handleConn(c net.Conn) {
 		}
 		up, err = e.dialViaName(ch, host, st.dport)
 		if err == nil {
-			e.bus.Info("[%s] 用域名 %s 建隧道（交给上游解析）", st.chain, host)
+			e.bus.Detail("[%s] 用域名 %s 建隧道（交给上游解析）", st.chain, host)
 			return true
 		}
 		return false
@@ -1558,7 +1667,7 @@ func (e *Engine) handleConn(c net.Conn) {
 	// 假 IP 且本机解不开：只能交给上游（不能拿假 IP 当目标）。
 	// 其余情况保持原有语义：按 DomainResolve 配置走 local / upstream / auto。
 	if e.isFakeIP(st.dst) && st.realTarget() == nil {
-		e.bus.Info("[%s] 目标 %s 是假 IP（无真实 IP），只能交给上游解析域名 %s", st.chain, st.dst, host)
+		e.bus.Detail("[%s] 目标 %s 是假 IP（无真实 IP），只能交给上游解析域名 %s", st.chain, st.dst, host)
 		tryName()
 	} else {
 		switch {
@@ -1571,7 +1680,7 @@ func (e *Engine) handleConn(c net.Conn) {
 		default: // local / auto：先用本机解析出的 IP
 			up, err = e.dialUpstreamKeyed(ch, dialDst, st.dport, st.app.String())
 			if err != nil && mode == "auto" && hasName {
-				e.bus.Info("[%s] 按 IP %s 连不上（%v），改用域名 %s 交给上游再试", st.chain, dialDst, err, host)
+				e.bus.Detail("[%s] 按 IP %s 连不上（%v），改用域名 %s 交给上游再试", st.chain, dialDst, err, host)
 				tryName()
 			}
 		}
@@ -1614,16 +1723,30 @@ func (e *Engine) handleConn(c net.Conn) {
 		return
 	}
 	defer up.Close()
+	// 拨号花了多少秒都正常：用户可能在这期间点了「结束」。
+	// 那就不该再开两条拷贝协程，直接把刚拨通的上游放下走人。
+	if st.setUpstream(up) {
+		e.finish(st)
+		return
+	}
 
-	dialMs := time.Since(dialStart).Milliseconds()
+	dialEnd := time.Now()
+	dialMs := dialEnd.Sub(dialStart).Milliseconds()
+	resolveMs := resolveEnd.Sub(dialStart).Milliseconds()
+	handshakeMs := dialEnd.Sub(resolveEnd).Milliseconds()
 
-	// 不再单记一行 relay.up：它只是中间态，成功与否看 relay.done（字节数）、
-	// 失败看 tunnel.down；每条连接两行（intercept 开始 / relay.done 结束）就够现场用，
-	// 也跟 Proxifier “一条连接一行”的粒度对得上，不再把日志刷成三段。
+	// 不再单记一行 relay.up：它只是中间态，成功与否看 close（字节数）、
+	// 失败看 tunnel.down；每条连接两行（open 开始 / close 结束）就够现场用，
+	// 也跟 Proxifier “一条连接 open/close”的粒度对得上，不再把日志刷成三段。
 
 	done := make(chan struct{}, 2)
-	go func() { copyAndClose(up, c, &st.up, e.tunTotal(st, true)); done <- struct{}{} }()
-	go func() { copyAndClose(c, up, &st.down, e.tunTotal(st, false)); done <- struct{}{} }()
+	// 目标**首个响应字节**的时刻（0 = 到关闭时目标一字未回）。
+	// 只记下行：上行那侧的第一个字节是应用刚发的请求，它只能证明“应用很积极”，
+	// 证明不了服务端多久才应 —— 那正是排查“连上了但就是慢”要看的东西。
+	var firstByte atomic.Int64
+	markFirst := func() { firstByte.CompareAndSwap(0, time.Now().UnixNano()) }
+	go func() { copyAndClose(up, c, &st.up, e.tunTotal(st, true), nil); done <- struct{}{} }()
+	go func() { copyAndClose(c, up, &st.down, e.tunTotal(st, false), markFirst); done <- struct{}{} }()
 	<-done
 
 	e.finish(st)
@@ -1637,10 +1760,24 @@ func (e *Engine) handleConn(c net.Conn) {
 			e.mu.Unlock()
 		}
 	}
-	e.connInfo(st.self, "relay.done: chain=%s%s target=%s:%d up=%s down=%s tc_ms=%d ms=%d", st.chain,
-		connLogCtx(st.ruleNo, st.ruleName, st.procName, st.pid), dialDst, st.dport,
+	// 与 open 同形（Proxifier 的 open/close 也是同一前缀）：
+	//	close: curl.exe (12376) → main.his.com(172.30.4.217):80 via etyy ↑76 B ↓279 B 884ms/997ms
+	// 前一个时间是"连上游（含域名解析）"，后一个是"从发起到收尾"。
+	e.connInfo(st.self, "close: %s → %s via %s ↑%s ↓%s %dms/%dms",
+		connWho(st.procName, st.pid), e.connTargetDial(st.dst, dialDst, st.dport), st.chain,
 		humanBytes(st.up.Load()), humanBytes(st.down.Load()),
 		dialMs, time.Since(st.start).Milliseconds())
+	// verbose：把“慢在哪一步”分开 —— 域名解析 / 连上游握手 / 目标首个响应。
+	// normal 的 close 只有一个总数，事后分不清该查 DNS、查上游还是查服务端。
+	if !st.self && e.bus.Verbose() {
+		first := "未响应"
+		if fb := firstByte.Load(); fb > 0 {
+			first = fmt.Sprintf("%dms", time.Unix(0, fb).Sub(dialEnd).Milliseconds())
+		}
+		e.bus.Detail("conn.stage: %s → %s via %s resolve=%dms dial=%dms first_byte=%s total=%dms",
+			connWho(st.procName, st.pid), e.connTargetDial(st.dst, dialDst, st.dport), st.chain,
+			resolveMs, handshakeMs, first, time.Since(st.start).Milliseconds())
+	}
 }
 
 // connInfo 连接类日志的分流：真实应用流量走 normal，**我们自己的探针走 verbose**。
@@ -1659,13 +1796,55 @@ func (e *Engine) connInfo(self bool, format string, a ...any) {
 	e.bus.Info(format, a...)
 }
 
+// KillConn 手动结束一条连接（连接列表里点「结束」）。
+//
+// 现场诉求：这条连接卡死了（远端重启过、会话粘在一条坏上游上），而应用自己要等到
+// 超时才肯重连。关掉两端 → relay 的两条拷贝协程自然返回 → 走正常 finish
+// （统计/历史/日志都齐，与“对端断开”同一条路径，不特殊处理）。
+//
+// **不动判定**：应用下一拍会重新建连，走同一套规则 —— 这才是现场要的“重连”。
+func (e *Engine) KillConn(sport uint16) error {
+	e.mu.RLock()
+	st := e.conns[sport]
+	e.mu.RUnlock()
+	if st == nil || st.ended.Load() {
+		return fmt.Errorf("这条连接已经结束了（列表可能刚刷新）")
+	}
+	st.killMu.Lock()
+	if st.killed {
+		st.killMu.Unlock()
+		return fmt.Errorf("这条连接已经结束了")
+	}
+	c, up := st.c, st.upConn
+	if c == nil && up == nil {
+		st.killMu.Unlock()
+		return fmt.Errorf("这条连接不走中转（直连/阻断/还在建链），结束不了它")
+	}
+	st.killed = true
+	st.killMu.Unlock()
+
+	// 记一行（normal 档）：不写的话，现场会把“我手动结束的”当成网络断了，
+	// 然后去查上游/驱动 —— 那是 2026-10 实际踩过的排查弯路。
+	e.connInfo(st.self, "conn.kill: %s → %s via %s ↑%s ↓%s %dms by=user",
+		connWho(st.procName, st.pid), e.connTargetDial(st.dst, st.displayTarget(), st.dport), st.chain,
+		humanBytes(st.up.Load()), humanBytes(st.down.Load()), time.Since(st.start).Milliseconds())
+
+	if up != nil {
+		up.Close() // 先断上游：让它那侧也收到 FIN，不留下“半死”的会话
+	}
+	if c != nil {
+		c.Close() // 再断应用：应用立刻看到断开，不等超时
+	}
+	return nil
+}
+
 // copyAndClose 单向拷贝并在结束后关闭写端（半关闭，双向都能正常收尾）。
 //
 // counter = 这条连接的字节数（界面按连接显示）；total = 走链路的字节总数
 // （顶栏流量图，见 engine 的 tunUp/tunDown 注释）。两个都要加：前者是“一条多少”，
 // 后者是“一共多少”——短连接结束时前者就没人看了，后者才是曲线的基础。
 // total 可以是 nil：我们自己的探针不计入总量（见 tunTotal）。
-func copyAndClose(dst, src net.Conn, counter, total *atomic.Uint64) {
+func copyAndClose(dst, src net.Conn, counter, total *atomic.Uint64, onFirst func()) {
 	buf := make([]byte, 32*1024)
 	add := func(n int) {
 		counter.Add(uint64(n))
@@ -1676,6 +1855,9 @@ func copyAndClose(dst, src net.Conn, counter, total *atomic.Uint64) {
 	for {
 		n, err := src.Read(buf)
 		if n > 0 {
+			if onFirst != nil {
+				onFirst() // 首个字节（并发安全由调用方的 CAS 保证；多调几次无妨）
+			}
 			if _, werr := dst.Write(buf[:n]); werr != nil {
 				add(n)
 				break
@@ -2268,7 +2450,7 @@ func (e *Engine) rebuildDynFilter() {
 				close(oldStop)
 			}
 			oldH.Close()
-			e.bus.Info("wildcard: filter.remove reason=no-matched-ip")
+			e.bus.Debug("wildcard: filter.remove reason=no-matched-ip")
 		}
 		return
 	}
@@ -2553,7 +2735,7 @@ func (e *Engine) learnFromHandshake(res tlsname.Result, dst net.IP) {
 		// 但同一个域名每次握手都重复说一遍没意义（实测 22 分钟里刷了十几行）：
 		// 它是个**稳定属性**，不是“刚发生的事故” —— 每个名字 10 分钟说一次、且降到 INFO。
 		if e.noteOnce("ech:"+res.Name, 10*time.Minute) {
-			e.bus.Info("TLS 嗅探：%s 用了 ECH（加密的 ClientHello）—— 真实目标名看不见，"+
+			e.bus.Detail("TLS 嗅探：%s 用了 ECH（加密的 ClientHello）—— 真实目标名看不见，"+
 				"通配域名对它无效（具体域名规则不受影响）", res.Name)
 		}
 		e.names.Set(res.Name, []string{dst.String()}, dnsmap.PrioObserved)
@@ -3217,25 +3399,43 @@ func (e *Engine) ProcPath(pid uint32) string {
 	return e.proc.FullPath(pid)
 }
 
-// connLogCtx 给连接级日志拼上“哪条规则、哪个进程”两项（对齐 Proxifier 日志里的 rule/进程）。
+// connWho 拼连接级日志里的“谁”：`curl.exe (12376)`。
 //
-// 拼成**独立的 key=value**（`rule=3 name="…" proc=chrome.exe pid=1234`），
-// 而不是塞进一个字段：日志是给机器和 agent 读的，拆开才能单独 grep。
-// 进程查不到就写 `proc=unknown` —— 宁可说不知道，也不要留空让人以为是空字符串。
-func connLogCtx(ruleNo int, ruleName, procName string, pid uint32) string {
-	var b strings.Builder
-	if ruleNo > 0 {
-		fmt.Fprintf(&b, " rule=%d", ruleNo)
-		if ruleName != "" {
-			fmt.Fprintf(&b, " name=%q", ruleName)
+// 对齐 Proxifier 的写法（`iexplore.exe (2972) - proxifier.com:80 open`）。
+// 进程查不到时写“未知进程” —— 宁可说不知道，也不要留空让人以为是空字符串。
+func connWho(procName string, pid uint32) string {
+	if procName == "" {
+		return "未知进程"
+	}
+	if pid == 0 { // PID 0 是空闲进程，永远不拥有 TCP 连接，打出来只会骗人
+		return procName
+	}
+	return fmt.Sprintf("%s (%d)", procName, pid)
+}
+
+// connTarget 拼连接级日志里的“目标”：名字已知就写 `名字(IP):端口`。
+//
+// 为什么要名字：现场是运维在看日志，`172.30.4.217:80` 认不出是哪个业务，
+// `main.his.com` 一眼就懂。Proxifier 每条连接都带 hostname，正是这个道理。
+func (e *Engine) connTarget(ip net.IP, dport uint16) string {
+	if n, ok := e.nameOf(ip); ok && n != "" && n != ip.String() {
+		return fmt.Sprintf("%s(%s):%d", n, ip, dport)
+	}
+	return fmt.Sprintf("%s:%d", ip, dport)
+}
+
+// connTargetDial 同 connTarget，但假 IP 只写名字。
+//
+// 假 IP（198.19.x.x）是我们自己发的临时地址，写进日志只会让现场去查一个不存在的地址；
+// 名字才是应用真正要连的东西。名字没登记时（重启前发的旧应答）老实标出来。
+func (e *Engine) connTargetDial(orig, dial net.IP, dport uint16) string {
+	if e.isFakeIP(orig) {
+		if n, ok := e.nameOf(orig); ok && n != "" {
+			return fmt.Sprintf("%s:%d", n, dport)
 		}
+		return fmt.Sprintf("%s:%d（假 IP 未登记）", orig, dport)
 	}
-	if procName != "" {
-		fmt.Fprintf(&b, " proc=%s pid=%d", procName, pid)
-	} else {
-		b.WriteString(" proc=unknown")
-	}
-	return b.String()
+	return e.connTarget(dial, dport)
 }
 
 // ruleSuffix 给“直连/阻断”那类行内日志补上规则序号（有就补）。
@@ -3326,19 +3526,17 @@ func (e *Engine) rewriteOutbound(h *divert.Handle, pkt []byte, addr *divert.Addr
 		}
 		e.mu.Unlock()
 		if !existed {
-			ctx := connLogCtx(ruleNo, ruleName, procName, pid)
-			e.routeMatchLog(sport, dst, dport, procName, pid, hitText(ruleNo, ruleName)+" → 走链 "+chain)
 			// 目标是假 IP 时，日志里要看到**域名**（否则只能看到一个 198.19.x.x 莫明其妙）
 			if e.isFakeIP(dst) {
 				if n, ok := e.nameOf(dst); ok {
 					st.fakeName = n
-					e.connInfo(st.self, "intercept: chain=%s%s target=%s fake_ip=%s port=%d action=relay", chain, ctx, n, dst, dport)
-				} else {
-					e.connInfo(st.self, "intercept: chain=%s%s target=%s:%d action=relay fake_ip=unmapped", chain, ctx, dst, dport)
 				}
-			} else {
-				e.connInfo(st.self, "intercept: chain=%s%s target=%s:%d action=relay", chain, ctx, dst, dport)
 			}
+			e.routeMatchLog(sport, dst, dport, procName, pid, hitText(ruleNo, ruleName)+" → 走链 "+chain)
+			// 对齐 Proxifier 的 open 行：谁 → 哪 → 走哪条链。
+			// 规则明细在 verbose 的 route.match 里，normal 这一行不重复写一遍。
+			e.connInfo(st.self, "open: %s → %s via %s",
+				connWho(procName, pid), e.connTargetDial(dst, dst, dport), chain)
 		}
 	} else if st := e.flow(sport); st != nil {
 		st.touch()
@@ -4039,7 +4237,7 @@ func openDivert(bus *logbus.Bus, filter string) (*divert.Handle, error) {
 		h, err := divert.Open(filter, divert.LayerNetwork, divert.PriorityDefault, divert.FlagDefault)
 		if err == nil {
 			if attempt > 1 {
-				bus.Info("WinDivert 第 %d 次尝试成功", attempt)
+				bus.Debug("WinDivert 第 %d 次尝试成功", attempt)
 			}
 			return h, nil
 		}
@@ -4054,9 +4252,9 @@ func openDivert(bus *logbus.Bus, filter string) (*divert.Handle, error) {
 		bus.Warn("WinDivert 打开失败(第 %d/6 次): %v", attempt, err)
 		out, serr := winrun.Command("sc", "start", "WinDivert").CombinedOutput()
 		if serr != nil {
-			bus.Info("  sc start WinDivert -> %s", strings.TrimSpace(string(out)))
+			bus.Debug("  sc start WinDivert -> %s", strings.TrimSpace(string(out)))
 		} else {
-			bus.Info("  已尝试启动 WinDivert 驱动服务")
+			bus.Debug("  已尝试启动 WinDivert 驱动服务")
 		}
 		time.Sleep(time.Duration(attempt) * 700 * time.Millisecond)
 	}

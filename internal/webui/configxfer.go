@@ -121,6 +121,9 @@ func (b *Backend) importConfigFromRaw(srcPath string, raw []byte) (string, error
 	if err := b.a.Cfg.BackupNow(); err != nil {
 		return "", err
 	}
+	// 本机偏好（日志档位）不跟着导入走：导入的是“要派发给谁的配置内容”，
+	// 而“这台机器看日志的习惯”是操作人刚才自己选的。
+	prefs := b.a.Cfg.LocalPrefs()
 	// ③ 落盘并生效：保持 *b.a.Cfg 这个指针不变（引擎/规则都指着它）
 	raw = ensurePathInFile(raw, b.a.Cfg.Path())
 	if err := os.WriteFile(b.a.Cfg.Path(), raw, 0o600); err != nil {
@@ -129,6 +132,13 @@ func (b *Backend) importConfigFromRaw(srcPath string, raw []byte) (string, error
 	cur, err := config.Load(b.a.Cfg.Path())
 	if err != nil {
 		return "", fmt.Errorf("导入后重新载入失败（已备份，可从 backups 目录回滚）：%w", err)
+	}
+	if cur.SetLocalPrefs(prefs) {
+		// 导入的那份档位与本机不同 -> 写回文件（否则重启后又变成导入的那份的档位）
+		if err := cur.Save(); err != nil {
+			return "", fmt.Errorf("已导入，但本机日志档位（%s）写不回去：%w", prefs.LogLevel, err)
+		}
+		b.a.Bus.Info("导入的配置里日志档位是别的值，已保留本机设置（%s）", prefs.LogLevel)
 	}
 	b.a.Cfg.ReplaceFrom(cur)
 	b.a.Bus.Info("已导入配置：%s（%d 条链，%d 条规则）", filepath.Base(srcPath), len(cur.Chains), len(cur.Routes))
