@@ -48,3 +48,6 @@ secrets.dat
 *.tmp
 *.pcap
 logs/
+
+# 日报素材：本地工作记录，与代码无关，不入库
+doc/daily-summary/
