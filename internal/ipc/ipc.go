@@ -5,7 +5,7 @@
 // 界面是 Wails/WebView2 应用，它的 Chromium 子进程在系统里固定叫 msedgewebview2.exe。
 // 现场机器上装着的 HIS/医保客户端启动器，在清理自己 WebView2 缓存时删不动文件，
 // 它的兜底动作是**按进程名把全系统的 msedgewebview2 全部 Kill**（反编译
-// DF.HIS.Launcher.exe 的 WebMainForm.DelectCache 实证：删除失败 → KillProcessByName
+// Vendor.HIS.Launcher.exe 的 WebMainForm.DelectCache 实证：删除失败 → KillProcessByName
 // ("msedgewebview2")；且启动器带管理员清单会静默提权，所以连提权进程也照杀）。
 // 界面首当其冲，而 Wails 在浏览器进程消失后直接 os.Exit(-1)、跳过所有收尾。
 // 引擎只要和界面同进程，就会被一起带走 —— 现场表现是"NetHub 整个静默消失，

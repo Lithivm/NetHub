@@ -10,8 +10,8 @@ func newFake() *Map {
 	m := New()
 	m.lookup = func(host string) ([]string, error) {
 		switch host {
-		case "main.his.com":
-			return []string{"172.30.4.217"}, nil
+		case "main.example.com":
+			return []string{"192.0.2.217"}, nil
 		default:
 			return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
 		}
@@ -22,28 +22,28 @@ func newFake() *Map {
 // 域名→IP、IP→域名 双向都要对；优先级高（规则）的名字要盖住观察来的。
 func TestSetAndLookup(t *testing.T) {
 	m := newFake()
-	if _, err := m.Resolve("main.his.com", PrioRule); err != nil {
+	if _, err := m.Resolve("main.example.com", PrioRule); err != nil {
 		t.Fatalf("解析失败: %v", err)
 	}
-	if ips := m.IPsFor("MAIN.HIS.COM"); len(ips) != 1 || ips[0] != "172.30.4.217" {
+	if ips := m.IPsFor("MAIN.EXAMPLE.COM"); len(ips) != 1 || ips[0] != "192.0.2.217" {
 		t.Errorf("域名大小写应不敏感，得到 %v", ips)
 	}
-	if name, ok := m.NameFor(net.ParseIP("172.30.4.217")); !ok || name != "main.his.com" {
+	if name, ok := m.NameFor(net.ParseIP("192.0.2.217")); !ok || name != "main.example.com" {
 		t.Errorf("IP→域名 = %q ok=%v", name, ok)
 	}
 	// 低优先级的观察结果不该盖住规则里的名字
-	m.Set("other.example", []string{"172.30.4.217"}, PrioObserved)
-	if name, _ := m.NameFor(net.ParseIP("172.30.4.217")); name != "main.his.com" {
+	m.Set("other.example", []string{"192.0.2.217"}, PrioObserved)
+	if name, _ := m.NameFor(net.ParseIP("192.0.2.217")); name != "main.example.com" {
 		t.Errorf("规则里的名字应优先，得到 %q", name)
 	}
 	// 反过来：另一个规则域名解析到同一个 IP（同优先级）—— 名字按字典序取，保证稳定
 	// （以前是“后写胜出”，改成一表重建后变成字典序；两者都能说得通，但可重现更重要：
 	//  同一个 IP 被两个规则域名共用时，不能因为我们内部写入的先后不同而改变行为）
-	m.Set("newer.example", []string{"172.30.4.217"}, PrioRule)
-	if names := m.NamesFor(net.ParseIP("172.30.4.217")); len(names) != 3 {
+	m.Set("newer.example", []string{"192.0.2.217"}, PrioRule)
+	if names := m.NamesFor(net.ParseIP("192.0.2.217")); len(names) != 3 {
 		t.Fatalf("同一个 IP 的三个名字都应该记着，得到 %v", names)
 	}
-	if name, _ := m.NameFor(net.ParseIP("172.30.4.217")); name != "main.his.com" {
+	if name, _ := m.NameFor(net.ParseIP("192.0.2.217")); name != "main.example.com" {
 		t.Errorf("同级取字典序最小，得到 %q", name)
 	}
 }
@@ -64,8 +64,8 @@ func TestResolveFailure(t *testing.T) {
 }
 
 func TestIsHostname(t *testing.T) {
-	yes := []string{"main.his.com", "a-b.c", "main.*.com", "*.his.com"}
-	no := []string{"", "10.0.0.5", "172.30.4.0/24", "127.0.0.1"}
+	yes := []string{"main.example.com", "a-b.c", "main.*.com", "*.example.com"}
+	no := []string{"", "10.0.0.5", "192.0.2.0/24", "127.0.0.1"}
 	for _, s := range yes {
 		if !IsHostname(s) {
 			t.Errorf("IsHostname(%q) 应为真", s)
@@ -76,7 +76,7 @@ func TestIsHostname(t *testing.T) {
 			t.Errorf("IsHostname(%q) 应为假", s)
 		}
 	}
-	if !IsWildcard("main.*.com") || IsWildcard("main.his.com") {
+	if !IsWildcard("main.*.com") || IsWildcard("main.example.com") {
 		t.Error("IsWildcard 判断不对")
 	}
 }
@@ -86,7 +86,7 @@ func TestStale(t *testing.T) {
 	m := newFake()
 	base := time.Now()
 	m.nowFunc = func() time.Time { return base }
-	m.Set("main.his.com", []string{"172.30.4.217"}, PrioRule)
+	m.Set("main.example.com", []string{"192.0.2.217"}, PrioRule)
 	m.nowFunc = func() time.Time { return base.Add(TTL + time.Second) }
 	if st := m.Status(); !st[0].Stale {
 		t.Error("超过 TTL 应算过期")

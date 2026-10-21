@@ -21,22 +21,22 @@ func newTestPool(t *testing.T, cidr string) *Pool {
 // 同一个名字必须**稳定**拿到同一个假 IP —— 否则连接回来时对不上名字。
 func TestAssignIsStable(t *testing.T) {
 	p := newTestPool(t, "198.19.0.0/24")
-	a1 := p.Assign("main.his.com", time.Minute)
-	a2 := p.Assign("main.his.com", time.Minute)
+	a1 := p.Assign("main.example.com", time.Minute)
+	a2 := p.Assign("main.example.com", time.Minute)
 	if a1 == nil || a2 == nil {
 		t.Fatal("分配失败")
 	}
 	if !a1.Equal(a2) {
 		t.Fatalf("同一个名字拿到了不同假 IP: %v vs %v", a1, a2)
 	}
-	if n, ok := p.NameFor(a1); !ok || n != "main.his.com" {
-		t.Fatalf("反查 = %q, %v（期望 main.his.com）", n, ok)
+	if n, ok := p.NameFor(a1); !ok || n != "main.example.com" {
+		t.Fatalf("反查 = %q, %v（期望 main.example.com）", n, ok)
 	}
-	if ip, ok := p.IPFor("main.his.com"); !ok || !ip.Equal(a1) {
+	if ip, ok := p.IPFor("main.example.com"); !ok || !ip.Equal(a1) {
 		t.Fatalf("正查 = %v, %v", ip, ok)
 	}
 	// 不同名字必须拿到不同 IP
-	b := p.Assign("opm.his.com", time.Minute)
+	b := p.Assign("opm.example.com", time.Minute)
 	if b == nil || b.Equal(a1) {
 		t.Fatalf("不同名字撞到同一个假 IP: %v", b)
 	}
@@ -56,8 +56,8 @@ func TestAssignIsStable(t *testing.T) {
 func TestSweepReclaims(t *testing.T) {
 	p := newTestPool(t, "198.19.0.0/24")
 	cur := p.nowFn()
-	a := p.Assign("a.his.com", 30*time.Second)
-	b := p.Assign("b.his.com", 10*time.Minute)
+	a := p.Assign("a.example.com", 30*time.Second)
+	b := p.Assign("b.example.com", 10*time.Minute)
 	if a == nil || b == nil {
 		t.Fatal("分配失败")
 	}
@@ -66,8 +66,8 @@ func TestSweepReclaims(t *testing.T) {
 	}
 	p.nowFn = func() time.Time { return cur.Add(31 * time.Second) }
 	gone := p.Sweep()
-	if len(gone) != 1 || gone[0] != "a.his.com" {
-		t.Fatalf("应该只回收 a.his.com，得到 %v", gone)
+	if len(gone) != 1 || gone[0] != "a.example.com" {
+		t.Fatalf("应该只回收 a.example.com，得到 %v", gone)
 	}
 	if _, ok := p.NameFor(a); ok {
 		t.Error("过期后不该还能反查出名字")
@@ -76,7 +76,7 @@ func TestSweepReclaims(t *testing.T) {
 		t.Error("没过期的不该被回收")
 	}
 	// 被回收的地址应当优先复用（减少假 IP 漂移）
-	c := p.Assign("c.his.com", time.Minute)
+	c := p.Assign("c.example.com", time.Minute)
 	if c == nil || !c.Equal(a) {
 		t.Errorf("回收的地址应优先复用：得到 %v，期望 %v", c, a)
 	}
@@ -86,9 +86,9 @@ func TestSweepReclaims(t *testing.T) {
 func TestAssignRenews(t *testing.T) {
 	p := newTestPool(t, "198.19.0.0/24")
 	cur := p.nowFn()
-	ip := p.Assign("x.his.com", 30*time.Second)
+	ip := p.Assign("x.example.com", 30*time.Second)
 	p.nowFn = func() time.Time { return cur.Add(20 * time.Second) }
-	again := p.Assign("x.his.com", 30*time.Second)
+	again := p.Assign("x.example.com", 30*time.Second)
 	if !again.Equal(ip) {
 		t.Fatalf("续期不该换 IP: %v vs %v", again, ip)
 	}
@@ -103,13 +103,13 @@ func TestPoolExhaustion(t *testing.T) {
 	p := newTestPool(t, "198.19.0.0/28") // 16 个地址，去掉网络/广播 → 14 个可用
 	var got []net.IP
 	for i := 0; i < 14; i++ {
-		ip := p.Assign(fmt.Sprintf("n%d.his.com", i), time.Minute)
+		ip := p.Assign(fmt.Sprintf("n%d.example.com", i), time.Minute)
 		if ip == nil {
 			t.Fatalf("第 %d 个就分配失败了（容量应该够）", i)
 		}
 		got = append(got, ip)
 	}
-	if c := p.Assign("overflow.his.com", time.Minute); c != nil {
+	if c := p.Assign("overflow.example.com", time.Minute); c != nil {
 		t.Errorf("池子满了应该返回 nil，得到 %v", c)
 	}
 	// 过期回收后又能分配
@@ -180,7 +180,7 @@ func TestConcurrent(t *testing.T) {
 		go func(i int) {
 			defer func() { done <- struct{}{} }()
 			for j := 0; j < 200; j++ {
-				name := fmt.Sprintf("h%d-%d.his.com", i, j%10)
+				name := fmt.Sprintf("h%d-%d.example.com", i, j%10)
 				ip := p.Assign(name, time.Minute)
 				if ip == nil {
 					continue

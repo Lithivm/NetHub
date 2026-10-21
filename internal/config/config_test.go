@@ -57,7 +57,7 @@ func TestNormalizeTargets(t *testing.T) {
 			out: []string{"10.1.1.0/24"}, dup: []string{"10.1.1.0/24"}},
 		{name: "区间与 /32 重复", in: "10.1.1.1-10.1.1.1 10.1.1.1",
 			out: []string{"10.1.1.1/32"}, dup: []string{"10.1.1.1/32"}},
-		{name: "带横线的域名不当区间（关键回归）", in: "main-1.his.com", out: []string{"main-1.his.com"}},
+		{name: "带横线的域名不当区间（关键回归）", in: "main-1.example.com", out: []string{"main-1.example.com"}},
 		{name: "区间一侧越界：报错要指明是哪一侧", in: "10.1.1.0-10.1.1.300", err: `"10.1.1.300"`},
 		{name: "只有一根横线：要说清为什么不是区间", in: "- 10.1.1.1", err: "单独的横线"},
 	}
@@ -723,16 +723,16 @@ func TestRouteEnabled(t *testing.T) {
 	c.Routes = nil
 
 	// 同一段内网地址，两条规则指向不同链（多环境现场就是这么用的）
-	if err := c.AddRoute(Route{Name: "环境A", Targets: []string{"172.30.4.0/24"}, Chain: "tun"}); err != nil {
+	if err := c.AddRoute(Route{Name: "环境A", Targets: []string{"192.0.2.0/24"}, Chain: "tun"}); err != nil {
 		t.Fatalf("加环境A失败: %v", err)
 	}
-	dup := Route{Name: "环境B", Targets: []string{"172.30.4.0/24"}, Chain: "tun"}
+	dup := Route{Name: "环境B", Targets: []string{"192.0.2.0/24"}, Chain: "tun"}
 	dup.SetEnabled(false)
 	if err := c.AddRoute(dup); err != nil {
 		t.Fatalf("停用的重复规则应允许共存: %v", err)
 	}
 	// 两条都启用 —— 现在允许共存（多环境现场确实这么用），但要提示
-	if err := c.AddRoute(Route{Name: "环境C", Targets: []string{"172.30.4.0/24"}, Chain: "tun"}); err != nil {
+	if err := c.AddRoute(Route{Name: "环境C", Targets: []string{"192.0.2.0/24"}, Chain: "tun"}); err != nil {
 		t.Fatalf("重复目标不该再拦保存: %v", err)
 	}
 	if h := c.RouteHints(2); len(h) == 0 {
@@ -834,8 +834,8 @@ func TestSortPutsLocalDirectLast(t *testing.T) {
 	c.Routes = []Route{
 		{Name: "环回直连", Targets: []string{"127.0.0.1/32"}, Chain: DirectChain},
 		{Name: "本地直连", Targets: []string{"172.22.224.0/20", "192.168.199.0/24"}, Chain: DirectChain},
-		{Name: "bs 环境", Targets: []string{"10.24.67.0/24", "10.24.68.0/24"}, Chain: "tun"},
-		{Name: "窄段业务", Targets: []string{"172.16.20.172/32"}, Chain: "tun"},
+		{Name: "bs 环境", Targets: []string{"10.99.67.0/24", "10.99.68.0/24"}, Chain: "tun"},
+		{Name: "窄段业务", Targets: []string{"10.99.20.172/32"}, Chain: "tun"},
 	}
 	if !c.SortRoutesBySpecificity() {
 		t.Fatal("应该需要重排")
@@ -855,14 +855,14 @@ func TestSortPutsLocalDirectLast(t *testing.T) {
 		t.Error("已经排好时不该报有改动")
 	}
 	// 走链的私网规则不算兜底（bs 是链，排在直连类前面）
-	if selfRule(Route{Targets: []string{"10.24.67.0/24"}, Chain: "tun"}) {
+	if selfRule(Route{Targets: []string{"10.99.67.0/24"}, Chain: "tun"}) {
 		t.Error("走链的私网规则不该被当成兜底类")
 	}
 	if !selfRule(Route{Targets: []string{"192.168.199.0/24"}, Chain: DirectChain}) {
 		t.Error("直连的私网规则应算兜底类")
 	}
 	// 直连但目标是公网 → 不算兜底（那是“这些公网地址不走代理”的具体决定）
-	if selfRule(Route{Targets: []string{"39.103.146.155/32"}, Chain: DirectChain}) {
+	if selfRule(Route{Targets: []string{"203.0.113.40/32"}, Chain: DirectChain}) {
 		t.Error("直连的公网目标不该算兜底类")
 	}
 }
@@ -870,17 +870,17 @@ func TestSortPutsLocalDirectLast(t *testing.T) {
 // 规则目标可以是域名（原样保留，不换成 IP），通配暂时明确拒绝。
 func TestTargetAcceptsHostname(t *testing.T) {
 	for in, want := range map[string]string{
-		"main.his.com":    "main.his.com",
-		"MAIN.HIS.COM":    "main.his.com",
-		"opm.his.com.":    "opm.his.com",
-		"10.0.0.5":        "10.0.0.5/32",
-		"10.0.0.0/24":     "10.0.0.0/24",
-		"main-wbzxyy.cn":  "main-wbzxyy.cn",
-		"a1.b2-c3.d4.com": "a1.b2-c3.d4.com",
+		"main.example.com": "main.example.com",
+		"MAIN.EXAMPLE.COM": "main.example.com",
+		"opm.example.com.": "opm.example.com",
+		"10.0.0.5":         "10.0.0.5/32",
+		"10.0.0.0/24":      "10.0.0.0/24",
+		"main-wbzxyy.cn":   "main-wbzxyy.cn",
+		"a1.b2-c3.d4.com":  "a1.b2-c3.d4.com",
 		// 通配域名（靠观察到的 DNS 匹配）：归一化成 小写 + 单个前导 *
-		"*.HIS.com":  "*.his.com",
-		"*.his.com.": "*.his.com",
-		"*.corp":     "*.corp",
+		"*.EXAMPLE.com":  "*.example.com",
+		"*.example.com.": "*.example.com",
+		"*.corp":         "*.corp",
 	} {
 		got, err := NormalizeTarget(in)
 		if err != nil {
@@ -892,7 +892,7 @@ func TestTargetAcceptsHostname(t *testing.T) {
 		}
 	}
 	// 带星的位置随意（前缀/中间都行），只有“太宽泛或写坏”才拒绝
-	for _, ok := range []string{"db-*.his.com", "xx.*.com", "*.*.his.com"} {
+	for _, ok := range []string{"db-*.example.com", "xx.*.com", "*.*.example.com"} {
 		got, err := NormalizeTarget(ok)
 		if err != nil || got != ok {
 			t.Errorf("NormalizeTarget(%q) = %q, %v（应该原样接受）", ok, got, err)
@@ -920,11 +920,11 @@ func TestTargetAcceptsHostname(t *testing.T) {
 	}
 }
 
-// IP 通配（Proxifier 写法）：10.100.100.* = 10.100.100.0/24。
+// IP 通配（Proxifier 写法）：198.51.100.* = 198.51.100.0/24。
 func TestIPWildcard(t *testing.T) {
 	for in, want := range map[string]string{
-		"10.100.100.*": "10.100.100.0/24",
-		"172.30.4.*":   "172.30.4.0/24",
+		"198.51.100.*": "198.51.100.0/24",
+		"192.0.2.*":    "192.0.2.0/24",
 		"192.168.1.*":  "192.168.1.0/24",
 	} {
 		got, err := NormalizeTarget(in)
@@ -1014,7 +1014,7 @@ chains:
   - name: etyy
     forward: socks5://u:p@1.2.3.4:1080
 routes:
-  - targets: ["10.100.100.*"]
+  - targets: ["198.51.100.*"]
     chain: etyy
     enabled: true
 `
@@ -1032,15 +1032,15 @@ routes:
 		t.Fatalf("应有 1 条规则，实际 %d", len(c.Routes))
 	}
 	got := c.Routes[0].Targets
-	if len(got) != 1 || got[0] != "10.100.100.0/24" {
-		t.Fatalf("通配应被展开成 10.100.100.0/24，实际 %v", got)
+	if len(got) != 1 || got[0] != "198.51.100.0/24" {
+		t.Fatalf("通配应被展开成 198.51.100.0/24，实际 %v", got)
 	}
 	// 落盘时也应该是展开后的写法（下次打开不再依赖展开逻辑）
 	if err := c.Save(); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(path)
-	if !strings.Contains(string(b), "10.100.100.0/24") || strings.Contains(string(b), "10.100.100.*") {
+	if !strings.Contains(string(b), "198.51.100.0/24") || strings.Contains(string(b), "198.51.100.*") {
 		t.Errorf("保存的配置里应该是 CIDR：\n%s", b)
 	}
 }
@@ -1053,7 +1053,7 @@ chains:
   - name: etyy
     forward: socks5://u:p@1.2.3.4:1080
 routes:
-  - targets: ["172.30.4.1-172.30.4.255", "10.0.0.0-10.0.0.255"]
+  - targets: ["192.0.2.1-192.0.2.255", "10.0.0.0-10.0.0.255"]
     chain: etyy
     enabled: true
 `
@@ -1068,8 +1068,8 @@ routes:
 	got := c.Routes[0].Targets
 	// 第一个区间不含 .0，所以是精确覆盖的一串；第二个是整段，并成一条 /24
 	want := strings.Join([]string{
-		"172.30.4.1/32", "172.30.4.2/31", "172.30.4.4/30", "172.30.4.8/29",
-		"172.30.4.16/28", "172.30.4.32/27", "172.30.4.64/26", "172.30.4.128/25",
+		"192.0.2.1/32", "192.0.2.2/31", "192.0.2.4/30", "192.0.2.8/29",
+		"192.0.2.16/28", "192.0.2.32/27", "192.0.2.64/26", "192.0.2.128/25",
 		"10.0.0.0/24",
 	}, ",")
 	if strings.Join(got, ",") != want {
@@ -1079,7 +1079,7 @@ routes:
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(path)
-	if strings.Contains(string(b), "172.30.4.1-") {
+	if strings.Contains(string(b), "192.0.2.1-") {
 		t.Errorf("保存的配置里应该是展开后的 CIDR（不该留区间写法）：\n%s", b)
 	}
 	if !strings.Contains(string(b), "10.0.0.0/24") {

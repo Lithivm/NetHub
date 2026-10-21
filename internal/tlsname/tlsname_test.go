@@ -41,19 +41,19 @@ func echExt() []byte {
 func TestTLSSNI(t *testing.T) {
 	// 顺手加一个我们不关心的扩展在前面，确认偏移没错
 	other := []byte{0x00, 0x0b, 0x00, 0x02, 0x01, 0x00}
-	hello := clientHello(append(other, sniExt("MAIN.HIS.com")...))
+	hello := clientHello(append(other, sniExt("MAIN.EXAMPLE.com")...))
 
 	name, ech, ok := TLS(hello)
-	if !ok || name != "main.his.com" || ech {
-		t.Fatalf("SNI = %q ech=%v ok=%v（期望 main.his.com, false, true）", name, ech, ok)
+	if !ok || name != "main.example.com" || ech {
+		t.Fatalf("SNI = %q ech=%v ok=%v（期望 main.example.com, false, true）", name, ech, ok)
 	}
 	if !LooksLikeTLS(hello) || !Complete(hello) {
 		t.Error("应该被认成完整的 TLS 记录")
 	}
 
 	// 多个名字时取第一个（真实世界里也只有一个）
-	hello2 := clientHello(sniExt("a.his.com", "b.his.com"))
-	if n, _, ok := TLS(hello2); !ok || n != "a.his.com" {
+	hello2 := clientHello(sniExt("a.example.com", "b.example.com"))
+	if n, _, ok := TLS(hello2); !ok || n != "a.example.com" {
 		t.Errorf("多个名字取第一个，得到 %q ok=%v", n, ok)
 	}
 }
@@ -69,7 +69,7 @@ func TestTLSSNIWithECH(t *testing.T) {
 
 // 半截报文：不能 panic，也不能"自作聪明"当成没有 SNI。
 func TestTLSIncomplete(t *testing.T) {
-	hello := clientHello(sniExt("main.his.com"))
+	hello := clientHello(sniExt("main.example.com"))
 	for _, cut := range []int{0, 1, 5, 9, 20, 40, len(hello) - 1} {
 		if cut < 0 || cut > len(hello) {
 			continue
@@ -105,17 +105,17 @@ func TestTLSNoSNI(t *testing.T) {
 }
 
 func TestHTTPHost(t *testing.T) {
-	req := []byte("GET /index.do HTTP/1.1\r\nUser-Agent: x\r\nHost: MAIN.his.com:8443\r\nAccept: */*\r\n\r\n")
+	req := []byte("GET /index.do HTTP/1.1\r\nUser-Agent: x\r\nHost: MAIN.example.com:8443\r\nAccept: */*\r\n\r\n")
 	name, ok := HTTP(req)
-	if !ok || name != "main.his.com" {
-		t.Fatalf("Host = %q ok=%v（期望 main.his.com，端口要去掉）", name, ok)
+	if !ok || name != "main.example.com" {
+		t.Fatalf("Host = %q ok=%v（期望 main.example.com，端口要去掉）", name, ok)
 	}
 	if !LooksLikeHTTP(req) {
 		t.Error("应该被认成 HTTP 请求")
 	}
 	// 大小写不敏感 + 只取第一行 Host
-	req2 := []byte("POST /a HTTP/1.0\r\nhOsT: opm.his.com\r\n\r\n")
-	if n, _ := HTTP(req2); n != "opm.his.com" {
+	req2 := []byte("POST /a HTTP/1.0\r\nhOsT: opm.example.com\r\n\r\n")
+	if n, _ := HTTP(req2); n != "opm.example.com" {
 		t.Errorf("Host 大小写应不敏感，得到 %q", n)
 	}
 	// 没有 Host 头
@@ -129,12 +129,12 @@ func TestHTTPHost(t *testing.T) {
 }
 
 func TestNameDispatch(t *testing.T) {
-	r, ok := Name(clientHello(sniExt("a.his.com")))
-	if !ok || r.Kind != "tls" || r.Name != "a.his.com" {
+	r, ok := Name(clientHello(sniExt("a.example.com")))
+	if !ok || r.Kind != "tls" || r.Name != "a.example.com" {
 		t.Fatalf("TLS 分派错: %+v ok=%v", r, ok)
 	}
-	r, ok = Name([]byte("GET / HTTP/1.1\r\nHost: b.his.com\r\n\r\n"))
-	if !ok || r.Kind != "http" || r.Name != "b.his.com" {
+	r, ok = Name([]byte("GET / HTTP/1.1\r\nHost: b.example.com\r\n\r\n"))
+	if !ok || r.Kind != "http" || r.Name != "b.example.com" {
 		t.Fatalf("HTTP 分派错: %+v ok=%v", r, ok)
 	}
 	if _, ok := Name([]byte{0x99, 0x88, 0x77}); ok {
@@ -149,7 +149,7 @@ func TestNormalizeRejectsGarbage(t *testing.T) {
 			t.Errorf("normalize(%q) = %q，应该被拒", bad, got)
 		}
 	}
-	if got := normalize(" MAIN.HIS.com. "); got != "main.his.com" {
+	if got := normalize(" MAIN.EXAMPLE.com. "); got != "main.example.com" {
 		t.Errorf("正常名字要归一化，得到 %q", got)
 	}
 	long := strings.Repeat("a", 300) + ".com"
@@ -160,7 +160,7 @@ func TestNormalizeRejectsGarbage(t *testing.T) {
 
 // 乱码里随便切一刀都不能 panic（网络上什么字节都可能来）。
 func TestNoPanicOnGarbage(t *testing.T) {
-	seed := clientHello(sniExt("main.his.com"))
+	seed := clientHello(sniExt("main.example.com"))
 	var buf bytes.Buffer
 	for i := 0; i < len(seed); i++ {
 		for _, flip := range []byte{0x00, 0xff, 0x16, 0x01, 0xc0} {
@@ -190,20 +190,20 @@ func TestNoPanicOnGarbage(t *testing.T) {
 
 // Host: 是一个 IP 字面量时**没有名字信息**，不能当域名学进名字表。
 //
-// 实证（2026-10-20）：curl 访问 http://172.30.4.217/ 时 Host 头就是那个 IP，
-// 于是名字表被写成 `172.30.4.217 → 172.30.4.217`，日志里出现
-// `172.30.4.217(172.30.4.217):80` 这种废话；更糟的是这条“假名字”还会被当成
+// 实证（2026-10-20）：curl 访问 http://192.0.2.217/ 时 Host 头就是那个 IP，
+// 于是名字表被写成 `192.0.2.217 → 192.0.2.217`，日志里出现
+// `192.0.2.217(192.0.2.217):80` 这种废话；更糟的是这条“假名字”还会被当成
 // 已知名字送进通配规则去匹配。
 func TestHTTPHostIPLiteralIsNotAName(t *testing.T) {
-	for _, host := range []string{"172.30.4.217", "172.30.4.217:80", "10.100.100.99:8080", "[::1]", "fe80::1%eth0"} {
+	for _, host := range []string{"192.0.2.217", "192.0.2.217:80", "198.51.100.99:8080", "[::1]", "fe80::1%eth0"} {
 		req := "GET / HTTP/1.1\r\nHost: " + host + "\r\n\r\n"
 		if name, ok := HTTP([]byte(req)); ok {
 			t.Errorf("Host: %s 是 IP 字面量，不该被当成域名（拿到 %q）", host, name)
 		}
 	}
 	// 真域名照旧
-	req := "GET / HTTP/1.1\r\nHost: opm.his.com:8443\r\n\r\n"
-	if name, ok := HTTP([]byte(req)); !ok || name != "opm.his.com" {
+	req := "GET / HTTP/1.1\r\nHost: opm.example.com:8443\r\n\r\n"
+	if name, ok := HTTP([]byte(req)); !ok || name != "opm.example.com" {
 		t.Errorf("真域名要照常认出来，得到 %q, %v", name, ok)
 	}
 }

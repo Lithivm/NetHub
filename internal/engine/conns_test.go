@@ -227,7 +227,7 @@ func TestConnsResolveProcess(t *testing.T) {
 // 这条对应真实事故（同事机上 40 次拦截、0 次到 relay，日志却一片安静）。
 func TestRelayWatchdog(t *testing.T) {
 	e := newTestEngine()
-	st := &connState{dst: net.ParseIP("172.30.4.220"), dport: 9056, chain: "etyy",
+	st := &connState{dst: net.ParseIP("192.0.2.220"), dport: 9056, chain: "etyy",
 		action: rules.ActionChain, start: time.Now().Add(-10 * time.Second)}
 	st.touch()
 	e.mu.Lock()
@@ -263,7 +263,7 @@ func TestRelayWatchdog(t *testing.T) {
 	}
 	got := e.Conns(10, false)
 	for _, c := range got {
-		if c.Target == "172.30.4.220:9056" {
+		if c.Target == "192.0.2.220:9056" {
 			if c.State != "未送达中转" {
 				t.Errorf("界面状态 = %q，期望“未送达中转”", c.State)
 			}

@@ -5,8 +5,8 @@ import "testing"
 // IP 通配：只认“末尾一段是 *”，其余写法要给出能照着改的提示。
 func TestWildcardToCIDR(t *testing.T) {
 	ok := map[string]string{
-		"10.100.100.*": "10.100.100.0/24",
-		"172.30.4.*":   "172.30.4.0/24",
+		"198.51.100.*": "198.51.100.0/24",
+		"192.0.2.*":    "192.0.2.0/24",
 		"1.2.3.*":      "1.2.3.0/24",
 	}
 	for in, want := range ok {
@@ -22,7 +22,7 @@ func TestWildcardToCIDR(t *testing.T) {
 			t.Errorf("%s 应被识别为通配", in)
 		}
 	}
-	for _, bad := range []string{"10.*.100.5", "*", "10.100.*.5", "10.100.100.1", "10.100.100.0/24"} {
+	for _, bad := range []string{"10.*.100.5", "*", "10.100.*.5", "198.51.100.1", "198.51.100.0/24"} {
 		if IsWildcardIP(bad) {
 			t.Errorf("%s 不该被看成通配", bad)
 			continue

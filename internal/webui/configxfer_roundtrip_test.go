@@ -31,7 +31,7 @@ chains:
       strategy: failover
       probe: 30s
     - name: snzyy
-      forward: socks5+tls://10.0.0.2:10084?auth=SHQxN3FjVDBydEtRb2JHekVWUUcxV2t3a0xSUHlQQTZZS3FXVUg=
+      forward: socks5+tls://10.0.0.2:10084?auth=dGhpcy1pcy1hLWZha2UtdG9rZW4=
 routes:
     - name: 内网 A 段
       targets:
@@ -56,7 +56,7 @@ patrol:
 hosts:
     manage: true
     entries:
-        - 10.1.0.9 main.his.com
+        - 10.1.0.9 main.example.com
 tuning:
     dial_timeout: 7s
     warm_sessions: "3"
@@ -82,7 +82,7 @@ tuning:
 		t.Fatal(err)
 	}
 	// 凭据必须在里面 —— 否则"含凭据导出"是假的
-	for _, want := range []string{"p%40ss%3Aword", "SHQxN3FjVDBydEtRb2JHekVWUUcxV2t3a0xSUHlQQTZZS3FXVUg="} {
+	for _, want := range []string{"p%40ss%3Aword", "dGhpcy1pcy1hLWZha2UtdG9rZW4="} {
 		if !strings.Contains(string(exported), want) {
 			t.Errorf("导出的配置里少了凭据 %q\n%s", want, exported)
 		}

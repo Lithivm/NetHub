@@ -264,7 +264,7 @@ type RouteView struct {
 	AllowQUIC bool `json:"allowQuic"`
 	// 域名目标：解析到哪、什么时候解析的、解析不到的原因（规则页直接显示）
 	HostResolves []engine.HostResolveView `json:"hostResolves"`
-	// Wildcards 通配域名（*.his.com）当前覆盖到哪些 IP（学习自观察到的 DNS 应答）
+	// Wildcards 通配域名（*.example.com）当前覆盖到哪些 IP（学习自观察到的 DNS 应答）
 	Wildcards []engine.WildcardStat `json:"wildcards"`
 	// 规则开关（默认开）；停用的规则不进匹配、不占目标
 	Enabled bool `json:"enabled"`
@@ -309,7 +309,7 @@ type SettingsView struct {
 	RaceAfter *int `json:"raceAfter"`
 	// WarmSessions 预热会话条数：0 = 关闭（同样用指针区分“没传”）。
 	WarmSessions *int `json:"warmSessions"`
-	// DomainResolveLocal 强制本机解析的域名（一行一个，支持 `*.his.com` 通配）。
+	// DomainResolveLocal 强制本机解析的域名（一行一个，支持 `*.example.com` 通配）。
 	// 用切片而不是指针：nil = 前端没传（旧前端，不改）；空切片 = 用户清空了。
 	DomainResolveLocal []string `json:"domainResolveLocal"`
 	// AutostartDelay 开机自启的登录后延迟（秒）；nil = 前端没传 → 不改。
@@ -685,7 +685,7 @@ func (b *Backend) GetRoutes() []RouteView {
 				mine = append(mine, hr)
 			}
 		}
-		// 通配域名（*.his.com）没有“解析结果”，但有“已经学到哪些 IP”——
+		// 通配域名（*.example.com）没有“解析结果”，但有“已经学到哪些 IP”——
 		// 不显示的话，界面上看不到它到底覆盖了什么，跟“静默失效”没区别。
 		var wild []engine.WildcardStat
 		for _, st := range wildcardStats {
@@ -2115,7 +2115,7 @@ func (b *Backend) runSelfTest() {
 			// ② 没有真实目标（新装机器）才退回：hosts 里的主机 + 常见端口。
 			//
 			// ⚠ 这条路径上的端口是**猜**的，所以“全没连上”**不能说明链路有问题**：
-			// 真实事故：172.30.4.217 上的服务在 9054，而猜测列表里没有这个端口 →
+			// 真实事故：192.0.2.217 上的服务在 9054，而猜测列表里没有这个端口 →
 			// 六次全灭 → 界面报“链路有问题，上游挂了？”，但其实链路好好的（同端口
 			// 用工具直连 3/3 成功）。所以这里只能报 WARN，不能计入“有问题”的链。
 			guessed := false
@@ -2188,8 +2188,8 @@ func probeIPsForChain(cfg *config.Config, chainName string) []net.IP {
 	var out []net.IP
 	// ① 规则里写死的**单个 IP**（裸 IP 或 /32）就是真实目标，最该拿来探活。
 	//
-	// 真实例子：xaby-dev 那条规则的网段里全是大网段，但目标里有 172.16.20.172/32、
-	// 219.145.88.134/32、39.103.146.155/32 —— 以前只去 hosts 里找，找不到就报“跳过”，
+	// 真实例子：xaby-dev 那条规则的网段里全是大网段，但目标里有 10.99.20.172/32、
+	// 203.0.113.30/32、203.0.113.40/32 —— 以前只去 hosts 里找，找不到就报“跳过”，
 	// 而目标其实就摆在眼前。多个时全部返回（调用方逐个试到底：第一个可能恰好没开）。
 	for _, rt := range cfg.RoutesSnapshot() {
 		if rt.Chain != chainName {

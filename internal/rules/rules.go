@@ -79,7 +79,7 @@ type Route struct {
 	// 写死很快就错。运行时由引擎解析后通过 SetHostIPs 填进来。
 	hosts   []string
 	hostIPs []*net.IPNet
-	// wildcards 目标里的**通配域名**（*.his.com）。归一化后的后缀（如 .his.com）。
+	// wildcards 目标里的**通配域名**（*.example.com）。归一化后的后缀（如 .example.com）。
 	//
 	// 为什么不能归类进 hosts：通配域名**没法主动解析**（枚举不出来），只能等观
 	// 察到应用的 DNS 应答（见 dnsmap 与 engine 的 dnsWatch）；匹配发生在“名字”层面，
@@ -120,7 +120,7 @@ func (r Route) MatchesProc(ip net.IP, port uint16, procName string) bool {
 // MatchesName 单条规则是否命中（旧的“IP 或 名字”语义）。
 //
 // 新代码不要用它做路由决策：它会把**域名目标**和**IP 目标**混在同一层比，
-// 从而让 "main.*.com" 这类宽通配抢在 "10.100.100.0/24" 前面。
+// 从而让 "main.*.com" 这类宽通配抢在 "198.51.100.0/24" 前面。
 // 路由请用 Set.MatchName（两遍：显式 IP 优先、域名兜底）。这里只为兼容保留。
 func (r Route) MatchesName(name string, ip net.IP, port uint16, procName string) bool {
 	return r.matchIPOnly(ip, port, procName) || r.matchDomainOnly(name, ip, port, procName)
@@ -485,8 +485,8 @@ func (s *Set) MatchProc(ip net.IP, port uint16, procName string) (chain string, 
 //  2. 第一遍没命中，才让域名目标（通配按名字、具体域名按名字或已解析 IP）兜底。
 //
 // 为什么要这样：通配域名会把“反推出来的名字”匹配上，如果和 IP 目标同层比，
-// `main.*.com` 这种宽通配就会抢走本该按 `10.100.100.0/24` 走的连接（见 2026-09 的
-// main.wbzxyy.com 事故）。名字是猜出来的，IP 是硬事实 —— 能用 IP 定就用 IP。
+// `main.*.com` 这种宽通配就会抢走本该按 `198.51.100.0/24` 走的连接（见 2026-09 的
+// main.b.example.com 事故）。名字是猜出来的，IP 是硬事实 —— 能用 IP 定就用 IP。
 func (s *Set) MatchName(name string, ip net.IP, port uint16, procName string) (chain string, act Action, ok bool) {
 	chain, act, _, _, ok = s.MatchNameRule(name, ip, port, procName)
 	return chain, act, ok
@@ -696,7 +696,7 @@ func portCovered(ps []PortRange, port uint16) bool {
 
 // WildcardRanges 只取「通配域名规则」当前覆盖到的区间 —— 引擎用它拼**动态过滤器**。
 //
-// 为什么要单独一只过滤器：通配域名（*.his.com）事先不知道会解析成哪些 IP，
+// 为什么要单独一只过滤器：通配域名（*.example.com）事先不知道会解析成哪些 IP，
 // 那些 IP 不在启动时装配的静态过滤器里，包根本到不了我们手上。做法是只读
 // 嗅探应用的 DNS 应答，把学到的 IP 装进第二只（可热替换的）句柄。
 //
@@ -824,7 +824,7 @@ func parsePortRange(s string) (portRange, error) {
 
 // parseTarget 接受 "10.0.1.0/24" 或裸 IP "10.0.1.10"。
 func parseTarget(t string) (*net.IPNet, error) {
-	// IP 通配（10.100.100.*）在这里也认 —— 配置层会归一化，但规则层不该依赖
+	// IP 通配（198.51.100.*）在这里也认 —— 配置层会归一化，但规则层不该依赖
 	// “上游一定规整过”；手写/脚本组出来的规则同样能进来。
 	if netx.IsWildcardIP(t) {
 		c, err := netx.WildcardToCIDR(t)

@@ -12,11 +12,11 @@ func TestReadCacheSeesExternalChange(t *testing.T) {
 		t.Fatalf("初始不该有块: exists=%v err=%v", exists, err)
 	}
 	// 不经过我们的写入路径，直接改文件（模拟手工编辑）
-	if err := os.WriteFile(p, []byte(beginMark+"\n10.0.0.1 opm.his.com\n"+endMark+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(p, []byte(beginMark+"\n10.0.0.1 opm.example.com\n"+endMark+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	block, exists, _, err := Read()
-	if err != nil || !exists || len(block) != 1 || block[0] != "10.0.0.1 opm.his.com" {
+	if err != nil || !exists || len(block) != 1 || block[0] != "10.0.0.1 opm.example.com" {
 		t.Fatalf("外部改动没被看见（缓存没失效）: block=%v exists=%v err=%v", block, exists, err)
 	}
 }
@@ -32,7 +32,7 @@ func TestWriteInvalidatesReadCache(t *testing.T) {
 	if _, _, _, err := Read(); err != nil { // 先把缓存喂上（这是复现的前提）
 		t.Fatal(err)
 	}
-	if _, err := Apply([]string{"172.30.4.217 main.his.com"}); err != nil {
+	if _, err := Apply([]string{"192.0.2.217 main.example.com"}); err != nil {
 		t.Fatalf("Apply 失败: %v", err)
 	}
 	cacheMu.Lock()
@@ -42,7 +42,7 @@ func TestWriteInvalidatesReadCache(t *testing.T) {
 	cacheMu.Unlock()
 
 	block, exists, _, err := Read()
-	if err != nil || !exists || len(block) != 1 || block[0] != "172.30.4.217 main.his.com" {
+	if err != nil || !exists || len(block) != 1 || block[0] != "192.0.2.217 main.example.com" {
 		t.Fatalf("刚写进去却读到旧的（写入路径没有显式失效缓存）: block=%v exists=%v err=%v", block, exists, err)
 	}
 

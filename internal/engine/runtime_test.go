@@ -148,9 +148,9 @@ func TestShortDur(t *testing.T) {
 
 // rangeLabel：人读一行，含端口条件（诊断页折叠区里那份清单用它）。
 func TestRangeLabel(t *testing.T) {
-	rg := rules.Range{First: rules.IP2U(net.ParseIP("10.10.10.0")), Last: rules.IP2U(net.ParseIP("10.10.10.255"))}
+	rg := rules.Range{First: rules.IP2U(net.ParseIP("203.0.113.0")), Last: rules.IP2U(net.ParseIP("203.0.113.255"))}
 	got := rangeLabel(rg)
-	if !strings.Contains(got, "10.10.10.0") || !strings.Contains(got, "任意端口") {
+	if !strings.Contains(got, "203.0.113.0") || !strings.Contains(got, "任意端口") {
 		t.Errorf("rangeLabel = %q", got)
 	}
 	rg.Ports = []rules.PortRange{{First: 443, Last: 443}, {First: 8000, Last: 9000}}

@@ -34,15 +34,15 @@ func TestRouteMatchOnlyInVerboseTier(t *testing.T) {
 	verdict := "命中第 3 条规则「HIS 主链路（etyy）」 → 走链 etyy"
 	n := len(e.bus.Snapshot())
 
-	e.routeMatchLog(51000, net.ParseIP("10.10.10.166"), 6446, "node.exe", 6702, verdict)
+	e.routeMatchLog(51000, net.ParseIP("203.0.113.166"), 6446, "node.exe", 6702, verdict)
 	if got := newLines(e.bus, n); got != "" {
 		t.Fatalf("normal 档不该写 route.match：%q", got)
 	}
 
 	e.bus.SetLevel(logbus.LevelVerbose)
-	e.routeMatchLog(51001, net.ParseIP("10.10.10.166"), 6446, "node.exe", 6702, verdict)
+	e.routeMatchLog(51001, net.ParseIP("203.0.113.166"), 6446, "node.exe", 6702, verdict)
 	got := newLines(e.bus, n)
-	if !strings.Contains(got, "route.match: proc=node.exe pid=6702 target=10.10.10.166:6446") {
+	if !strings.Contains(got, "route.match: proc=node.exe pid=6702 target=203.0.113.166:6446") {
 		t.Errorf("verbose 档要写出谁在连哪里：%q", got)
 	}
 	if !strings.Contains(got, "走链 etyy") {
@@ -51,13 +51,13 @@ func TestRouteMatchOnlyInVerboseTier(t *testing.T) {
 
 	// 同一条连接（同源端口）的重复判定在 1 分钟内塌成一行：SYN 重传不该刷屏
 	n = len(e.bus.Snapshot())
-	e.routeMatchLog(51001, net.ParseIP("10.10.10.166"), 6446, "node.exe", 6702, verdict)
+	e.routeMatchLog(51001, net.ParseIP("203.0.113.166"), 6446, "node.exe", 6702, verdict)
 	if got := newLines(e.bus, n); got != "" {
 		t.Errorf("同一源端口 + 同一目标在窗口内只应写一行：%q", got)
 	}
 	// 另一条连接（新源端口）是另一行 —— Proxifier 也是每条连接一行
 	n = len(e.bus.Snapshot())
-	e.routeMatchLog(51002, net.ParseIP("10.10.10.166"), 6446, "node.exe", 6702, verdict)
+	e.routeMatchLog(51002, net.ParseIP("203.0.113.166"), 6446, "node.exe", 6702, verdict)
 	if got := newLines(e.bus, n); !strings.Contains(got, "route.match:") {
 		t.Errorf("换一条连接就应当再有自己的一行：%q", got)
 	}
@@ -130,29 +130,29 @@ func TestSelfProbeConnLogOnlyInVerboseTier(t *testing.T) {
 	e := newTestEngine()
 	n := len(e.bus.Snapshot())
 
-	e.connInfo(true, "open: nethub.exe (1) → 10.100.100.99:443 via sjy")
-	e.connInfo(true, "close: nethub.exe (1) → 10.100.100.99:443 via sjy ↑0 B ↓0 B 1ms/2ms")
+	e.connInfo(true, "open: nethub.exe (1) → 198.51.100.99:443 via sjy")
+	e.connInfo(true, "close: nethub.exe (1) → 198.51.100.99:443 via sjy ↑0 B ↓0 B 1ms/2ms")
 	if got := newLines(e.bus, n); got != "" {
 		t.Fatalf("normal 档不该写自己的探针连接：%q", got)
 	}
 
 	e.bus.SetLevel(logbus.LevelVerbose)
-	e.connInfo(true, "open: nethub.exe (1) → 10.100.100.99:443 via sjy")
-	if got := newLines(e.bus, n); !strings.Contains(got, "open: nethub.exe (1) → 10.100.100.99:443") {
+	e.connInfo(true, "open: nethub.exe (1) → 198.51.100.99:443 via sjy")
+	if got := newLines(e.bus, n); !strings.Contains(got, "open: nethub.exe (1) → 198.51.100.99:443") {
 		t.Errorf("verbose 档要能看到探针（否则自检排查没线索）：%q", got)
 	}
 
 	// 真实应用流量照旧：normal 档必须可见
 	n = len(e.bus.Snapshot())
-	e.connInfo(false, "close: chrome.exe (999) → 172.30.4.217:443 via etyy ↑1 B ↓2 B 5ms/9ms")
-	if got := newLines(e.bus, n); !strings.Contains(got, "close: chrome.exe (999) → 172.30.4.217:443 via etyy") {
+	e.connInfo(false, "close: chrome.exe (999) → 192.0.2.217:443 via etyy ↑1 B ↓2 B 5ms/9ms")
+	if got := newLines(e.bus, n); !strings.Contains(got, "close: chrome.exe (999) → 192.0.2.217:443 via etyy") {
 		t.Errorf("应用流量的连接必须在 normal 档可见：%q", got)
 	}
 }
 
 // 连接行对齐 Proxifier：`谁 (pid) → 目标 via 链`，名字已知时要写名字。
 //
-// 为什么：`172.30.4.217:80` 运维认不出是哪个业务，`main.his.com` 一眼就懂；
+// 为什么：`192.0.2.217:80` 运维认不出是哪个业务，`main.example.com` 一眼就懂；
 // 而 pid 0 是 Windows 的空闲进程（不可能拥有 TCP 连接），打出来只会骗人。
 func TestConnLineFormat(t *testing.T) {
 	if got := connWho("curl.exe", 12376); got != "curl.exe (12376)" {
@@ -167,12 +167,12 @@ func TestConnLineFormat(t *testing.T) {
 
 	e := newTestEngine()
 	e.names = dnsmap.New()
-	ip := net.ParseIP("172.30.4.217")
-	if got := e.connTarget(ip, 80); got != "172.30.4.217:80" {
+	ip := net.ParseIP("192.0.2.217")
+	if got := e.connTarget(ip, 80); got != "192.0.2.217:80" {
 		t.Errorf("名字不知道时只写地址：%q", got)
 	}
-	e.names.Set("main.his.com", []string{ip.String()}, dnsmap.PrioObserved)
-	if got := e.connTarget(ip, 80); got != "main.his.com(172.30.4.217):80" {
+	e.names.Set("main.example.com", []string{ip.String()}, dnsmap.PrioObserved)
+	if got := e.connTarget(ip, 80); got != "main.example.com(192.0.2.217):80" {
 		t.Errorf("名字已知时带上名字：%q", got)
 	}
 	// 假 IP 只写名字（假 IP 是我们自己发的临时地址，写进日志只会让人去查一个不存在的地址）
@@ -180,8 +180,8 @@ func TestConnLineFormat(t *testing.T) {
 		e.fake = pool
 	}
 	fake := net.ParseIP("198.19.0.1")
-	e.names.Set("main.xamjyy.com", []string{fake.String()}, dnsmap.PrioObserved)
-	if got := e.connTargetDial(fake, net.ParseIP("10.100.100.99"), 443); got != "main.xamjyy.com:443" {
+	e.names.Set("main.a.example.com", []string{fake.String()}, dnsmap.PrioObserved)
+	if got := e.connTargetDial(fake, net.ParseIP("198.51.100.99"), 443); got != "main.a.example.com:443" {
 		t.Errorf("假 IP 应当只写名字：%q", got)
 	}
 }

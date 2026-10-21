@@ -10,7 +10,7 @@ import (
 
 // IP 区间（Proxifier 的写法：10.1.1.1-10.1.1.255）展开成一批 CIDR。
 //
-// 为什么放在这儿：和 IP 通配（10.100.100.*）是同一类东西 —— 都是"用户从别处搬过来的
+// 为什么放在这儿：和 IP 通配（198.51.100.*）是同一类东西 —— 都是"用户从别处搬过来的
 // 写法，我们折成 CIDR"。折成 CIDR 之后，配置、规则、内核过滤器都只需要认识一种东西，
 // 不必让下游每个消费方都学会区间。
 //
@@ -51,7 +51,7 @@ func IsIPv4Literal(s string) bool { return parseIPv4(strings.TrimSpace(s)).IsVal
 
 // IsIPRange 判断是不是 "10.1.1.1-10.1.1.255" 这种 IP 区间写法（横线两侧容许空白）。
 //
-// 只认**两侧都是 IPv4 字面量**的形式。域名里本来就允许横线（main-1.his.com），
+// 只认**两侧都是 IPv4 字面量**的形式。域名里本来就允许横线（main-1.example.com），
 // 光看有没有横线就当区间，会把域名判成非法目标 —— 那是个很阴的错误。
 func IsIPRange(s string) bool {
 	lo, hi, ok := splitRange(s)
@@ -72,7 +72,7 @@ func RangeToCIDRs(s string) ([]string, error) {
 	}
 	a, b := parseIPv4(lo), parseIPv4(hi)
 	if !a.IsValid() || !b.IsValid() {
-		// 单独说清是哪一侧坏了：一侧是域名的写法（main-1.his.com）最容易被误当成区间
+		// 单独说清是哪一侧坏了：一侧是域名的写法（main-1.example.com）最容易被误当成区间
 		bad := lo
 		if a.IsValid() {
 			bad = hi

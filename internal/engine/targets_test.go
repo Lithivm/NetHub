@@ -15,7 +15,7 @@ import (
 func TestResolveHostTargets(t *testing.T) {
 	rs := rules.New()
 	if err := rs.Load([]rules.Route{
-		{Name: "按域名", Targets: []string{"main.his.com"}, Chain: "tun"},
+		{Name: "按域名", Targets: []string{"main.example.com"}, Chain: "tun"},
 		{Name: "按网段", Targets: []string{"10.0.0.0/8"}, Chain: "tun"},
 	}); err != nil {
 		t.Fatalf("载入规则失败: %v", err)
@@ -24,19 +24,19 @@ func TestResolveHostTargets(t *testing.T) {
 	e.rules.Store(rs)
 	e.cfg = &config.Config{}
 	e.names = dnsmap.NewWithLookup(func(host string) ([]string, error) {
-		if host == "main.his.com" {
-			return []string{"172.30.4.217"}, nil
+		if host == "main.example.com" {
+			return []string{"192.0.2.217"}, nil
 		}
 		return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
 	})
 
 	e.resolveHostTargets(false)
-	if _, _, ok := rs.MatchProc(net.ParseIP("172.30.4.217"), 443, ""); !ok {
+	if _, _, ok := rs.MatchProc(net.ParseIP("192.0.2.217"), 443, ""); !ok {
 		t.Fatal("解析成功后域名规则应该能命中")
 	}
 	var hasIP bool
 	for _, rg := range rs.FilterRanges(false) {
-		if rg.First == rules.IP2U(net.ParseIP("172.30.4.217").To4()) && rg.Last == rg.First {
+		if rg.First == rules.IP2U(net.ParseIP("192.0.2.217").To4()) && rg.Last == rg.First {
 			hasIP = true
 		}
 		if rg.First == 0 && rg.Last == 0xFFFFFFFF {
@@ -48,10 +48,10 @@ func TestResolveHostTargets(t *testing.T) {
 	}
 	// 界面上能查到解析状态
 	hs := e.HostResolves()
-	if len(hs) != 1 || hs[0].Host != "main.his.com" || len(hs[0].IPs) != 1 {
+	if len(hs) != 1 || hs[0].Host != "main.example.com" || len(hs[0].IPs) != 1 {
 		t.Errorf("HostResolves 不对: %+v", hs)
 	}
-	if name := e.NameForIP(net.ParseIP("172.30.4.217")); name != "main.his.com" {
+	if name := e.NameForIP(net.ParseIP("192.0.2.217")); name != "main.example.com" {
 		t.Errorf("NameForIP = %q", name)
 	}
 }
@@ -59,7 +59,7 @@ func TestResolveHostTargets(t *testing.T) {
 // 解析不到的域名：不崩、不拦全部、状态里记得住失败原因。
 func TestResolveHostTargetsUnresolved(t *testing.T) {
 	rs := rules.New()
-	if err := rs.Load([]rules.Route{{Name: "解析不到", Targets: []string{"nope.his.com"}, Chain: "tun"}}); err != nil {
+	if err := rs.Load([]rules.Route{{Name: "解析不到", Targets: []string{"nope.example.com"}, Chain: "tun"}}); err != nil {
 		t.Fatalf("载入规则失败: %v", err)
 	}
 	e := newTestEngine()

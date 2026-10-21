@@ -74,14 +74,14 @@ func TestRangeToCIDRsCoversExactly(t *testing.T) {
 	}
 }
 
-// 域名/通配/畸形写法都不能被当成区间 —— 尤其 **带横线的域名**（main-1.his.com）。
+// 域名/通配/畸形写法都不能被当成区间 —— 尤其 **带横线的域名**（main-1.example.com）。
 func TestIsIPRange(t *testing.T) {
 	for _, s := range []string{
-		"main-1.his.com",             // 带横线的域名（最常见）
+		"main-1.example.com",         // 带横线的域名（最常见）
 		"a1.b2-c3.d4.com",            // 横线在中间
 		"10.1.1.1",                   // 单地址，不是区间
 		"10.1.1.0/24",                // CIDR
-		"10.100.100.*",               // IP 通配
+		"198.51.100.*",               // IP 通配
 		"10.1.1.1-",                  // 只有一侧
 		"-10.1.1.1",                  // 只有一侧
 		"10.1.1.1-abc",               // 一侧不是 IP
@@ -102,11 +102,11 @@ func TestIsIPRange(t *testing.T) {
 			t.Errorf("%q 应该被识别为 IP 区间", s)
 		}
 	}
-	// 空格只在两侧都是 IPv4 时才算区间的一部分（否则 "main-1.his.com" 那种会被误拆）
+	// 空格只在两侧都是 IPv4 时才算区间的一部分（否则 "main-1.example.com" 那种会被误拆）
 	if !IsRangeDash("-") || !IsRangeDash(" – ") || IsRangeDash("10.1.1.1") {
 		t.Error("IsRangeDash 只该认单独一根横线")
 	}
-	if !IsIPv4Literal("10.1.1.1") || IsIPv4Literal("10.0.0.0/24") || IsIPv4Literal("main.his.com") {
+	if !IsIPv4Literal("10.1.1.1") || IsIPv4Literal("10.0.0.0/24") || IsIPv4Literal("main.example.com") {
 		t.Error("IsIPv4Literal 只该认不带掩码的 IPv4")
 	}
 }

@@ -147,7 +147,7 @@ func TestCleanupAfterStopRemovesHostsAndRuntime(t *testing.T) {
 	seed := "relay: 127.0.0.1:0\n" +
 		"chains:\n  - name: proxy-a\n    forward: socks5://127.0.0.1:1080\n" +
 		"routes: []\n" +
-		"hosts:\n  manage: true\n  entries:\n    - 10.0.0.1 a.his.com\n    - 10.0.0.2 b.his.com\n"
+		"hosts:\n  manage: true\n  entries:\n    - 10.0.0.1 a.example.com\n    - 10.0.0.2 b.example.com\n"
 	if err := os.WriteFile(p, []byte(seed), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -200,14 +200,14 @@ func TestCleanupAfterStopLeavesHostsWhenUnmanaged(t *testing.T) {
 	oldFlush := hostsmgr.FlushFunc
 	hostsmgr.FlushFunc = func() error { return nil }
 	t.Cleanup(func() { hostsmgr.FlushFunc = oldFlush })
-	if _, err := hostsmgr.Apply([]string{"10.0.0.1 a.his.com"}); err != nil {
+	if _, err := hostsmgr.Apply([]string{"10.0.0.1 a.example.com"}); err != nil {
 		t.Fatal(err)
 	}
 	p := filepath.Join(t.TempDir(), "config.yaml")
 	seed := "relay: 127.0.0.1:0\n" +
 		"chains:\n  - name: proxy-a\n    forward: socks5://127.0.0.1:1080\n" +
 		"routes: []\n" +
-		"hosts:\n  manage: false\n  entries:\n    - 10.0.0.1 a.his.com\n"
+		"hosts:\n  manage: false\n  entries:\n    - 10.0.0.1 a.example.com\n"
 	if err := os.WriteFile(p, []byte(seed), 0o600); err != nil {
 		t.Fatal(err)
 	}

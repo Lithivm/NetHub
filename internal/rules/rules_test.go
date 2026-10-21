@@ -239,16 +239,16 @@ func parseIP4(s string) net.IP { return net.ParseIP(s).To4() }
 func TestHostnameTarget(t *testing.T) {
 	s := New()
 	if err := s.Load([]Route{
-		{Name: "按域名", Targets: []string{"main.his.com"}, Chain: "tun"},
+		{Name: "按域名", Targets: []string{"main.example.com"}, Chain: "tun"},
 		{Name: "按网段", Targets: []string{"10.0.0.0/8"}, Chain: "tun"},
 	}); err != nil {
 		t.Fatalf("载入失败（域名目标应该被接受）: %v", err)
 	}
-	if got := s.HostTargets(); len(got) != 1 || got[0] != "main.his.com" {
+	if got := s.HostTargets(); len(got) != 1 || got[0] != "main.example.com" {
 		t.Fatalf("HostTargets = %v", got)
 	}
 	// 解析之前：域名那条不匹配任何东西（也不该崩）
-	if _, _, ok := s.Match(net.ParseIP("172.30.4.217"), 443); ok {
+	if _, _, ok := s.Match(net.ParseIP("192.0.2.217"), 443); ok {
 		t.Error("还没解析时不该命中域名规则")
 	}
 	// 过滤器：解析前不该出现域名那个 IP（而**不能**退化成拦全部）
@@ -256,21 +256,21 @@ func TestHostnameTarget(t *testing.T) {
 		if rg.First == 0 && rg.Last == 0xFFFFFFFF {
 			t.Fatalf("解析不出来时不该拦全部流量（性能地雷）: %+v", rg)
 		}
-		if rg.First <= IP2U(net.ParseIP("172.30.4.217").To4()) && IP2U(net.ParseIP("172.30.4.217").To4()) <= rg.Last {
+		if rg.First <= IP2U(net.ParseIP("192.0.2.217").To4()) && IP2U(net.ParseIP("192.0.2.217").To4()) <= rg.Last {
 			t.Errorf("解析前不该包含域名那个 IP: %+v", rg)
 		}
 	}
 
 	// 引擎解析完之后填进来 → 匹配与过滤器都要生效
 	s.SetHostIPs(map[string][]*net.IPNet{
-		"main.his.com": {{IP: net.ParseIP("172.30.4.217").To4(), Mask: net.CIDRMask(32, 32)}},
+		"main.example.com": {{IP: net.ParseIP("192.0.2.217").To4(), Mask: net.CIDRMask(32, 32)}},
 	})
-	if chain, _, ok := s.Match(net.ParseIP("172.30.4.217"), 443); !ok || chain != "tun" {
+	if chain, _, ok := s.Match(net.ParseIP("192.0.2.217"), 443); !ok || chain != "tun" {
 		t.Errorf("解析后应命中域名规则，得到 %q ok=%v", chain, ok)
 	}
 	var hasHostIP bool
 	for _, rg := range s.FilterRanges(false) {
-		if rg.First == IP2U(net.ParseIP("172.30.4.217").To4()) && rg.Last == rg.First {
+		if rg.First == IP2U(net.ParseIP("192.0.2.217").To4()) && rg.Last == rg.First {
 			hasHostIP = true
 		}
 	}
@@ -279,13 +279,13 @@ func TestHostnameTarget(t *testing.T) {
 	}
 	// 带星位置随意（前缀/中间/多层都行）：不再拒绝，且要能按名字匹配
 	rs := New()
-	if err := rs.Load([]Route{{Targets: []string{"db-*.his.com", "xx.*.corp"}, Chain: "tun"}}); err != nil {
+	if err := rs.Load([]Route{{Targets: []string{"db-*.example.com", "xx.*.corp"}, Chain: "tun"}}); err != nil {
 		t.Fatalf("通用通配域名应该被接受: %v", err)
 	}
-	if !rs.WildcardMatch("db-01.his.com") || !rs.WildcardMatch("xx.a.corp") {
+	if !rs.WildcardMatch("db-01.example.com") || !rs.WildcardMatch("xx.a.corp") {
 		t.Error("通用通配没匹配上")
 	}
-	if rs.WildcardMatch("db-01.other.com") || rs.WildcardMatch("his.com") {
+	if rs.WildcardMatch("db-01.other.com") || rs.WildcardMatch("example.com") {
 		t.Error("不该命中的命中了")
 	}
 }
@@ -295,21 +295,21 @@ func TestHostnameTarget(t *testing.T) {
 func TestRouteIPWildcard(t *testing.T) {
 	rs := New()
 	if err := rs.Load([]Route{
-		{Name: "通配", Targets: []string{"10.100.100.*"}, Chain: "tun"},
+		{Name: "通配", Targets: []string{"198.51.100.*"}, Chain: "tun"},
 	}); err != nil {
 		t.Fatalf("载入规则失败: %v（通配写法在规则层也该认）", err)
 	}
-	for _, ip := range []string{"10.100.100.1", "10.100.100.99", "10.100.100.254"} {
+	for _, ip := range []string{"198.51.100.1", "198.51.100.99", "198.51.100.254"} {
 		if _, _, ok := rs.Match(net.ParseIP(ip).To4(), 80); !ok {
 			t.Errorf("%s 应该命中通配规则", ip)
 		}
 	}
-	for _, ip := range []string{"10.100.101.1", "10.100.99.254", "10.100.100.0"} {
+	for _, ip := range []string{"10.100.101.1", "10.100.99.254", "198.51.100.0"} {
 		_, _, ok := rs.Match(net.ParseIP(ip).To4(), 80)
-		if ip == "10.100.100.0" {
+		if ip == "198.51.100.0" {
 			// .0 属于该网段（是否真的用得上无所谓，匹配语义要一致）
 			if !ok {
-				t.Errorf("%s 在 10.100.100.0/24 内，应该命中", ip)
+				t.Errorf("%s 在 198.51.100.0/24 内，应该命中", ip)
 			}
 			continue
 		}
@@ -320,11 +320,11 @@ func TestRouteIPWildcard(t *testing.T) {
 	// 过滤器：必须把整个 /24 拦进来
 	var found bool
 	for _, r := range rs.FilterRanges(false) {
-		if r.First == IP2U(net.ParseIP("10.100.100.0").To4()) && r.Last == IP2U(net.ParseIP("10.100.100.255").To4()) {
+		if r.First == IP2U(net.ParseIP("198.51.100.0").To4()) && r.Last == IP2U(net.ParseIP("198.51.100.255").To4()) {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("过滤器应覆盖 10.100.100.0/24，实际 %+v", rs.FilterRanges(false))
+		t.Errorf("过滤器应覆盖 198.51.100.0/24，实际 %+v", rs.FilterRanges(false))
 	}
 }

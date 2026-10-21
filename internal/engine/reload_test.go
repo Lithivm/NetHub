@@ -70,13 +70,13 @@ func TestReloadRulesNotRunning(t *testing.T) {
 // 表现为“刚还好好的，保存一次规则后不通了”。
 func TestReloadRulesInheritsLearnedNames(t *testing.T) {
 	old := rules.New()
-	if err := old.Load([]rules.Route{{Name: "通配", Targets: []string{"*.his.com"}, Chain: "etyy"}}); err != nil {
+	if err := old.Load([]rules.Route{{Name: "通配", Targets: []string{"*.example.com"}, Chain: "etyy"}}); err != nil {
 		t.Fatal(err)
 	}
 	e := newRulesEngine(&config.Config{}, old)
 	e.relay = "127.0.0.1:13001"
 	// 模拟“已经通过 DNS 嗅探学到了这个内网域名”
-	e.names.Set("main.his.com", []string{"10.100.100.99"}, 0)
+	e.names.Set("main.example.com", []string{"198.51.100.99"}, 0)
 	e.applyHostIPs()
 	if n := len(old.WildcardRanges(false)); n != 1 {
 		t.Fatalf("前置条件：旧规则集应已覆盖学到的 IP，得到 %d 段", n)
@@ -87,8 +87,8 @@ func TestReloadRulesInheritsLearnedNames(t *testing.T) {
 	e.mainFilter, e.run = filter, true
 
 	ns := rules.New()
-	// 新规则集：同样只覆盖 *.his.com，只把链换一条 —— 过滤器字符串不变
-	if err := ns.Load([]rules.Route{{Name: "通配", Targets: []string{"*.his.com"}, Chain: "sjy"}}); err != nil {
+	// 新规则集：同样只覆盖 *.example.com，只把链换一条 —— 过滤器字符串不变
+	if err := ns.Load([]rules.Route{{Name: "通配", Targets: []string{"*.example.com"}, Chain: "sjy"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.ReloadRules(ns); err != nil {
@@ -98,7 +98,7 @@ func TestReloadRulesInheritsLearnedNames(t *testing.T) {
 		t.Fatal("规则集没有换成新的")
 	}
 	rs := ns.WildcardRanges(false)
-	if len(rs) != 1 || rs[0].First != rules.IP2U(net.ParseIP("10.100.100.99").To4()) {
+	if len(rs) != 1 || rs[0].First != rules.IP2U(net.ParseIP("198.51.100.99").To4()) {
 		t.Fatalf("新规则集没继承学到过的 IP：%+v", rs)
 	}
 }

@@ -8,7 +8,7 @@
 //
 // 两个来源，优先级不同：
 //
-//	① 配置里写的域名规则（Priority 高）—— 规则说 main.his.com，那这个 IP 就叫这个名字
+//	① 配置里写的域名规则（Priority 高）—— 规则说 main.example.com，那这个 IP 就叫这个名字
 //	② 观察到的 DNS 响应（Priority 低）—— 将来支持通配域名时用（应用查过什么就知道什么）
 package dnsmap
 
@@ -240,7 +240,7 @@ func (m *Map) NameFor(ip net.IP) (string, bool) {
 
 // NamesFor 某个 IP 当前关联到的**所有**域名。
 //
-// 通配域名（*.his.com）匹配时必须看全部名字：一个 IP 常被多个名字共用，
+// 通配域名（*.example.com）匹配时必须看全部名字：一个 IP 常被多个名字共用，
 // 只看优先级最高的那个会漏掉通配规则该命中的情况。
 func (m *Map) NamesFor(ip net.IP) []string {
 	if ip == nil {
@@ -284,7 +284,7 @@ func (m *Map) Status() []HostStatus {
 // Snapshot 当前所有“有解析结果”的域名 → IP（不含失败/过期的）。
 //
 // 给引擎用：它要把这些名字连同规则里的域名一起交给 rules.SetHostIPs，
-// 通配域名（*.his.com）就是从这里挑出命中的那几个。
+// 通配域名（*.example.com）就是从这里挑出命中的那几个。
 func (m *Map) Snapshot() map[string][]string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -312,7 +312,7 @@ func (m *Map) Hosts() []string {
 
 // IsHostname 一个目标写法是域名（而不是 IP/CIDR）。
 //
-// 认法：含字母、且不是 IP/CIDR。通配（`*.his.com`）也算域名 —— 它的匹配要靠
+// 认法：含字母、且不是 IP/CIDR。通配（`*.example.com`）也算域名 —— 它的匹配要靠
 // 观察到的 DNS（见包注释），本包只负责"这个字符串该按名字处理"。
 func IsHostname(s string) bool {
 	s = strings.TrimSpace(s)
@@ -329,12 +329,12 @@ func IsWildcard(s string) bool { return strings.Contains(s, "*") }
 //
 // **`*` 可以出现在任意位置**（不再只限 `*.域名` 开头那种写法）：
 //
-//	*.his.com     任何 his.com 的子域（不含 his.com 自身）
-//	db-*.his.com  以 db- 开头的子域
-//	*.*.his.com   两层以上都行
+//	*.example.com     任何 example.com 的子域（不含 example.com 自身）
+//	db-*.example.com  以 db- 开头的子域
+//	*.*.example.com   两层以上都行
 //	10.20.*       连纯数字段也能用（但那种情况更推荐 IP 通配，见 netx）
 //
-// 语义：一个 `*` 匹配**任意字符（含点）**，所以 `*.his.com` 会命中 a.b.his.com；
+// 语义：一个 `*` 匹配**任意字符（含点）**，所以 `*.example.com` 会命中 a.b.example.com；
 // 这跟证书里的通配不一样，但跟人看规则时的直觉一致（我们宁愿好懂）。
 //
 // 仍然拒绝：空标签（连续点）、空格、斜杠、只有一个 `*`、超长。
@@ -348,7 +348,7 @@ func WildcardPattern(s string) (string, error) {
 		return "", fmt.Errorf("通配域名 %q 里没有 *", strings.TrimSpace(raw))
 	}
 	if s == "*" {
-		return "", fmt.Errorf("只写一个 * 会命中所有域名 —— 请写清后缀，例如 *.his.com")
+		return "", fmt.Errorf("只写一个 * 会命中所有域名 —— 请写清后缀，例如 *.example.com")
 	}
 	if len(s) > 253 {
 		return "", fmt.Errorf("通配域名太长（%d 字符）", len(s))
@@ -366,9 +366,9 @@ func WildcardPattern(s string) (string, error) {
 
 // MatchWildcard 通配匹配：`*` 匹配任意字符（含点），其余字符逐字比。
 //
-//	MatchWildcard("*.his.com", "a.his.com")     → true
-//	MatchWildcard("*.his.com", "his.com")       → false（不含裸域名自身）
-//	MatchWildcard("db-*", "db-01.his.com")     → true
+//	MatchWildcard("*.example.com", "a.example.com")     → true
+//	MatchWildcard("*.example.com", "example.com")       → false（不含裸域名自身）
+//	MatchWildcard("db-*", "db-01.example.com")     → true
 func MatchWildcard(pattern, host string) bool {
 	p := normalizeHost(pattern)
 	h := normalizeHost(host)

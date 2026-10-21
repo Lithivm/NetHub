@@ -86,7 +86,7 @@ func dnsAnswer(qname, ip string, ttl uint32) []byte {
 }
 
 func TestDNSPayloadExtraction(t *testing.T) {
-	body := dnsAnswer("a.his.com", "10.20.30.40", 60)
+	body := dnsAnswer("a.example.com", "10.20.30.40", 60)
 	udp := mkUDPDNS(t, body)
 	if got := dnsPayload(udp); len(got) != len(body) {
 		t.Errorf("UDP 负载长度 = %d，期望 %d", len(got), len(body))
@@ -111,7 +111,7 @@ func TestDNSPayloadExtraction(t *testing.T) {
 func TestWildcardLearnedFromDNS(t *testing.T) {
 	rs := rules.New()
 	err := rs.Load([]rules.Route{
-		{Name: "按域名走", Targets: []string{"*.his.com"}, Chain: "etyy"},
+		{Name: "按域名走", Targets: []string{"*.example.com"}, Chain: "etyy"},
 		{Name: "另一网段", Targets: []string{"10.9.9.0/24"}, Chain: "direct", Action: rules.ActionDirect},
 	})
 	if err != nil {
@@ -127,12 +127,12 @@ func TestWildcardLearnedFromDNS(t *testing.T) {
 	e.dynLast.Store(time.Now().UnixMilli())
 	e.dynLast.Store(time.Now().UnixMilli())
 
-	e.learnDNS(mkUDPDNS(t, dnsAnswer("opm.his.com", "10.20.30.40", 60)))
+	e.learnDNS(mkUDPDNS(t, dnsAnswer("opm.example.com", "10.20.30.40", 60)))
 
-	if ips := e.names.IPsFor("opm.his.com"); len(ips) != 1 || ips[0] != "10.20.30.40" {
+	if ips := e.names.IPsFor("opm.example.com"); len(ips) != 1 || ips[0] != "10.20.30.40" {
 		t.Fatalf("DNS 应答没被学进名字表: %v", ips)
 	}
-	if got := e.names.NamesFor(net.ParseIP("10.20.30.40")); len(got) != 1 || got[0] != "opm.his.com" {
+	if got := e.names.NamesFor(net.ParseIP("10.20.30.40")); len(got) != 1 || got[0] != "opm.example.com" {
 		t.Fatalf("IP → 名字 反查不对: %v", got)
 	}
 
@@ -142,16 +142,16 @@ func TestWildcardLearnedFromDNS(t *testing.T) {
 	// 就是命中依据）—— 因此这里换个名字也照样命中。名字匹配（MatchesName）真正
 	// 起作用的是**包先到、hostIPs 还没填上**那一瞬，以及只有一个裸名字可用时。
 	ip := net.ParseIP("10.20.30.40")
-	if chain, act, hit := rs.MatchName("opm.his.com", ip, 443, ""); !hit || chain != "etyy" || act != rules.ActionChain {
+	if chain, act, hit := rs.MatchName("opm.example.com", ip, 443, ""); !hit || chain != "etyy" || act != rules.ActionChain {
 		t.Errorf("通配规则应该命中 etyy，得到 chain=%q act=%v hit=%v", chain, act, hit)
 	}
-	if chain, _, hit := rs.MatchName("a.his.com", ip, 443, ""); !hit || chain != "etyy" {
-		t.Errorf("同一 IP 的其它 his.com 名字也该命中，得到 %q hit=%v", chain, hit)
+	if chain, _, hit := rs.MatchName("a.example.com", ip, 443, ""); !hit || chain != "etyy" {
+		t.Errorf("同一 IP 的其它 example.com 名字也该命中，得到 %q hit=%v", chain, hit)
 	}
 
 	// 另一台还没学到的 IP：靠**名字**命中，而不是靠 IP
 	other := net.ParseIP("10.99.99.99")
-	if chain, _, hit := rs.MatchName("a.his.com", other, 443, ""); !hit || chain != "etyy" {
+	if chain, _, hit := rs.MatchName("a.example.com", other, 443, ""); !hit || chain != "etyy" {
 		t.Errorf("名字命中不依赖 IP 是否已学到，得到 %q hit=%v", chain, hit)
 	}
 	if _, _, hit := rs.MatchName("a.hisXcom", other, 443, ""); hit {
@@ -185,12 +185,12 @@ func TestWildcardLearnedFromDNS(t *testing.T) {
 // 观察到的名字过期后：不再作为匹配依据，动态过滤器也该收回去。
 func TestWildcardPruneOnExpiry(t *testing.T) {
 	rs := rules.New()
-	if err := rs.Load([]rules.Route{{Name: "w", Targets: []string{"*.his.com"}, Chain: "etyy"}}); err != nil {
+	if err := rs.Load([]rules.Route{{Name: "w", Targets: []string{"*.example.com"}, Chain: "etyy"}}); err != nil {
 		t.Fatal(err)
 	}
 	e := newRulesEngine(&config.Config{}, rs)
 	e.dynLast.Store(time.Now().UnixMilli())
-	e.learnDNS(mkUDPDNS(t, dnsAnswer("a.his.com", "10.1.1.1", 1))) // TTL 1 秒
+	e.learnDNS(mkUDPDNS(t, dnsAnswer("a.example.com", "10.1.1.1", 1))) // TTL 1 秒
 	if n := len(rs.WildcardRanges(false)); n != 1 {
 		t.Fatalf("学到之后应该有一条区间，得到 %d", n)
 	}
@@ -211,16 +211,16 @@ func TestWildcardPruneOnExpiry(t *testing.T) {
 // WildcardStats 是界面上“通配域名现在覆盖到哪些 IP”的数据源。
 func TestWildcardStats(t *testing.T) {
 	rs := rules.New()
-	if err := rs.Load([]rules.Route{{Name: "w", Targets: []string{"*.his.com"}, Chain: "etyy"}}); err != nil {
+	if err := rs.Load([]rules.Route{{Name: "w", Targets: []string{"*.example.com"}, Chain: "etyy"}}); err != nil {
 		t.Fatal(err)
 	}
 	e := newRulesEngine(&config.Config{}, rs)
 	e.dynLast.Store(time.Now().UnixMilli())
-	e.learnDNS(mkUDPDNS(t, dnsAnswer("a.his.com", "10.1.1.1", 60)))
-	e.learnDNS(mkUDPDNS(t, dnsAnswer("b.his.com", "10.1.1.2", 60)))
+	e.learnDNS(mkUDPDNS(t, dnsAnswer("a.example.com", "10.1.1.1", 60)))
+	e.learnDNS(mkUDPDNS(t, dnsAnswer("b.example.com", "10.1.1.2", 60)))
 
 	st := e.WildcardStats()
-	if len(st) != 1 || st[0].Pattern != "*.his.com" {
+	if len(st) != 1 || st[0].Pattern != "*.example.com" {
 		t.Fatalf("通配状态不对: %+v", st)
 	}
 	if len(st[0].IPs) != 2 {
@@ -250,7 +250,7 @@ func mkTCPData(payload []byte, dport uint16) []byte {
 // 只要它走 TLS，我们仍能从明文 SNI 里知道它要去哪个域名。
 func TestLearnFromHandshake(t *testing.T) {
 	rs := rules.New()
-	if err := rs.Load([]rules.Route{{Name: "w", Targets: []string{"*.his.com"}, Chain: "etyy"}}); err != nil {
+	if err := rs.Load([]rules.Route{{Name: "w", Targets: []string{"*.example.com"}, Chain: "etyy"}}); err != nil {
 		t.Fatal(err)
 	}
 	e := newRulesEngine(&config.Config{}, rs)
@@ -266,8 +266,8 @@ func TestLearnFromHandshake(t *testing.T) {
 		t.Errorf("443 的 TCP 不该被当成 DNS（源端口不是 53），得到 %d 字节", len(got))
 	}
 
-	e.learnFromHandshake(tlsname.Result{Name: "db.his.com", Kind: "tls"}, net.ParseIP("10.5.5.5"))
-	if ips := e.names.IPsFor("db.his.com"); len(ips) != 1 || ips[0] != "10.5.5.5" {
+	e.learnFromHandshake(tlsname.Result{Name: "db.example.com", Kind: "tls"}, net.ParseIP("10.5.5.5"))
+	if ips := e.names.IPsFor("db.example.com"); len(ips) != 1 || ips[0] != "10.5.5.5" {
 		t.Fatalf("握手学到的名字没进名字表: %v", ips)
 	}
 	if chain, _, hit := rs.MatchName("", net.ParseIP("10.5.5.5"), 443, ""); !hit || chain != "etyy" {
@@ -284,8 +284,8 @@ func TestLearnFromHandshake(t *testing.T) {
 	}
 	// 空名字 / nil IP 直接忽略，不写脏数据
 	e.learnFromHandshake(tlsname.Result{Name: "", Kind: "tls"}, net.ParseIP("10.7.7.7"))
-	e.learnFromHandshake(tlsname.Result{Name: "x.his.com", Kind: "tls"}, nil)
-	if got := e.names.IPsFor("x.his.com"); len(got) != 0 {
+	e.learnFromHandshake(tlsname.Result{Name: "x.example.com", Kind: "tls"}, nil)
+	if got := e.names.IPsFor("x.example.com"); len(got) != 0 {
 		t.Errorf("空数据不该写进表: %v", got)
 	}
 }

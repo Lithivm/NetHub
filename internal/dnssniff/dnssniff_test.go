@@ -67,7 +67,7 @@ const (
 // ---- 用例 ----
 
 func TestParseSimpleA(t *testing.T) {
-	m := msg(t, 0x1234, qrResp, "main.his.com", rr{name: "main.his.com", typ: 1, ttl: 60, rdata: a(172, 30, 4, 217)})
+	m := msg(t, 0x1234, qrResp, "main.example.com", rr{name: "main.example.com", typ: 1, ttl: 60, rdata: a(192, 0, 2, 217)})
 	r, err := Parse(m)
 	if err != nil {
 		t.Fatalf("解析失败: %v", err)
@@ -75,10 +75,10 @@ func TestParseSimpleA(t *testing.T) {
 	if !r.IsResponse || r.RCode != 0 {
 		t.Errorf("IsResponse=%v RCode=%d", r.IsResponse, r.RCode)
 	}
-	if r.Question != "main.his.com" {
+	if r.Question != "main.example.com" {
 		t.Errorf("问题名 = %q", r.Question)
 	}
-	if len(r.Pairs) != 1 || r.Pairs[0].IP != "172.30.4.217" || r.Pairs[0].Name != "main.his.com" {
+	if len(r.Pairs) != 1 || r.Pairs[0].IP != "192.0.2.217" || r.Pairs[0].Name != "main.example.com" {
 		t.Fatalf("Pairs = %+v", r.Pairs)
 	}
 	if r.Pairs[0].TTL != 60*time.Second {
@@ -122,20 +122,20 @@ func TestParseCNAMEChain(t *testing.T) {
 
 // 大小写与尾点都要归一化：规则里的名字是小写的，不能因为应答里大写就匹配不上。
 func TestParseNormalizesCase(t *testing.T) {
-	r, err := Parse(msg(t, 3, qrResp, "Main.HIS.com", rr{name: "MAIN.his.COM", typ: 1, ttl: 10, rdata: a(1, 1, 1, 1)}))
+	r, err := Parse(msg(t, 3, qrResp, "Main.EXAMPLE.com", rr{name: "MAIN.example.COM", typ: 1, ttl: 10, rdata: a(1, 1, 1, 1)}))
 	if err != nil {
 		t.Fatalf("解析失败: %v", err)
 	}
-	if r.Question != "main.his.com" {
+	if r.Question != "main.example.com" {
 		t.Errorf("问题名 = %q", r.Question)
 	}
-	if len(r.Pairs) != 1 || r.Pairs[0].Name != "main.his.com" {
+	if len(r.Pairs) != 1 || r.Pairs[0].Name != "main.example.com" {
 		t.Errorf("Pairs = %+v", r.Pairs)
 	}
 }
 
 func TestParseNXDOMAIN(t *testing.T) {
-	r, err := Parse(msg(t, 4, qrNXDOM, "nope.his.com"))
+	r, err := Parse(msg(t, 4, qrNXDOM, "nope.example.com"))
 	if err != nil {
 		t.Fatalf("NXDOMAIN 不该算解析失败: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestParseNXDOMAIN(t *testing.T) {
 
 // 查询报文（出方向）也要能取到名字，只是没有 Pairs。
 func TestParseQuery(t *testing.T) {
-	m := msg(t, 5, 0x0100, "opm.his.com")
+	m := msg(t, 5, 0x0100, "opm.example.com")
 	r, err := Parse(m)
 	if err != nil {
 		t.Fatalf("解析失败: %v", err)
@@ -154,10 +154,10 @@ func TestParseQuery(t *testing.T) {
 	if r.IsResponse || len(r.Pairs) != 0 {
 		t.Errorf("IsResponse=%v Pairs=%+v", r.IsResponse, r.Pairs)
 	}
-	if r.Question != "opm.his.com" {
+	if r.Question != "opm.example.com" {
 		t.Errorf("问题名 = %q", r.Question)
 	}
-	if n, ok := Question(m); !ok || n != "opm.his.com" {
+	if n, ok := Question(m); !ok || n != "opm.example.com" {
 		t.Errorf("Question() = %q, %v", n, ok)
 	}
 }

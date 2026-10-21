@@ -668,7 +668,7 @@ func NormalizeTarget(s string) (string, error) {
 		return "", fmt.Errorf("%q 是 IP 区间 —— 区间展开后是多条网段，请填在规则的目标框里"+
 			"（那里支持一次填多个目标）；单个目标请写 CIDR（如 10.1.1.0/24）", s)
 	}
-	// IP 通配（Proxifier 的写法：10.100.100.* = 一整段）→ 展开成 CIDR
+	// IP 通配（Proxifier 的写法：198.51.100.* = 一整段）→ 展开成 CIDR
 	if strings.HasSuffix(s, ".*") {
 		cidr, err := ipWildcardToCIDR(s)
 		if err != nil {
@@ -683,25 +683,25 @@ func NormalizeTarget(s string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		// 纯数字+点的写法（如 10.100.100.*）其实是 IP 通配，更推荐用那个：
+		// 纯数字+点的写法（如 198.51.100.*）其实是 IP 通配，更推荐用那个：
 		// 它会被折成 CIDR、在 IP 层匹配，不依赖任何解析。
 		if isAllDigits(strings.ReplaceAll(pattern, "*", "")) {
-			return "", fmt.Errorf("%q 看起来是 IP 通配 —— IP 请写 10.100.100.*（整段）或 CIDR；"+
-				"域名通配用于主机名（如 *.his.com、db-*.his.com）", s)
+			return "", fmt.Errorf("%q 看起来是 IP 通配 —— IP 请写 198.51.100.*（整段）或 CIDR；"+
+				"域名通配用于主机名（如 *.example.com、db-*.example.com）", s)
 		}
 		return pattern, nil
 	}
 	// 剩下 * 且不是域名（如 10.*.100.5）→ 直接说清改写方式，
 	// 别拖到最后报一句没有信息量的“解析失败”。
 	if strings.Contains(s, "*") && !isHostname(s) {
-		return "", fmt.Errorf("这种写法猜不出范围 —— 末尾一段才能用 *（如 10.100.100.*）；" +
+		return "", fmt.Errorf("这种写法猜不出范围 —— 末尾一段才能用 *（如 198.51.100.*）；" +
 			"其他情况请写 CIDR（如 10.100.0.0/16）")
 	}
 	if !strings.Contains(s, "/") && !isHostname(s) {
 		s += "/32"
 	} else if isHostname(s) {
 		// 统一去掉尾点：名字表（dnsmap）的 key 都是不带尾点的，
-		// 否则 "main.his.com." 这条规则会静默地永不匹配（也查不出原因）。
+		// 否则 "main.example.com." 这条规则会静默地永不匹配（也查不出原因）。
 		s = strings.TrimSuffix(strings.ToLower(s), ".")
 		if !validHostname(s) {
 			return "", fmt.Errorf("不是合法的域名")
@@ -736,7 +736,7 @@ func NormalizeTargetExpr(s string) ([]string, error) {
 	if err != nil {
 		// 形状像区间但写坏了（10.1.1.0-10.1.1.300）：用区间的报错——它会指明是**哪一侧**
 		// 不对，比甩一句"解析失败"有用得多。
-		// 只在不含字母时走这条：带字母的 main-1.his.com 是**域名**，不能拿区间去报错。
+		// 只在不含字母时走这条：带字母的 main-1.example.com 是**域名**，不能拿区间去报错。
 		if hasRangeDash(s) && !strings.ContainsFunc(s, unicode.IsLetter) {
 			if _, rerr := netx.RangeToCIDRs(s); rerr != nil {
 				return nil, rerr
@@ -792,11 +792,11 @@ func validHostname(s string) bool {
 	return true
 }
 
-// ipWildcardToCIDR 把 10.100.100.* 这种写法展开成整段 CIDR。
+// ipWildcardToCIDR 把 198.51.100.* 这种写法展开成整段 CIDR。
 //
 // 为什么单独支持它：这是 Proxifier 的写法（从它那儿搬过来的规则与工单里到处都是），
 // 语义就是“最后一段随便填”= 一整段网段。不展开的话用户会以为我们连“通配”都不支持。
-// 只允许**末尾一段**是 *（10.100.100.* ✓）；中间带 * 的（10.*.100.5）猜不出范围，不要猜。
+// 只允许**末尾一段**是 *（198.51.100.* ✓）；中间带 * 的（10.*.100.5）猜不出范围，不要猜。
 // ipWildcardToCIDR 已挪到 internal/netx（规则包也要用，避免两份实现）。
 func ipWildcardToCIDR(s string) (string, error) { return netx.WildcardToCIDR(s) }
 
@@ -1087,10 +1087,10 @@ type Tuning struct {
 	//	upstream       把域名交给上游去解析（域名不出本机；适合同一个域名两边解析不同的场景）
 	//	auto           本机优先，连不上再把域名交给上游试一次
 	//
-	// 实测教训：我们这套环境里内网域名（main.his.com）**只有客户网内的 DNS 能解答**，
+	// 实测教训：我们这套环境里内网域名（main.example.com）**只有客户网内的 DNS 能解答**，
 	// 上游是公网中转服务器、根本解析不到 —— 所以默认必须是 local，不能默认透传。
 	DomainResolve string `yaml:"domain_resolve,omitempty"`
-	// DomainResolveLocal 这些域名**强制本机解析**（一行一个，支持 `*.his.com` 通配）。
+	// DomainResolveLocal 这些域名**强制本机解析**（一行一个，支持 `*.example.com` 通配）。
 	//
 	// 为什么需要它：DomainResolve 是**全局**一个策略，而现场常见的是混合的 ——
 	// 公网域名交给上游解析（域名不出本机），客户内网域名却只有客户网内的 DNS
@@ -2149,7 +2149,7 @@ func (c *Config) LocalResolveDomains() []string {
 
 // ForceLocalResolve 这个域名是不是被指定为“必须本机解析”。
 //
-// 匹配用通配（`*.his.com` 不包含裸域名 `his.com`，与规则里的通配域名同一个语义）。
+// 匹配用通配（`*.example.com` 不包含裸域名 `example.com`，与规则里的通配域名同一个语义）。
 func (c *Config) ForceLocalResolve(host string) bool {
 	host = strings.TrimSpace(host)
 	if host == "" {

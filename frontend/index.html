@@ -133,10 +133,10 @@
       <div class="card-body form">
         <div class="input-row" style="align-items:flex-start">
           <textarea id="explainIp" class="input textarea mono" spellcheck="false" rows="3"
-            placeholder="一批目标：一行一个（也支持逗号/分号分隔、# 注释），如&#10;10.0.0.5:5432&#10;172.16.0.0/24&#10;10.20.0.99:80   # 影像库"></textarea>
+            placeholder="一批目标：一行一个（也支持逗号/分号分隔、# 注释），如&#10;10.0.0.5:5432&#10;172.16.0.0/24&#10;10.99.0.99:80   # 影像库"></textarea>
           <button class="btn btn-sm btn-primary" id="btnExplain">模拟</button>
         </div>
-        <div class="hint">目标可以是 IP/CIDR、IP 区间（10.100.100.1-10.100.100.255）、IP 通配（10.100.100.*）、域名（main.his.com）或通配域名（*.his.com）。</div>
+        <div class="hint">目标可以是 IP/CIDR、IP 区间（198.51.100.1-198.51.100.255）、IP 通配（198.51.100.*）、域名（main.example.com）或通配域名（*.example.com）。</div>
       </div>
       <div class="table" id="ruleTable"></div>
     </div>
@@ -524,11 +524,11 @@
           </div>
           <div class="field">
             <label>强制本机解析的域名
-              <em>一行一个，支持 *.his.com 通配。命中这些域名的连接一律用本机 DNS 解析，
+              <em>一行一个，支持 *.example.com 通配。命中这些域名的连接一律用本机 DNS 解析，
                 不管上面的解析策略 —— 客户内网域名只有本机能解答时用它</em>
             </label>
             <textarea id="setDomainResolveLocal" class="input textarea mono" spellcheck="false" rows="3"
-              placeholder="main.his.com&#10;*.hospital.cn"></textarea>
+              placeholder="main.example.com&#10;*.hospital.cn"></textarea>
           </div>
           <div class="hint">改完立即生效（从下一次拨号开始按新值走）</div>        </div>
       </div>

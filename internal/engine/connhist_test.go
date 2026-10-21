@@ -16,15 +16,15 @@ func TestConnsHistoryRecordsEnded(t *testing.T) {
 	e := newTestEngine()
 
 	// ① 正常结束的一条
-	ok := &connState{dst: net.ParseIP("172.30.4.217"), dport: 443, chain: "etyy",
-		action: rules.ActionChain, start: time.Now().Add(-5 * time.Second), procName: "DF.HIS.exe", pid: 88, appPort: 51001}
+	ok := &connState{dst: net.ParseIP("192.0.2.217"), dport: 443, chain: "etyy",
+		action: rules.ActionChain, start: time.Now().Add(-5 * time.Second), procName: "Vendor.HIS.exe", pid: 88, appPort: 51001}
 	ok.up.Store(1741)
 	ok.down.Store(11264)
 	ok.packets.Store(12)
 	e.finish(ok)
 
 	// ② 失败的一条（错误信息必须带进存档 —— 这正是诊断要看的东西）
-	bad := &connState{dst: net.ParseIP("10.100.100.99"), dport: 443, chain: "sjy",
+	bad := &connState{dst: net.ParseIP("198.51.100.99"), dport: 443, chain: "sjy",
 		action: rules.ActionChain, start: time.Now().Add(-2 * time.Second), procName: "chrome.exe", pid: 77, appPort: 51002}
 	bad.fail("连代理失败: i/o timeout")
 	e.finish(bad)
@@ -42,16 +42,16 @@ func TestConnsHistoryRecordsEnded(t *testing.T) {
 		t.Fatalf("应只有 2 条（探针不进存档、finish 幂等），实际 %d 条: %+v", len(got), got)
 	}
 	// 新的在前
-	if got[0].Target != "10.100.100.99:443" || got[0].State != "失败" {
+	if got[0].Target != "198.51.100.99:443" || got[0].State != "失败" {
 		t.Errorf("最新的那条应排在最前且状态为失败: %+v", got[0])
 	}
-	if got[1].Target != "172.30.4.217:443" || got[1].State != "已结束" {
+	if got[1].Target != "192.0.2.217:443" || got[1].State != "已结束" {
 		t.Errorf("第二条应是先结束的隧道连接: %+v", got[1])
 	}
 	if got[0].Err == "" {
 		t.Error("失败原因必须留在存档里（诊断要看的就是它）")
 	}
-	if got[1].Proc != "DF.HIS.exe" || got[1].PID != 88 || got[1].Sport != 51001 {
+	if got[1].Proc != "Vendor.HIS.exe" || got[1].PID != 88 || got[1].Sport != 51001 {
 		t.Errorf("进程/端口要留着（对着 netstat 核对用）: %+v", got[1])
 	}
 	if got[1].Up != 1741 || got[1].Down != 11264 || got[1].Packets != 12 {
@@ -62,7 +62,7 @@ func TestConnsHistoryRecordsEnded(t *testing.T) {
 	}
 
 	// limit 生效
-	if one := e.ConnsHistory(1); len(one) != 1 || one[0].Target != "10.100.100.99:443" {
+	if one := e.ConnsHistory(1); len(one) != 1 || one[0].Target != "198.51.100.99:443" {
 		t.Errorf("limit 应只取最新的那条: %+v", one)
 	}
 

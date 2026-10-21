@@ -205,7 +205,7 @@ func utf16BOM(s string) []byte {
 // 但省略最不容易被 schtasks 挑刺）。
 //
 // RestartOnFailure 是**被外部结束/崩了之后自动拉起**（与服务的失败恢复对齐，2026-10-16 补）：
-// 现场那台 DF.HIS.Launcher 会按进程名杀进程，GUI 形态下被杀之后没人会再去点一下。
+// 现场那台 Vendor.HIS.Launcher 会按进程名杀进程，GUI 形态下被杀之后没人会再去点一下。
 // Interval=PT1M 是计划任务的最小粒度（秒级做不到），Count=3 就是**熔断**：
 // 拉起 3 次仍失败就不再拉（对“配置坏了导致的启动即崩”，不能无限重启把网络反复搞断）。
 func taskXML(exe, dir string, delaySec int) string {

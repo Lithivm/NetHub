@@ -170,7 +170,7 @@ func TestAddDirectRoute(t *testing.T) {
 // 规则开关：切换 + 编辑规则内容时不能把停用状态弄丢。
 func TestRouteEnableSwitch(t *testing.T) {
 	b, _ := newRoutesBackend(t)
-	if err := b.AddRoute("环境A", "172.30.4.0/24", "proxy-a", "", ""); err != nil {
+	if err := b.AddRoute("环境A", "192.0.2.0/24", "proxy-a", "", ""); err != nil {
 		t.Fatalf("加规则失败: %v", err)
 	}
 	if !b.GetRoutes()[0].Enabled {
@@ -186,7 +186,7 @@ func TestRouteEnableSwitch(t *testing.T) {
 	}
 
 	// 停用状态下编辑内容（改名字）→ 不能被重新启用
-	if err := b.SaveRoute(0, RouteInput{Name: "环境A-改名", Targets: "172.30.4.0/24", Chain: "proxy-a"}); err != nil {
+	if err := b.SaveRoute(0, RouteInput{Name: "环境A-改名", Targets: "192.0.2.0/24", Chain: "proxy-a"}); err != nil {
 		t.Fatalf("编辑失败: %v", err)
 	}
 	r := b.GetRoutes()[0]
@@ -198,7 +198,7 @@ func TestRouteEnableSwitch(t *testing.T) {
 	}
 
 	// 停用状态下可以加一条同目标规则（多环境共存），启用状态下不行
-	r2 := RouteInput{Name: "环境B", Targets: "172.30.4.0/24", Chain: "proxy-a"}
+	r2 := RouteInput{Name: "环境B", Targets: "192.0.2.0/24", Chain: "proxy-a"}
 	if err := b.SaveRoute(-1, r2); err != nil {
 		t.Fatalf("停用着第一条时，加同目标规则应允许: %v", err)
 	}

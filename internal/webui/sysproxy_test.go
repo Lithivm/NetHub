@@ -95,7 +95,7 @@ func TestSystemProxyFuncBypass(t *testing.T) {
 		t.Fatalf("公网目标没走代理：%v", u)
 	}
 	// 绕过列表里的（环回、内网段、简单主机名）→ 直连
-	for _, raw := range []string{"http://127.0.0.1:9090/", "http://10.10.10.1/", "http://hisbox/"} {
+	for _, raw := range []string{"http://127.0.0.1:9090/", "http://10.1.2.3/", "http://hisbox/"} {
 		r, _ := http.NewRequest("GET", raw, nil)
 		if u, _ := pf(r); u != nil {
 			t.Errorf("%s 命中绕过列表，却仍被推给代理 %s", raw, u)

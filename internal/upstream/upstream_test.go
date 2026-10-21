@@ -39,7 +39,7 @@ func TestParseSchemes(t *testing.T) {
 		// （实测：同事的 snzyy 链就是这种，见 upstream.go 里的注释）
 		{"socks5+tls://1.2.3.4:10080?auth=dG9rZW4tb25seQ==", "socks5", true, "token-only", "", "1.2.3.4:10080"},
 		// 真实的 snzyy：auth 解出来是 38 字节二进制（含非 ASCII），也得原样当用户名
-		{"socks5+tls://1.2.3.4:10084?auth=SHQxN3FjVDBydEtRb2JHekVWUUcxV2t3a0xSUHlQQTZZS3FXVUg=", "socks5", true, "Ht17qcT0rtKQobGzEVQG1WkwkLRPyPA6YKqWUH", "", "1.2.3.4:10084"},
+		{"socks5+tls://1.2.3.4:10084?auth=dGhpcy1pcy1hLWZha2UtdG9rZW4=", "socks5", true, "this-is-a-fake-token", "", "1.2.3.4:10084"},
 	}
 	for _, c := range cases {
 		up, err := Parse(c.raw)
@@ -321,7 +321,7 @@ func TestDialHostSendsDomain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conn, err := u.DialHost("main.his.com", 8443, 3*time.Second)
+	conn, err := u.DialHost("main.example.com", 8443, 3*time.Second)
 	if err != nil {
 		t.Fatalf("DialHost 失败: %v", err)
 	}
@@ -341,8 +341,8 @@ func TestDialHostSendsDomain(t *testing.T) {
 		}
 		if n := int(req[4]); len(req) < 5+n+2 {
 			t.Fatalf("域名长度字段与实际不符: %x", req)
-		} else if string(req[5:5+n]) != "main.his.com" {
-			t.Errorf("域名应为 main.his.com，实际 %q", string(req[5:5+n]))
+		} else if string(req[5:5+n]) != "main.example.com" {
+			t.Errorf("域名应为 main.example.com，实际 %q", string(req[5:5+n]))
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("没收到 CONNECT 请求")

@@ -14,7 +14,7 @@ import (
 func TestCoverageNoSystemProxyIsOK(t *testing.T) {
 	cfg := &config.Config{
 		Chains: []config.Chain{{Name: "etyy", Forward: "socks5://127.0.0.1:1080"}},
-		Routes: []config.Route{{Name: "内网", Targets: []string{"172.30.4.0/24"}, Chain: "etyy"}},
+		Routes: []config.Route{{Name: "内网", Targets: []string{"192.0.2.0/24"}, Chain: "etyy"}},
 	}
 	c := coverageFor(cfg, ProxyMode{Mode: "none"})
 	if !c.OK {
@@ -31,28 +31,28 @@ func TestCoverageWithSystemProxy(t *testing.T) {
 	cfg := &config.Config{
 		Chains: []config.Chain{{Name: "etyy", Forward: "socks5://127.0.0.1:1080"},
 			{Name: "xaby", Forward: "socks5://127.0.0.1:1081"}},
-		Hosts: config.HostsCfg{Entries: []string{"172.30.4.217 main.his.com"}},
+		Hosts: config.HostsCfg{Entries: []string{"192.0.2.217 main.example.com"}},
 		Routes: []config.Route{
-			{Name: "内网", Targets: []string{"172.30.4.0/24"}, Chain: "etyy"},
-			{Name: "停用的环境", Targets: []string{"219.145.88.134/32"}, Chain: "xaby", Enabled: boolPtr(false)},
+			{Name: "内网", Targets: []string{"192.0.2.0/24"}, Chain: "etyy"},
+			{Name: "停用的环境", Targets: []string{"203.0.113.30/32"}, Chain: "xaby", Enabled: boolPtr(false)},
 		},
 	}
 	pm := ProxyMode{Mode: "system", Enable: true, Server: "127.0.0.1:7890", BypassRaw: "localhost;127.*;10.*;172.16.*"}
 	c := coverageFor(cfg, pm)
 	if c.OK {
-		t.Fatalf("172.30.4.0/24 不在绕过列表里（只绕过了 172.16.*），应报漏掉: %+v", c)
+		t.Fatalf("192.0.2.0/24 不在绕过列表里（只绕过了 172.16.*），应报漏掉: %+v", c)
 	}
 	var hasDomain bool
 	for _, m := range c.Missed {
 		// hosts 条目的名字不会产生 DNS 查询（系统直接查文件），所以报的是它的 **IP**：
 		// 真正该进绕过列表的也是这个 IP。
-		if m == "172.30.4.217" {
+		if m == "192.0.2.217" {
 			hasDomain = true
 		}
-		if m == "219.145.88.134" {
+		if m == "203.0.113.30" {
 			t.Error("停用规则的目标不该进检查（会把同事的停用环境误报成红线）")
 		}
-		if m == "main.his.com" {
+		if m == "main.example.com" {
 			t.Error("hosts 条目应报 IP（它不走 DNS），不该报域名")
 		}
 	}
@@ -61,7 +61,7 @@ func TestCoverageWithSystemProxy(t *testing.T) {
 	}
 
 	// 绕过列表补上（含网段）→ 恢复 OK
-	pm.BypassRaw = "localhost;127.*;10.*;172.16.*;172.30.*"
+	pm.BypassRaw = "localhost;127.*;10.*;172.16.*;192.0.2.*"
 	if c2 := coverageFor(cfg, pm); !c2.OK {
 		t.Errorf("绕过列表覆盖后应 OK，得到 %+v", c2)
 	}
@@ -78,7 +78,7 @@ func boolPtr(b bool) *bool { return &b }
 func TestCoverageDoesNotAlarmOnFalseSignals(t *testing.T) {
 	cfg := &config.Config{
 		Chains: []config.Chain{{Name: "etyy", Forward: "socks5://127.0.0.1:1080"}},
-		Routes: []config.Route{{Name: "内网", Targets: []string{"172.30.4.0/24"}, Chain: "etyy"}},
+		Routes: []config.Route{{Name: "内网", Targets: []string{"192.0.2.0/24"}, Chain: "etyy"}},
 	}
 	cases := []struct {
 		name string
@@ -112,12 +112,12 @@ func TestConfirmedCoverageFiltersTransient(t *testing.T) {
 	cfg := &config.Config{
 		Chains: []config.Chain{{Name: "etyy", Forward: "socks5://127.0.0.1:1080"}},
 		// hosts 条目非空才不会被 real hosts 文件干扰（hostsEntriesFrom 在配置为空时会去读系统 hosts）
-		Hosts:  config.HostsCfg{Entries: []string{"172.30.4.217 main.his.com"}},
-		Routes: []config.Route{{Name: "内网", Targets: []string{"172.30.4.0/24"}, Chain: "etyy"}},
+		Hosts:  config.HostsCfg{Entries: []string{"192.0.2.217 main.example.com"}},
+		Routes: []config.Route{{Name: "内网", Targets: []string{"192.0.2.0/24"}, Chain: "etyy"}},
 	}
 	none := func(time.Duration) {}
 	missing := ProxyMode{Mode: "system", Enable: true, Server: "127.0.0.1:7890", BypassRaw: "localhost"}
-	covered := ProxyMode{Mode: "system", Enable: true, Server: "127.0.0.1:7890", BypassRaw: "localhost;172.30.*"}
+	covered := ProxyMode{Mode: "system", Enable: true, Server: "127.0.0.1:7890", BypassRaw: "localhost;192.0.2.*"}
 
 	// 第一次缺、第二次（确认时）已经好了 → 判定 OK（那次是竞态窗口）
 	reads := []ProxyMode{missing, covered}

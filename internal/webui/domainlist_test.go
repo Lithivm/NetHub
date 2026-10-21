@@ -9,14 +9,14 @@ import (
 // 清洗必须在后端做 —— 前端只按行拆，脏数据进了匹配器就是“永远不命中的垃圾项”。
 func TestCleanDomainList(t *testing.T) {
 	got := cleanDomainList([]string{
-		"  main.his.com  ",
+		"  main.example.com  ",
 		"",
 		"# 影像库",
 		"*.hospital.cn",
-		"main.his.com",                // 重复
-		"db.hospital.cn\nopm.his.com", // 一次贴两行
+		"main.example.com",                // 重复
+		"db.hospital.cn\nopm.example.com", // 一次贴两行
 	})
-	want := []string{"main.his.com", "*.hospital.cn", "db.hospital.cn", "opm.his.com"}
+	want := []string{"main.example.com", "*.hospital.cn", "db.hospital.cn", "opm.example.com"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("cleanDomainList = %#v，想要 %#v", got, want)
 	}

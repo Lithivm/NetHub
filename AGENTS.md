@@ -39,7 +39,7 @@ Go + **Wails v2**（WebView2 界面）+ **WinDivert**（内核驱动），**仅 
   那些名字就没人兑付）。被强杀撤不掉 → `-status` 报 `hosts.stale` 与一条 note，下次启动盖回去。
 - **界面和引擎是两个进程**（`nethub.exe` 后端 + `nethub.exe -frontend` 前端；编排见 `frontend.go`，
   通信见 `internal/ipc`）：现场机器上的 HIS/医保客户端启动器清自己 WebView2 缓存时，
-  **按进程名杀掉全系统所有 `msedgewebview2.exe`**（反编译 DF.HIS.Launcher.exe 的
+  **按进程名杀掉全系统所有 `msedgewebview2.exe`**（反编译 Vendor.HIS.Launcher.exe 的
   `WebMainForm.DelectCache` 实证），界面首当其冲；而 Wails 在浏览器进程消失后会 `os.Exit(-1)`
   且跳过所有收尾。同进程就意味着引擎被连坐 —— 现场表现是“整个 NetHub 静默消失、hosts 段留在
   系统里没人兑付”。拆开之后：被杀只影响界面，引擎/隧道/hosts 毫发无损，后端看护循环约 2 秒
@@ -60,7 +60,7 @@ Go + **Wails v2**（WebView2 界面）+ **WinDivert**（内核驱动），**仅 
 - **日志三档（照抄 Proxifier 的 Normal / Verbose / Debug）**：运行日志页的三段滑块
   `normal | verbose | debug`（配置 `ui.log_level`，默认 normal）。normal **只**写连接 open/close、
   直连/阻断、启停、配置变更、上游状态翻转与错误 —— 连接行是 Proxifier 那种
-  `open: chrome.exe (8804) → main.his.com(172.30.4.217):80 via etyy`（命中哪条规则不进这行）；
+  `open: chrome.exe (8804) → main.example.com(192.0.2.217):80 via etyy`（命中哪条规则不进这行）；
   verbose 加**判定面**（`route.match`、DNS 请求与应答、`upstream.pick` 实际走了哪个上游、
   `conn.stage` 分段耗时、`direct.done` 直连收尾、`stats` 周期快照）；
   debug 加**内部面**（名字表/假 IP 池维护、内核层、规则表编译、过滤器原文、装配细节）；

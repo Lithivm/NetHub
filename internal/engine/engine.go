@@ -1593,7 +1593,7 @@ func (e *Engine) handleConn(c net.Conn) {
 	//	upstream        把域名交给上游解析（同一域名两边解析不同时用）
 	//	auto            本机优先，连不上再把域名交给上游试一次
 	//
-	// 实测教训：我们这套环境里 main.his.com 只有客户网内的 DNS 能解答，
+	// 实测教训：我们这套环境里 main.example.com 只有客户网内的 DNS 能解答，
 	// 上游是公网中转服务器、解析不到（host unreachable）—— 所以不能默认透传。
 	host, hasName := e.nameOf(st.dst)
 	// 目标是我们发的假 IP：绝不能拿它去连（那是个不存在的地址）。
@@ -1629,7 +1629,7 @@ func (e *Engine) handleConn(c net.Conn) {
 	resolveEnd := time.Now()
 
 	// 假 IP 阶段只能按“名字”选链，可能把本该按 IP 走的连接选错
-	// （宽通配如 main.*.com 抢走 10.100.100.0/24 的连接）。真实 IP 到手后，
+	// （宽通配如 main.*.com 抢走 198.51.100.0/24 的连接）。真实 IP 到手后，
 	// 用“IP 优先”的匹配再判一次，以其为准 —— 这就是 v0.2.2 / Proxifier 的语义。
 	if e.isFakeIP(st.dst) && st.action == rules.ActionChain {
 		if real := st.realTarget(); real != nil {
@@ -1704,7 +1704,7 @@ func (e *Engine) handleConn(c net.Conn) {
 		}
 		// 我们自己的探针（DialSelf）**不是业务**：它不进连接列表、不计累计、normal 档不记日志 ——
 		// 隧道失败这条也一样。**探针**（DialSelf 开的连接）会周期性去探不存在的地址，
-		// 按 ERROR 记就是自己给自己刷日志（实测每 60 秒一条“隧道建立失败 10.10.10.0:65533”，
+		// 按 ERROR 记就是自己给自己刷日志（实测每 60 秒一条“隧道建立失败 203.0.113.0:65533”，
 		// 现场会以为真出了事故）。
 		if st.self {
 			e.bus.Debug("tunnel.down: chain=%s target=%s:%d proc=nethub(自检探针) src_port=%d err=%s",
@@ -1761,7 +1761,7 @@ func (e *Engine) handleConn(c net.Conn) {
 		}
 	}
 	// 与 open 同形（Proxifier 的 open/close 也是同一前缀）：
-	//	close: curl.exe (12376) → main.his.com(172.30.4.217):80 via etyy ↑76 B ↓279 B 884ms/997ms
+	//	close: curl.exe (12376) → main.example.com(192.0.2.217):80 via etyy ↑76 B ↓279 B 884ms/997ms
 	// 前一个时间是"连上游（含域名解析）"，后一个是"从发起到收尾"。
 	e.connInfo(st.self, "close: %s → %s via %s ↑%s ↓%s %dms/%dms",
 		connWho(st.procName, st.pid), e.connTargetDial(st.dst, dialDst, st.dport), st.chain,
@@ -3415,8 +3415,8 @@ func connWho(procName string, pid uint32) string {
 
 // connTarget 拼连接级日志里的“目标”：名字已知就写 `名字(IP):端口`。
 //
-// 为什么要名字：现场是运维在看日志，`172.30.4.217:80` 认不出是哪个业务，
-// `main.his.com` 一眼就懂。Proxifier 每条连接都带 hostname，正是这个道理。
+// 为什么要名字：现场是运维在看日志，`192.0.2.217:80` 认不出是哪个业务，
+// `main.example.com` 一眼就懂。Proxifier 每条连接都带 hostname，正是这个道理。
 func (e *Engine) connTarget(ip net.IP, dport uint16) string {
 	if n, ok := e.nameOf(ip); ok && n != "" && n != ip.String() {
 		return fmt.Sprintf("%s(%s):%d", n, ip, dport)
@@ -4462,7 +4462,7 @@ func (e *Engine) applyHostIPs() { e.applyHostIPsTo(e.ruleSet()) }
 
 // applyHostIPsTo 把“名字表里的全部名字（含观察到的）”交给指定规则集。
 //
-// 通配域名（*.his.com）就是靠这一步才能命中：规则层从 map 里挑出后缀匹配的名字，
+// 通配域名（*.example.com）就是靠这一步才能命中：规则层从 map 里挑出后缀匹配的名字，
 // 把它们当前解析到的 IP 填进 hostIPs —— 这决定了过滤器会不会拦住这些 IP。
 //
 // 热重载要用它把学到的名字**继承**给新规则集（否则通配规则会“忘掉”已观察到的名字）。

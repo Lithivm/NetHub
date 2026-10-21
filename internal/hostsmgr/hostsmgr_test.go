@@ -37,10 +37,10 @@ func readFile(t *testing.T, p string) string {
 
 // 块外原有的同名记录必须被接管 —— 否则 Windows 取第一条匹配，我们写的永远不生效。
 func TestApplyTakesOverOutsideEntries(t *testing.T) {
-	initial := "# 原有内容\n192.168.31.85 host.docker.internal\n1.2.3.4 main.his.com\n"
+	initial := "# 原有内容\n192.168.31.85 host.docker.internal\n1.2.3.4 main.example.com\n"
 	p := setup(t, initial)
 
-	res, err := Apply([]string{"172.30.4.217 main.his.com"})
+	res, err := Apply([]string{"192.0.2.217 main.example.com"})
 	if err != nil {
 		t.Fatalf("Apply 失败: %v", err)
 	}
@@ -55,11 +55,11 @@ func TestApplyTakesOverOutsideEntries(t *testing.T) {
 	if !strings.Contains(got, "host.docker.internal") || !strings.Contains(got, "# 原有内容") {
 		t.Errorf("块外其它内容不能被改：\n%s", got)
 	}
-	if strings.Count(got, "main.his.com") != 1 {
+	if strings.Count(got, "main.example.com") != 1 {
 		t.Errorf("同名记录只该剩一条：\n%s", got)
 	}
 	// 块里是我们写的值
-	if ok, why := Verify([]string{"172.30.4.217 main.his.com"}); !ok {
+	if ok, why := Verify([]string{"192.0.2.217 main.example.com"}); !ok {
 		t.Errorf("写完之后 Verify 应该通过，实际: %s", why)
 	}
 }
@@ -67,7 +67,7 @@ func TestApplyTakesOverOutsideEntries(t *testing.T) {
 // 幂等：重复 Apply 不能长出重复条目、文件内容要稳定。
 func TestApplyIdempotent(t *testing.T) {
 	p := setup(t, "# 原文件\n")
-	entries := []string{"172.30.4.217 main.his.com", "10.100.100.99 main.wbzxyy.com"}
+	entries := []string{"192.0.2.217 main.example.com", "198.51.100.99 main.b.example.com"}
 	if _, err := Apply(entries); err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestApplyIdempotent(t *testing.T) {
 // Verify 要能发现三种“被改坏”：块没了 / 块内容变了 / 块外冒出同名记录。
 func TestVerifyDetectsChanges(t *testing.T) {
 	p := setup(t, "# 原文件\n")
-	entries := []string{"172.30.4.217 main.his.com"}
+	entries := []string{"192.0.2.217 main.example.com"}
 	if _, err := Apply(entries); err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestVerifyDetectsChanges(t *testing.T) {
 
 	// ① 块内容被人改掉
 	got := readFile(t, p)
-	_ = os.WriteFile(p, []byte(strings.Replace(got, "172.30.4.217", "1.1.1.1", 1)), 0o644)
+	_ = os.WriteFile(p, []byte(strings.Replace(got, "192.0.2.217", "1.1.1.1", 1)), 0o644)
 	if ok, why := Verify(entries); ok || !strings.Contains(why, "改动") {
 		t.Errorf("块内容被改应该被发现，实际 ok=%v why=%s", ok, why)
 	}
@@ -114,7 +114,7 @@ func TestVerifyDetectsChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	got = readFile(t, p)
-	_ = os.WriteFile(p, []byte("9.9.9.9 main.his.com\n"+got), 0o644)
+	_ = os.WriteFile(p, []byte("9.9.9.9 main.example.com\n"+got), 0o644)
 	if ok, why := Verify(entries); ok || !strings.Contains(why, "块外") {
 		t.Errorf("块外同名应该被发现，实际 ok=%v why=%s", ok, why)
 	}
@@ -123,14 +123,14 @@ func TestVerifyDetectsChanges(t *testing.T) {
 // Remove 只摘掉我们的段，别的不动。
 func TestRemove(t *testing.T) {
 	p := setup(t, "# 原文件\n192.168.31.85 host.docker.internal\n")
-	if _, err := Apply([]string{"172.30.4.217 main.his.com"}); err != nil {
+	if _, err := Apply([]string{"192.0.2.217 main.example.com"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := Remove(); err != nil {
 		t.Fatal(err)
 	}
 	got := readFile(t, p)
-	if strings.Contains(got, "NetHub") || strings.Contains(got, "main.his.com") {
+	if strings.Contains(got, "NetHub") || strings.Contains(got, "main.example.com") {
 		t.Errorf("我们的段应该被摘干净：\n%s", got)
 	}
 	if !strings.Contains(got, "host.docker.internal") {

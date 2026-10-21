@@ -3,7 +3,7 @@ package main
 // 界面进程（-frontend）与它的看护者。
 //
 // 为什么要拆：现场机器上装着的 HIS/医保客户端启动器，在清理自己 WebView2 缓存时会
-// **按进程名杀掉全系统所有 msedgewebview2.exe**（反编译 DF.HIS.Launcher.exe 的
+// **按进程名杀掉全系统所有 msedgewebview2.exe**（反编译 Vendor.HIS.Launcher.exe 的
 // WebMainForm.DelectCache 实证），而界面就是 Wails/WebView2 应用 —— 首当其冲；
 // 更糟的是 Wails 在浏览器进程消失后直接 os.Exit(-1)、跳过所有收尾。界面只要跟引擎
 // 同进程，引擎就被连坐（现场表现：NetHub 整个静默消失、hosts 段留在系统里没人兑付）。

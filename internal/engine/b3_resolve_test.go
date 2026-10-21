@@ -13,7 +13,7 @@ import (
 func TestResolveModeForHonorsLocalWhitelist(t *testing.T) {
 	cfg := &config.Config{Tuning: config.Tuning{
 		DomainResolve:      "upstream",
-		DomainResolveLocal: []string{"main.his.com", "*.hospital.cn"},
+		DomainResolveLocal: []string{"main.example.com", "*.hospital.cn"},
 	}}
 	e := newTestEngine()
 	e.cfg = cfg
@@ -24,7 +24,7 @@ func TestResolveModeForHonorsLocalWhitelist(t *testing.T) {
 		want    string
 		why     string
 	}{
-		{"main.his.com", true, "local", "精确命中白名单"},
+		{"main.example.com", true, "local", "精确命中白名单"},
 		{"db.hospital.cn", true, "local", "通配命中白名单"},
 		{"hospital.cn", true, "upstream", "通配不含裸域名（与规则里的通配语义一致）"},
 		{"api.github.com", true, "upstream", "没命中白名单 → 按全局 upstream"},
