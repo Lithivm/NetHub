@@ -13,8 +13,8 @@ import (
 // 而报错/挂红条 —— 那是把“检测不到”当成了“有问题”。
 func TestCoverageNoSystemProxyIsOK(t *testing.T) {
 	cfg := &config.Config{
-		Chains: []config.Chain{{Name: "etyy", Forward: "socks5://127.0.0.1:1080"}},
-		Routes: []config.Route{{Name: "内网", Targets: []string{"192.0.2.0/24"}, Chain: "etyy"}},
+		Chains: []config.Chain{{Name: "site-a", Forward: "socks5://127.0.0.1:1080"}},
+		Routes: []config.Route{{Name: "内网", Targets: []string{"192.0.2.0/24"}, Chain: "site-a"}},
 	}
 	c := coverageFor(cfg, ProxyMode{Mode: "none"})
 	if !c.OK {
@@ -29,11 +29,11 @@ func TestCoverageNoSystemProxyIsOK(t *testing.T) {
 // 停用的规则不参与：那些环境现在不由我们接管。
 func TestCoverageWithSystemProxy(t *testing.T) {
 	cfg := &config.Config{
-		Chains: []config.Chain{{Name: "etyy", Forward: "socks5://127.0.0.1:1080"},
+		Chains: []config.Chain{{Name: "site-a", Forward: "socks5://127.0.0.1:1080"},
 			{Name: "xaby", Forward: "socks5://127.0.0.1:1081"}},
 		Hosts: config.HostsCfg{Entries: []string{"192.0.2.217 main.example.com"}},
 		Routes: []config.Route{
-			{Name: "内网", Targets: []string{"192.0.2.0/24"}, Chain: "etyy"},
+			{Name: "内网", Targets: []string{"192.0.2.0/24"}, Chain: "site-a"},
 			{Name: "停用的环境", Targets: []string{"203.0.113.30/32"}, Chain: "xaby", Enabled: boolPtr(false)},
 		},
 	}
@@ -77,8 +77,8 @@ func boolPtr(b bool) *bool { return &b }
 // 它们都必须是 OK + 一句说明，不能挂红线。
 func TestCoverageDoesNotAlarmOnFalseSignals(t *testing.T) {
 	cfg := &config.Config{
-		Chains: []config.Chain{{Name: "etyy", Forward: "socks5://127.0.0.1:1080"}},
-		Routes: []config.Route{{Name: "内网", Targets: []string{"192.0.2.0/24"}, Chain: "etyy"}},
+		Chains: []config.Chain{{Name: "site-a", Forward: "socks5://127.0.0.1:1080"}},
+		Routes: []config.Route{{Name: "内网", Targets: []string{"192.0.2.0/24"}, Chain: "site-a"}},
 	}
 	cases := []struct {
 		name string
@@ -110,10 +110,10 @@ func TestCoverageDoesNotAlarmOnFalseSignals(t *testing.T) {
 // 中间那一小段读到的是“代理开着、绕过列表还没写” —— 一次采样就报警 = 一闪一闪的假警报。
 func TestConfirmedCoverageFiltersTransient(t *testing.T) {
 	cfg := &config.Config{
-		Chains: []config.Chain{{Name: "etyy", Forward: "socks5://127.0.0.1:1080"}},
+		Chains: []config.Chain{{Name: "site-a", Forward: "socks5://127.0.0.1:1080"}},
 		// hosts 条目非空才不会被 real hosts 文件干扰（hostsEntriesFrom 在配置为空时会去读系统 hosts）
 		Hosts:  config.HostsCfg{Entries: []string{"192.0.2.217 main.example.com"}},
-		Routes: []config.Route{{Name: "内网", Targets: []string{"192.0.2.0/24"}, Chain: "etyy"}},
+		Routes: []config.Route{{Name: "内网", Targets: []string{"192.0.2.0/24"}, Chain: "site-a"}},
 	}
 	none := func(time.Duration) {}
 	missing := ProxyMode{Mode: "system", Enable: true, Server: "127.0.0.1:7890", BypassRaw: "localhost"}

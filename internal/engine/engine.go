@@ -1373,7 +1373,7 @@ func (e *Engine) dialUpstreamKeyed(ch config.Chain, dst net.IP, dport uint16, ke
 	// 慢则竞速（A10）：候选有两条以上、且第一条超过 race_after 还没连上时，
 	// 把其余的并发拨出去，取先成功的。
 	// 为什么不是“总是并发”：平时并发会成倍放大连接数与客户端 IP 的落地请求，
-	// 只有在“第一条明显慢”时才值得。实测 etyy 的 CONNECT 阶段要 620ms、sjy 只要 75ms，
+	// 只有在“第一条明显慢”时才值得。实测 site-a 的 CONNECT 阶段要 620ms、site-b 只要 75ms，
 	// 这一招能把业务直接拉到快链路。
 	if len(cands) > 1 && e.cfg.RaceAfterDur() > 0 {
 		c, ok, raced, raceErr := e.dialRacing(ch, raws, cands, dst, dport, per, budget)
@@ -1761,7 +1761,7 @@ func (e *Engine) handleConn(c net.Conn) {
 		}
 	}
 	// 与 open 同形（Proxifier 的 open/close 也是同一前缀）：
-	//	close: curl.exe (12376) → main.example.com(192.0.2.217):80 via etyy ↑76 B ↓279 B 884ms/997ms
+	//	close: curl.exe (12376) → main.example.com(192.0.2.217):80 via site-a ↑76 B ↓279 B 884ms/997ms
 	// 前一个时间是"连上游（含域名解析）"，后一个是"从发起到收尾"。
 	e.connInfo(st.self, "close: %s → %s via %s ↑%s ↓%s %dms/%dms",
 		connWho(st.procName, st.pid), e.connTargetDial(st.dst, dialDst, st.dport), st.chain,

@@ -17,7 +17,7 @@ import (
 func mkConn(proc string, ip string, port uint16, act rules.Action, up, down uint64) *connState {
 	st := &connState{
 		dst: net.ParseIP(ip), dport: port, action: act, procName: proc,
-		chain: "etyy", start: time.Now().Add(-10 * time.Second),
+		chain: "site-a", start: time.Now().Add(-10 * time.Second),
 	}
 	st.up.Store(up)
 	st.down.Store(down)
@@ -98,7 +98,7 @@ func TestStatScopes(t *testing.T) {
 func TestStatLiveConnCountedOnce(t *testing.T) {
 	e := newTestEngine()
 	live := &connState{dst: net.ParseIP("10.0.0.7"), dport: 443, action: rules.ActionChain,
-		chain: "sjy", procName: "chrome.exe", appPort: 51000, start: time.Now().Add(-5 * time.Second)}
+		chain: "site-b", procName: "chrome.exe", appPort: 51000, start: time.Now().Add(-5 * time.Second)}
 	live.up.Store(300)
 	live.down.Store(700)
 	live.rateUp.Store(30)
@@ -228,7 +228,7 @@ func TestStatJanitorCommitsRecycled(t *testing.T) {
 
 	// ① 一条“没人动的进行中”（20 分钟没动静）：只有 janitor 会收它
 	stale := &connState{dst: net.ParseIP("10.0.0.8"), dport: 3306, action: rules.ActionChain,
-		chain: "etyy", procName: "magic-api.exe", appPort: 52001,
+		chain: "site-a", procName: "magic-api.exe", appPort: 52001,
 		start: time.Now().Add(-40 * time.Minute), counted: true}
 	stale.up.Store(111)
 	stale.down.Store(222)
@@ -237,7 +237,7 @@ func TestStatJanitorCommitsRecycled(t *testing.T) {
 
 	// ② 一条正常结束过的（finish 已经落过统计）：回收时不能再落
 	finished := &connState{dst: net.ParseIP("10.0.0.9"), dport: 5432, action: rules.ActionChain,
-		chain: "etyy", procName: "his.exe", appPort: 52002, start: time.Now().Add(-30 * time.Minute), counted: true}
+		chain: "site-a", procName: "his.exe", appPort: 52002, start: time.Now().Add(-30 * time.Minute), counted: true}
 	finished.up.Store(1000)
 	finished.down.Store(2000)
 	finished.touch()

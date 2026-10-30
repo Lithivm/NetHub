@@ -31,7 +31,7 @@ func newLines(b *logbus.Bus, since int) string {
 // 现场日志被刷爆才发现（而那时日志已经不好读了）。这条断言是它的守门人。
 func TestRouteMatchOnlyInVerboseTier(t *testing.T) {
 	e := newTestEngine()
-	verdict := "命中第 3 条规则「HIS 主链路（etyy）」 → 走链 etyy"
+	verdict := "命中第 3 条规则「HIS 主链路（site-a）」 → 走链 site-a"
 	n := len(e.bus.Snapshot())
 
 	e.routeMatchLog(51000, net.ParseIP("203.0.113.166"), 6446, "node.exe", 6702, verdict)
@@ -45,7 +45,7 @@ func TestRouteMatchOnlyInVerboseTier(t *testing.T) {
 	if !strings.Contains(got, "route.match: proc=node.exe pid=6702 target=203.0.113.166:6446") {
 		t.Errorf("verbose 档要写出谁在连哪里：%q", got)
 	}
-	if !strings.Contains(got, "走链 etyy") {
+	if !strings.Contains(got, "走链 site-a") {
 		t.Errorf("verbose 档要写出为什么这么走（命中的规则与链）：%q", got)
 	}
 
@@ -93,8 +93,8 @@ func TestDumpStateOnlyInDebugTier(t *testing.T) {
 
 // 每条链计数那行必须稳定排序：两次转储要能直接对比（map 遍历顺序是随机的）。
 func TestChainCountsTextStable(t *testing.T) {
-	in := map[string]uint64{"sjy": 2, "etyy": 724, "direct": 70}
-	if got := chainCountsText(in); got != "direct:70,etyy:724,sjy:2" {
+	in := map[string]uint64{"site-b": 2, "site-a": 724, "direct": 70}
+	if got := chainCountsText(in); got != "direct:70,site-a:724,site-b:2" {
 		t.Errorf("chainCountsText = %q", got)
 	}
 	if got := chainCountsText(nil); got != "无" {
@@ -112,7 +112,7 @@ func TestHitText(t *testing.T) {
 		{0, "", "没有规则命中"},
 		{0, "不该被用到的名字", "没有规则命中"},
 		{3, "", "命中第 3 条规则"},
-		{3, "HIS 主链路（etyy）", "命中第 3 条规则「HIS 主链路（etyy）」"},
+		{3, "HIS 主链路（site-a）", "命中第 3 条规则「HIS 主链路（site-a）」"},
 	} {
 		if got := hitText(c.no, c.name); got != c.want {
 			t.Errorf("hitText(%d, %q) = %q，想要 %q", c.no, c.name, got, c.want)
@@ -130,22 +130,22 @@ func TestSelfProbeConnLogOnlyInVerboseTier(t *testing.T) {
 	e := newTestEngine()
 	n := len(e.bus.Snapshot())
 
-	e.connInfo(true, "open: nethub.exe (1) → 198.51.100.99:443 via sjy")
-	e.connInfo(true, "close: nethub.exe (1) → 198.51.100.99:443 via sjy ↑0 B ↓0 B 1ms/2ms")
+	e.connInfo(true, "open: nethub.exe (1) → 198.51.100.99:443 via site-b")
+	e.connInfo(true, "close: nethub.exe (1) → 198.51.100.99:443 via site-b ↑0 B ↓0 B 1ms/2ms")
 	if got := newLines(e.bus, n); got != "" {
 		t.Fatalf("normal 档不该写自己的探针连接：%q", got)
 	}
 
 	e.bus.SetLevel(logbus.LevelVerbose)
-	e.connInfo(true, "open: nethub.exe (1) → 198.51.100.99:443 via sjy")
+	e.connInfo(true, "open: nethub.exe (1) → 198.51.100.99:443 via site-b")
 	if got := newLines(e.bus, n); !strings.Contains(got, "open: nethub.exe (1) → 198.51.100.99:443") {
 		t.Errorf("verbose 档要能看到探针（否则自检排查没线索）：%q", got)
 	}
 
 	// 真实应用流量照旧：normal 档必须可见
 	n = len(e.bus.Snapshot())
-	e.connInfo(false, "close: chrome.exe (999) → 192.0.2.217:443 via etyy ↑1 B ↓2 B 5ms/9ms")
-	if got := newLines(e.bus, n); !strings.Contains(got, "close: chrome.exe (999) → 192.0.2.217:443 via etyy") {
+	e.connInfo(false, "close: chrome.exe (999) → 192.0.2.217:443 via site-a ↑1 B ↓2 B 5ms/9ms")
+	if got := newLines(e.bus, n); !strings.Contains(got, "close: chrome.exe (999) → 192.0.2.217:443 via site-a") {
 		t.Errorf("应用流量的连接必须在 normal 档可见：%q", got)
 	}
 }
@@ -198,8 +198,8 @@ func TestJudgementLinesStayOutOfNormal(t *testing.T) {
 	// 每一行都写成“最容易被误写成 Info”的形态
 	e.bus.Detail("stats: total=1 new=1 active=0 names=0 fake=0/65534 chain=") // 周期快照
 	e.bus.Detail("dns.query: name=a.example type=A from=127.0.0.1:53")        // DNS 请求
-	e.bus.Detail("upstream.pick: chain=etyy upstream=#1/1 socks5://x:10080 现拨 lat_ms=12")
-	e.bus.Detail("conn.stage: a.exe (1) → x:80 via etyy resolve=1ms dial=2ms first_byte=3ms total=9ms")
+	e.bus.Detail("upstream.pick: chain=site-a upstream=#1/1 socks5://x:10080 现拨 lat_ms=12")
+	e.bus.Detail("conn.stage: a.exe (1) → x:80 via site-a resolve=1ms dial=2ms first_byte=3ms total=9ms")
 	if got := newLines(e.bus, n); got != "" {
 		t.Fatalf("normal 档不该写判定面：%q", got)
 	}
@@ -207,8 +207,8 @@ func TestJudgementLinesStayOutOfNormal(t *testing.T) {
 	e.bus.SetLevel(logbus.LevelVerbose)
 	e.bus.Detail("stats: total=1 new=1 active=0 names=0 fake=0/65534 chain=")
 	e.bus.Detail("dns.query: name=a.example type=A from=127.0.0.1:53")
-	e.bus.Detail("upstream.pick: chain=etyy upstream=#1/1 socks5://x:10080 现拨 lat_ms=12")
-	e.bus.Detail("conn.stage: a.exe (1) → x:80 via etyy resolve=1ms dial=2ms first_byte=3ms total=9ms")
+	e.bus.Detail("upstream.pick: chain=site-a upstream=#1/1 socks5://x:10080 现拨 lat_ms=12")
+	e.bus.Detail("conn.stage: a.exe (1) → x:80 via site-a resolve=1ms dial=2ms first_byte=3ms total=9ms")
 	got := newLines(e.bus, n)
 	for _, want := range []string{"stats:", "dns.query:", "upstream.pick:", "conn.stage:"} {
 		if !strings.Contains(got, want) {

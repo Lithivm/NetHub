@@ -108,7 +108,7 @@
         { input: 'http://main.example.com/', host: '192.0.2.218', port: 80, source: 'hosts 条目', ok: true, rule: '示例链路 A', ruleNo: 1, action: '链 proxy-a', chain: 'proxy-a', note: '同一域名解析到多个地址，浏览器会同时试' },
         { input: 'main.example.com', host: '192.0.2.217', port: 443, source: 'hosts 条目', ok: true, rule: '示例链路 A', ruleNo: 1, action: '链 proxy-a', chain: 'proxy-a', note: '未写协议：浏览器先试哪个取决于 HTTPS-First/HSTS' },
         { input: 'main.example.com', host: '192.0.2.217', port: 80, source: 'hosts 条目', ok: true, rule: '示例链路 A', ruleNo: 1, action: '链 proxy-a', chain: 'proxy-a' },
-        { input: 'https://no-such-host.example.com/', host: 'no-such-host.example.com', port: 443, source: '仅域名', ok: true, rule: 'sjY 链路', ruleNo: 2, action: '链 proxy-b', chain: 'proxy-b', note: '本机解析不到真实地址 —— 实际连接由上游解析' },
+        { input: 'https://no-such-host.example.com/', host: 'no-such-host.example.com', port: 443, source: '仅域名', ok: true, rule: 'site-b 链路', ruleNo: 2, action: '链 proxy-b', chain: 'proxy-b', note: '本机解析不到真实地址 —— 实际连接由上游解析' },
         { input: '10.0.0.0/24', host: '10.0.0.0/24', source: '直接输入', ok: true, rule: '本地直连', ruleNo: 3, action: '直连（不走代理）', chain: 'direct', note: '网段抽样 16 点' },
         { input: '乱写的东西', ok: false, err: '无法识别：要 IP、网段、域名或 URL（如 http://main.example.com/）' },
       ],
@@ -137,7 +137,7 @@
         { target: '192.0.2.217:443', action: '隧道', chain: 'proxy-a', sport: 51804, ageSec: 2, proc: 'HISClient.exe', pid: 8804, ruleNo: 1, ruleName: '示例链路 A', started: '16:16:44', dur: '2s', up: 1741, down: 11264, packets: 12, upBps: 3000, downBps: 9000, state: '进行中', error: '' },
         { target: '192.0.2.217:443', action: '隧道', chain: 'proxy-a', sport: 51805, ageSec: 2, proc: 'HISClient.exe', pid: 8804, ruleNo: 1, ruleName: '示例链路 A', started: '16:16:44', dur: '2s', up: 900, down: 4096, packets: 8, upBps: 1500, downBps: 4000, state: '进行中', error: '' },
         { target: '192.0.2.217:443', action: '隧道', chain: 'proxy-a', sport: 51806, ageSec: 1, proc: 'HISClient.exe', pid: 8804, ruleNo: 1, ruleName: '示例链路 A', started: '16:16:45', dur: '1s', up: 300, down: 1024, packets: 4, upBps: 800, downBps: 2000, state: '进行中', error: '' },
-        { target: '198.51.100.99:443', action: '隧道', chain: 'proxy-b', sport: 51810, ageSec: 1, proc: 'java.exe', pid: 6120, ruleNo: 2, ruleName: 'sjY 链路', started: '16:16:44', dur: '1s', up: 1741, down: 1024, packets: 6, state: '进行中', error: '' },
+        { target: '198.51.100.99:443', action: '隧道', chain: 'proxy-b', sport: 51810, ageSec: 1, proc: 'java.exe', pid: 6120, ruleNo: 2, ruleName: 'site-b 链路', started: '16:16:44', dur: '1s', up: 1741, down: 1024, packets: 6, state: '进行中', error: '' },
         { target: '192.168.199.1:445', action: '直连', chain: 'direct', sport: 51812, ageSec: 8, proc: 'explorer.exe', pid: 3320, ruleNo: 3, ruleName: '本地直连', started: '16:17:02', dur: '8s', up: 512, down: 0, packets: 7, state: '进行中', error: '' },
         { target: '10.9.9.9:22', action: '阻断', chain: 'block', sport: 51814, ageSec: 0, proc: '', pid: 0, ruleNo: 4, ruleName: '阻断运维端口', started: '16:17:05', dur: '0s', up: 0, down: 0, packets: 2, state: '已阻断', error: '' },
         { target: '10.0.0.9:443', action: '隧道', chain: 'proxy-a', sport: 51816, ageSec: 12, proc: 'Navicat.exe', pid: 9911, ruleNo: 1, ruleName: '示例链路 A', started: '16:15:30', dur: '12s', up: 0, down: 0, packets: 0, state: '失败', error: 'socks5+tls://your-host:10080：连代理失败: i/o timeout' },
@@ -189,7 +189,7 @@
     // 历史连接（已结束连接的存档）：界面「历史连接」展开区按需拉。
     // 刻意给三种状态（正常结束 / 失败带原因 / 阻断），好让门禁能断言过滤与失败原因展示。
     GetConnsHistory: () => ({ keep: 300, list: [
-      { target: '198.51.100.99:443', action: '隧道', chain: 'proxy-b', sport: 51233, proc: 'chrome.exe', pid: 4455, ruleNo: 3, ruleName: 'sjY 链路', started: '16:10:02', ended: '16:10:05', durSec: 3, agoSec: 12, up: 2048, down: 8192, packets: 9, state: '已结束', err: '' },
+      { target: '198.51.100.99:443', action: '隧道', chain: 'proxy-b', sport: 51233, proc: 'chrome.exe', pid: 4455, ruleNo: 3, ruleName: 'site-b 链路', started: '16:10:02', ended: '16:10:05', durSec: 3, agoSec: 12, up: 2048, down: 8192, packets: 9, state: '已结束', err: '' },
       { target: '192.0.2.217:443', action: '隧道', chain: 'proxy-a', sport: 51240, proc: 'DF.HIS.exe', pid: 8804, ruleNo: 1, ruleName: '示例链路 A', started: '16:09:40', ended: '16:09:41', durSec: 1, agoSec: 33, up: 900, down: 0, packets: 3, state: '失败', err: '连代理失败: i/o timeout' },
       { target: '10.9.9.9:22', action: '阻断', chain: 'block', sport: 51241, proc: '', pid: 0, ruleNo: 4, ruleName: '阻断运维端口', started: '16:09:30', ended: '16:09:30', durSec: 0, agoSec: 43, up: 0, down: 0, packets: 2, state: '已阻断', err: '' },
     ] }),

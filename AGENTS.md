@@ -60,7 +60,7 @@ Go + **Wails v2**（WebView2 界面）+ **WinDivert**（内核驱动），**仅 
 - **日志三档（照抄 Proxifier 的 Normal / Verbose / Debug）**：运行日志页的三段滑块
   `normal | verbose | debug`（配置 `ui.log_level`，默认 normal）。normal **只**写连接 open/close、
   直连/阻断、启停、配置变更、上游状态翻转与错误 —— 连接行是 Proxifier 那种
-  `open: chrome.exe (8804) → main.example.com(192.0.2.217):80 via etyy`（命中哪条规则不进这行）；
+  `open: chrome.exe (8804) → main.example.com(192.0.2.217):80 via site-a`（命中哪条规则不进这行）；
   verbose 加**判定面**（`route.match`、DNS 请求与应答、`upstream.pick` 实际走了哪个上游、
   `conn.stage` 分段耗时、`direct.done` 直连收尾、`stats` 周期快照）；
   debug 加**内部面**（名字表/假 IP 池维护、内核层、规则表编译、过滤器原文、装配细节）；
@@ -139,18 +139,21 @@ go build -tags production -ldflags "-H=windowsgui -s -w" -o run/nethub.exe .
 pwsh -NoProfile -File ./tools/check-ui.ps1                  # 改完前端必须跑（boot 不报错 + 无未定义函数 + **结构断言**：标签成对 / tab↔页面一一对应 / main 下无孤儿）
 pwsh -NoProfile -File ./tools/ui-controls-test.ps1          # 勾选/下拉真的调到了后端 + 卡片标题不被挤成两行
 pwsh -NoProfile -File ./tools/tray-fix.ps1                   # 托盘回归（**需管理员**）：换 exe+重启，验「X 收进托盘→托盘能叫回」+「强杀引擎不留孤儿界面」
-pwsh -NoProfile -File ./local/restart.ps1                   # 快速优雅重启 + 复测内网目标
-pwsh -NoProfile -File ./local/accept.ps1                    # 验收门禁（重启→驱动→连通→热生效→还原）；**退出码 0/非0 可判，发版前必须跑**
-pwsh -NoProfile -File ./local/accept.ps1 -InjectFault        # 门禁自检：故意注入故障，证明它真会失败（防“永远绿灯的假门禁”）
+pwsh -NoProfile -File ./tools/restart.ps1                   # 快速优雅重启 + 复测目标（目标用 -Targets 传）
+pwsh -NoProfile -File ./tools/accept.ps1                    # 验收门禁（重启→驱动→连通→热生效→还原）；**退出码 0/非0 可判，发版前必须跑**
+pwsh -NoProfile -File ./tools/accept.ps1 -InjectFault        # 门禁自检：故意注入故障，证明它真会失败（防“永远绿灯的假门禁”）
 ./run/nethub.exe -check | -status | -apply <新配置> | -quit   # 控制面：验 / 看 / 切 / 停（不需管理员）
 pwsh -NoProfile -File ./tools/deploy.ps1 -Zip <zip> -Autostart -Start -Accept   # 无人值守部署（解压→配置→自启→启动→验收；并把该加的白名单打出来）
 pwsh -NoProfile -File ./tools/memwatch.ps1                  # 长跑采样（内存/句柄/名字表/假IP池）→ run/memwatch.csv
 ```
 
-**`tools/` 与 `local/` 的分工**：`tools/` 里的通用工具（自检 / 截图 / 打包 / 装机 / 采样）
-**入库**，任何人 clone 下来都能跑（路径都基于 `$PSScriptRoot`，不写死本机目录）；
+**`tools/` 与 `local/` 的分工**：`tools/` 里的通用工具（自检 / 截图 / 打包 / 装机 / 采样 / 验收）
+**入库**，任何人 clone 下来都能跑（路径都基于 `$PSScriptRoot`，不写死本机目录；**不写任何客户地址**）；
 `local/` 只放本机专属的（含现场地址、凭据、二进制、一次性实验），不入库也不入包。
-`restart.ps1` / `accept.ps1` 仍留在 `local/`——它们写死了现场地址，等脱敏参数化后再搬。
+
+目标不再写死在脚本里：`accept` / `restart` / `verify-after-reboot` / `porttest` 都接
+`-Targets 'IP:端口[:名字]',...`（**仓库默认空**，空则跳过连通性检查，不会造成“永远红灯的假门禁”）；
+`test-upstream -Upstream 'IP:端口',...` 同理（上游入口是现场资产）。验收时把现场目标传进去。
 
 `-status` 里的 `runtime` 块是**运行实例自己写的**（exe 同目录 `runtime.json`）：在不在跑、吃的
 是哪份配置（`configHash` / `configMatchesFile`）、有哪些改动还没生效（`restartNeeded`）。

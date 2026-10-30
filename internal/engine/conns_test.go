@@ -227,7 +227,7 @@ func TestConnsResolveProcess(t *testing.T) {
 // 这条对应真实事故（同事机上 40 次拦截、0 次到 relay，日志却一片安静）。
 func TestRelayWatchdog(t *testing.T) {
 	e := newTestEngine()
-	st := &connState{dst: net.ParseIP("192.0.2.220"), dport: 9056, chain: "etyy",
+	st := &connState{dst: net.ParseIP("192.0.2.220"), dport: 9056, chain: "site-a",
 		action: rules.ActionChain, start: time.Now().Add(-10 * time.Second)}
 	st.touch()
 	e.mu.Lock()
@@ -235,7 +235,7 @@ func TestRelayWatchdog(t *testing.T) {
 	e.mu.Unlock()
 
 	// 已经送达 relay 的 → 不该被判成异常
-	ok := &connState{dst: net.ParseIP("10.0.0.5"), dport: 443, chain: "etyy",
+	ok := &connState{dst: net.ParseIP("10.0.0.5"), dport: 443, chain: "site-a",
 		action: rules.ActionChain, start: time.Now().Add(-10 * time.Second)}
 	ok.touch()
 	ok.relayed.Store(true)

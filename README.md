@@ -147,8 +147,8 @@ $st.tuning.quicBlock   # QUIC 阻断开着没有
 - 写在 `nethub.exe` 同目录的 `logs/nethub.log`（8 MB 轮转、**保留 5 份**，界面「运行日志」页看实时）。
 - **一条连接两行**，格式照 Proxifier 的 open/close（谁 → 哪 → 哪条链）：
   ```
-  open : chrome.exe (8804) → main.example.com(192.0.2.217):80 via etyy
-  close: chrome.exe (8804) → main.example.com(192.0.2.217):80 via etyy ↑76 B ↓279 B 884ms/997ms
+  open : chrome.exe (8804) → main.example.com(192.0.2.217):80 via site-a
+  close: chrome.exe (8804) → main.example.com(192.0.2.217):80 via site-a ↑76 B ↓279 B 884ms/997ms
   ```
   —— 名字学到的就带上名字（运维认名字不认 IP）；末尾两个时间是「连上游（含域名解析）」与
   「从发起到收尾」。**命中哪条规则**不在这两行里（那是 `verbose` 的 `route.match`），

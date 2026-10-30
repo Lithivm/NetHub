@@ -401,7 +401,7 @@ func (u *Upstream) dialVia() socks.Dialer {
 //	打通（ConnectOn）：一条 CONNECT 请求                      ← 必须等知道目标才能做
 //
 // 连接池把"预备好的连接"养着，业务来了只做第二段。
-// 实测：现网上游预备要 193～258ms（etyy 甚至 700ms+），打通只要 1 个 RTT。
+// 实测：现网上游预备要 193～258ms（site-a 甚至 700ms+），打通只要 1 个 RTT。
 
 // Prepare 连上上游并把握手做到"只差 CONNECT"。不支持的上游返回 ErrNoPrepare。
 func (u *Upstream) Prepare(timeout time.Duration) (net.Conn, error) {

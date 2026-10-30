@@ -34,7 +34,7 @@ $tmpT = Join-Path $fe '_ctrl.html'
 $tmpM = Join-Path $fe '_ctrl_mock.js'
 
 # ---------- build the recording mock ----------
-$mock = Get-Content (Join-Path $root 'local\shot\mock.js') -Raw -Encoding UTF8
+$mock = Get-Content (Join-Path $root 'tools\shot\mock.js') -Raw -Encoding UTF8
 $recorder = @'
 // record every engine call the frontend makes (name + args), then delegate to the mock table.
 //

@@ -278,7 +278,7 @@ func fnv32a(s string) uint32 {
 // 探到什么程度：TCP+TLS+**认证**，再 CONNECT 一个公网地址确认它真能转发。
 //
 // 为什么必须带上认证：旧版只做 TCP+TLS，于是**口令错了也报“可用（96ms）”** ——
-// 真实事故里 sjy 的口令被上游间歇性拒掉，界面一直绿着，靠外部工具才查出来。
+// 真实事故里 site-b 的口令被上游间歇性拒掉，界面一直绿着，靠外部工具才查出来。
 // 公网探针（223.5.5.5:443）不涉及客户内网的任何服务器，所以“不打扰内网”这条仍然成立。
 func (e *Engine) probeChain(ch config.Chain) {
 	e.markProbing(ch.Name, true)

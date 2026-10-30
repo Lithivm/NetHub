@@ -186,7 +186,7 @@ func selfSignedCert(t *testing.T) tls.Certificate {
 // 代理段体检：口令对 → AuthOK；口令错 → AuthOK=false 且原因说清"认证被拒"。
 //
 // 钉住一个真实教训：旧的探测只做 TCP+TLS，口令错了界面照样显示"可用（96ms）"，
-// 把人骗了很久（真实事故：sjy 的口令被上游间歇性拒掉，界面一直绿着）。
+// 把人骗了很久（真实事故：site-b 的口令被上游间歇性拒掉，界面一直绿着）。
 func TestProbeAuth(t *testing.T) {
 	addr, stop := fakeSocks5(t, "u", "p")
 	defer stop()

@@ -26,8 +26,8 @@ func TestConfigExportImportRoundTripWithCreds(t *testing.T) {
 	// 直连/阻断/多目标/端口/通配域名/hosts/tuning 全带上。
 	src := `relay: 127.0.0.1:0
 chains:
-    - name: etyy
-      forward: socks5+tls://etyy-user:p%40ss%3Aword@10.0.0.1:10080
+    - name: site-a
+      forward: socks5+tls://site-a-user:p%40ss%3Aword@10.0.0.1:10080
       strategy: failover
       probe: 30s
     - name: snzyy
@@ -40,7 +40,7 @@ routes:
       ports:
         - "443"
         - 8000-8010
-      chain: etyy
+      chain: site-a
     - name: 更新端口直连
       targets:
         - 10.2.0.0/24

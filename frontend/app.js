@@ -932,7 +932,7 @@ async function loadConnsOnce() {
   conns = (d && d.list) || [];
 
   document.getElementById('badgeConn').textContent = (d && d.active) || 0;
-  // 汇总行：每一段都带**标签**（以前直接拼 `etyy 812　sjy 402`，数字小了就成了
+  // 汇总行：每一段都带**标签**（以前直接拼 `site-a 812　site-b 402`，数字小了就成了
   // “etyy12 syj1”这种看不懂的东西 —— 用户反馈过）
   const per = d && d.perChain
     ? Object.keys(d.perChain).map(k => k + ' ' + d.perChain[k]).join(' · ')

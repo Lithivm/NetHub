@@ -875,7 +875,7 @@ func TestTargetAcceptsHostname(t *testing.T) {
 		"opm.example.com.": "opm.example.com",
 		"10.0.0.5":         "10.0.0.5/32",
 		"10.0.0.0/24":      "10.0.0.0/24",
-		"main-wbzxyy.cn":   "main-wbzxyy.cn",
+		"main-site-a.cn":   "main-site-a.cn",
 		"a1.b2-c3.d4.com":  "a1.b2-c3.d4.com",
 		// 通配域名（靠观察到的 DNS 匹配）：归一化成 小写 + 单个前导 *
 		"*.EXAMPLE.com":  "*.example.com",
@@ -1011,11 +1011,11 @@ func TestFlattenLegacySecrets(t *testing.T) {
 func TestWildcardFromYAML(t *testing.T) {
 	y := `version: 1
 chains:
-  - name: etyy
+  - name: site-a
     forward: socks5://u:p@1.2.3.4:1080
 routes:
   - targets: ["198.51.100.*"]
-    chain: etyy
+    chain: site-a
     enabled: true
 `
 	// 走真实的加载路径（写文件 → Load → Normalize → Rules）
@@ -1050,11 +1050,11 @@ routes:
 func TestIPRangeFromYAML(t *testing.T) {
 	y := `version: 1
 chains:
-  - name: etyy
+  - name: site-a
     forward: socks5://u:p@1.2.3.4:1080
 routes:
   - targets: ["192.0.2.1-192.0.2.255", "10.0.0.0-10.0.0.255"]
-    chain: etyy
+    chain: site-a
     enabled: true
 `
 	path := filepath.Join(t.TempDir(), "config.yaml")

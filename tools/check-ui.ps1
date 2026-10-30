@@ -101,7 +101,7 @@ if ($structBad.Count -gt 0) {
 }
 
 # ───────── ② 动态：跑一遍页面 ─────────
-Copy-Item (Join-Path $root 'local\shot\mock.js') $tmpM -Force
+Copy-Item (Join-Path $root 'tools\shot\mock.js') $tmpM -Force
 $html = Get-Content (Join-Path $fe 'index.html') -Raw -Encoding UTF8
 $html = $html.Replace('<script src="app.js"></script>',
   '<script src="_check_mock.js"></script>' + "`n" + '<script src="app.js"></script>')

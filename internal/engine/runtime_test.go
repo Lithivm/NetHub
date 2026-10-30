@@ -47,14 +47,14 @@ func TestStatusWarnings(t *testing.T) {
 		{"别人也在用 WinDivert", func(st *RuntimeStatus, _ *ChainSummary) {
 			st.Kernel.Peers = []string{"clash-verge.exe"}
 		}, "kernel.peers", false},
-		{"链不可用", func(_ *RuntimeStatus, ch *ChainSummary) { ch.Down = []string{"sjy"} }, "chain.down", false},
+		{"链不可用", func(_ *RuntimeStatus, ch *ChainSummary) { ch.Down = []string{"site-b"} }, "chain.down", false},
 		// 刚启动那几十秒“还没探过”是正常态 —— 这条最容易变成误报
 		{"刚启动时不报未探过", func(st *RuntimeStatus, ch *ChainSummary) {
 			st.UptimeSec = 12
-			ch.Untested = []string{"etyy"}
+			ch.Untested = []string{"site-a"}
 		}, "chain.untested", true},
 		{"跑久了还没探过要报", func(_ *RuntimeStatus, ch *ChainSummary) {
-			ch.Untested = []string{"etyy"}
+			ch.Untested = []string{"site-a"}
 		}, "chain.untested", false},
 		{"有目标被前面的规则盖住", func(st *RuntimeStatus, _ *ChainSummary) {
 			st.Rules.Shadowed = []string{"第 2 条「排除更新端口」（1 个目标被覆盖）"}
@@ -108,7 +108,7 @@ func TestStatusWarningsErrorsFirst(t *testing.T) {
 		Rules:  RuleFace{Total: 7, Shadowed: []string{"第 2 条「x」（1 个目标被覆盖）"}},
 		Conns:  ConnFace{ProcKnown: 1, ProcUnknow: 9},
 	}
-	got := statusWarnings(st, ChainSummary{Total: 1, Down: []string{"sjy"}})
+	got := statusWarnings(st, ChainSummary{Total: 1, Down: []string{"site-b"}})
 	if len(got) < 2 {
 		t.Fatalf("这条状态应当至少两条提示：%v", kinds(got))
 	}

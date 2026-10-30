@@ -16,7 +16,7 @@ func TestConnsHistoryRecordsEnded(t *testing.T) {
 	e := newTestEngine()
 
 	// ① 正常结束的一条
-	ok := &connState{dst: net.ParseIP("192.0.2.217"), dport: 443, chain: "etyy",
+	ok := &connState{dst: net.ParseIP("192.0.2.217"), dport: 443, chain: "site-a",
 		action: rules.ActionChain, start: time.Now().Add(-5 * time.Second), procName: "Vendor.HIS.exe", pid: 88, appPort: 51001}
 	ok.up.Store(1741)
 	ok.down.Store(11264)
@@ -24,13 +24,13 @@ func TestConnsHistoryRecordsEnded(t *testing.T) {
 	e.finish(ok)
 
 	// ② 失败的一条（错误信息必须带进存档 —— 这正是诊断要看的东西）
-	bad := &connState{dst: net.ParseIP("198.51.100.99"), dport: 443, chain: "sjy",
+	bad := &connState{dst: net.ParseIP("198.51.100.99"), dport: 443, chain: "site-b",
 		action: rules.ActionChain, start: time.Now().Add(-2 * time.Second), procName: "chrome.exe", pid: 77, appPort: 51002}
 	bad.fail("连代理失败: i/o timeout")
 	e.finish(bad)
 
 	// ③ 我们自己的探针：不进存档（与「当前连接」列表同口径）
-	probe := &connState{dst: net.ParseIP("10.0.0.1"), dport: 80, chain: "etyy",
+	probe := &connState{dst: net.ParseIP("10.0.0.1"), dport: 80, chain: "site-a",
 		action: rules.ActionChain, start: time.Now(), self: true, appPort: 51003}
 	e.finish(probe)
 
@@ -78,7 +78,7 @@ func TestConnsHistoryBounded(t *testing.T) {
 	e := newTestEngine()
 	for i := 0; i < ConnHistKeep+50; i++ {
 		st := &connState{dst: net.ParseIP("10.0.0.1"), dport: uint16(1000 + i%1000),
-			chain: "etyy", action: rules.ActionChain, start: time.Now(), appPort: uint16(i)}
+			chain: "site-a", action: rules.ActionChain, start: time.Now(), appPort: uint16(i)}
 		e.finish(st)
 	}
 	got := e.ConnsHistory(0)

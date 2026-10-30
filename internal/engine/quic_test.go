@@ -83,8 +83,8 @@ func TestBuildICMPUnreachable(t *testing.T) {
 func TestBuildMainFilterQuicClause(t *testing.T) {
 	rs := rules.New()
 	if err := rs.Load([]rules.Route{
-		{Name: "内网", Targets: []string{"10.1.0.0/24"}, Chain: "etyy"},
-		{Name: "只走 8080", Targets: []string{"10.2.0.0/24"}, Ports: []string{"8080"}, Chain: "etyy"},
+		{Name: "内网", Targets: []string{"10.1.0.0/24"}, Chain: "site-a"},
+		{Name: "只走 8080", Targets: []string{"10.2.0.0/24"}, Ports: []string{"8080"}, Chain: "site-a"},
 		{Name: "直连", Targets: []string{"192.168.5.0/24"}, Chain: "direct", Action: rules.ActionDirect},
 	}); err != nil {
 		t.Fatal(err)

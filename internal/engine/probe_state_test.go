@@ -13,7 +13,7 @@ import (
 func TestProbingState(t *testing.T) {
 	e := newTestEngine()
 	e.cfg = &config.Config{Chains: []config.Chain{
-		{Name: "etyy", Forward: "socks5://127.0.0.1:1080", Probe: "30s"},
+		{Name: "site-a", Forward: "socks5://127.0.0.1:1080", Probe: "30s"},
 	}}
 
 	if e.ProbingChains() != 0 {
@@ -23,7 +23,7 @@ func TestProbingState(t *testing.T) {
 		t.Fatalf("没在探时不该说在探：%+v", h)
 	}
 
-	e.markProbing("etyy", true)
+	e.markProbing("site-a", true)
 	if h := e.ChainHealth(); !h[0].Probing {
 		t.Error("探测在飞时，界面必须能看到")
 	}
@@ -32,12 +32,12 @@ func TestProbingState(t *testing.T) {
 	}
 
 	// 计数可重入：定时探测与手动探测会叠在同一条链上（一轮按链顺序做，可能几十秒）
-	e.markProbing("etyy", true)
-	e.markProbing("etyy", false)
+	e.markProbing("site-a", true)
+	e.markProbing("site-a", false)
 	if !e.ChainHealth()[0].Probing {
 		t.Error("两层叠加时，结束一层不该认为探完了")
 	}
-	e.markProbing("etyy", false)
+	e.markProbing("site-a", false)
 	if e.ChainHealth()[0].Probing {
 		t.Error("两层都结束后应清掉")
 	}
@@ -82,7 +82,7 @@ func TestProbingVisibleWhileInFlight(t *testing.T) {
 	}()
 
 	e := newTestEngine()
-	ch := config.Chain{Name: "etyy", Forward: "socks5://" + ln.Addr().String(), Probe: "30s"}
+	ch := config.Chain{Name: "site-a", Forward: "socks5://" + ln.Addr().String(), Probe: "30s"}
 	e.cfg = &config.Config{Chains: []config.Chain{ch}}
 
 	done := make(chan struct{})

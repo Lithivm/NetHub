@@ -14,7 +14,7 @@ import (
 // 漏了的表现是“DNS 接管之后应用连假 IP 连不上”（包根本不在过滤器里）。
 func TestBuildMainFilterIncludesFakeRange(t *testing.T) {
 	rs := rules.New()
-	if err := rs.Load([]rules.Route{{Name: "内网", Targets: []string{"10.1.0.0/24"}, Chain: "etyy"}}); err != nil {
+	if err := rs.Load([]rules.Route{{Name: "内网", Targets: []string{"10.1.0.0/24"}, Chain: "site-a"}}); err != nil {
 		t.Fatal(err)
 	}
 	e := newRulesEngine(&config.Config{}, rs)
@@ -54,7 +54,7 @@ func TestBuildMainFilterEmptyWhenOnlyDirect(t *testing.T) {
 // 热重载：引擎没在跑 → 明确报 ErrNotRunning（调用方要说“已落盘，但运行实例没应用”）。
 func TestReloadRulesNotRunning(t *testing.T) {
 	rs := rules.New()
-	if err := rs.Load([]rules.Route{{Name: "内网", Targets: []string{"10.1.0.0/24"}, Chain: "etyy"}}); err != nil {
+	if err := rs.Load([]rules.Route{{Name: "内网", Targets: []string{"10.1.0.0/24"}, Chain: "site-a"}}); err != nil {
 		t.Fatal(err)
 	}
 	e := newRulesEngine(&config.Config{}, rs)
@@ -70,7 +70,7 @@ func TestReloadRulesNotRunning(t *testing.T) {
 // 表现为“刚还好好的，保存一次规则后不通了”。
 func TestReloadRulesInheritsLearnedNames(t *testing.T) {
 	old := rules.New()
-	if err := old.Load([]rules.Route{{Name: "通配", Targets: []string{"*.example.com"}, Chain: "etyy"}}); err != nil {
+	if err := old.Load([]rules.Route{{Name: "通配", Targets: []string{"*.example.com"}, Chain: "site-a"}}); err != nil {
 		t.Fatal(err)
 	}
 	e := newRulesEngine(&config.Config{}, old)
@@ -88,7 +88,7 @@ func TestReloadRulesInheritsLearnedNames(t *testing.T) {
 
 	ns := rules.New()
 	// 新规则集：同样只覆盖 *.example.com，只把链换一条 —— 过滤器字符串不变
-	if err := ns.Load([]rules.Route{{Name: "通配", Targets: []string{"*.example.com"}, Chain: "sjy"}}); err != nil {
+	if err := ns.Load([]rules.Route{{Name: "通配", Targets: []string{"*.example.com"}, Chain: "site-b"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.ReloadRules(ns); err != nil {
