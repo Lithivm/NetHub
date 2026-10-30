@@ -228,54 +228,129 @@ async function sortRoutes() {
 
 async function explainTarget() {
   const raw = (document.getElementById('explainIp').value || '').trim();
-  if (!raw) { toast('先填一批目标', '每行一个，例如 10.0.0.5:5432 或 172.16.0.0/24', 'warn'); return; }
-
-  // 先按和后台一致的规则切一遍，决定是“详细解释”还是“批量表”
-  const tokens = raw.split(/[\n,，;；\t ]+/).map(s => {
-    const i = s.indexOf('#');
-    return (i >= 0 ? s.slice(0, i) : s).trim();
-  }).filter(Boolean);
-
-  if (tokens.length === 1) { return explainOne(tokens[0]); }
+  if (!raw) {
+    toast('先填一批目标', '一行一个，例如 http://main.example.com/ 或 10.0.0.5:5432', 'warn');
+    return;
+  }
 
   let v;
   try { v = await call('SimulateTargets', raw); }
   catch (e) { fail(e); return; }
 
-  const head = el('div', 'sim-summary');
-  head.textContent = v.summary;
-  const box = el('div', 'sim-box');
+  // 单条且形如 IP[:端口] 时，再附上「详细解释」（链健康、目标巡检、被抢先的规则）——
+  // 这些是连接级的细节，批量表里放不下，但排查“为什么走这条链”时最有用。
+  let detail = '';
+  const tokens = splitSimTokens(raw);
+  if (tokens.length === 1 && /^[0-9]+(\.[0-9]+){3}(:\d{1,5})?$/.test(tokens[0])) {
+    detail = await explainOneText(tokens[0]);
+  }
+  renderSimResult(v, detail);
+}
+
+// splitSimTokens 与后端 parseSimInput 同一套切法：行/逗号/分号/空白，# 注释。
+function splitSimTokens(raw) {
+  return raw.split(/[\n,，;；\t ]+/).map(s => {
+    const i = s.indexOf('#');
+    return (i >= 0 ? s.slice(0, i) : s).trim();
+  }).filter(Boolean);
+}
+
+// renderSimResult 把结果画在**页内**（不再弹窗）：
+// 多行展开的结果要能一边对照规则表一边看，还要能整块复制带走。
+function renderSimResult(v, detailText) {
+  const box = document.getElementById('simResult');
+  if (!box) return;
+  box.innerHTML = '';
+  box.hidden = false;
+
+  const head = el('div', 'sim-head');
+  head.appendChild(el('div', 'sim-summary', v.summary || ''));
+  head.appendChild(btn('复制结果', 'btn btn-sm', async () => {
+    try {
+      await navigator.clipboard.writeText(simAsText(v));
+      toast('已复制', '结果已复制到剪贴板（能直接贴进工单/群）', 'success');
+    } catch (e) { toast('复制失败', '请手动选中表格复制（Ctrl+C）', 'warn'); }
+  }));
+  head.appendChild(btn('收起', 'btn btn-sm', () => { box.hidden = true; box.innerHTML = ''; }));
   box.appendChild(head);
 
-  const tbl = el('div', 'table');
-  const th = el('div', 'trow thead sim-grid');
-  ['目标', '会怎么走', '命中的规则'].forEach(h => th.appendChild(el('div', 'cell', h)));
+  // 前提假设：跟具体某一条无关，默认收起（现场要的是那几行结论，不是一屏免责声明）
+  if (v.hints && v.hints.length) {
+    const d = document.createElement('details');
+    d.className = 'sim-hints';
+    const s = document.createElement('summary');
+    s.textContent = '模拟前提（' + v.hints.length + ' 条）：浏览器的哪些行为我们没去猜';
+    d.appendChild(s);
+    const ul = el('ul', 'sim-hint-list');
+    v.hints.forEach(h => ul.appendChild(el('li', null, h)));
+    d.appendChild(ul);
+    box.appendChild(d);
+  }
+
+  const tbl = el('div', 'table sim-table');
+  const th = el('div', 'trow thead sim2-grid');
+  ['输入', '实际连接', '来源', '会怎么走', '命中的规则', '说明'].forEach(t =>
+    th.appendChild(el('div', 'cell', t)));
   tbl.appendChild(th);
   (v.rows || []).forEach(r => {
-    const row = el('div', 'trow sim-grid');
+    const row = el('div', 'trow sim2-grid');
     row.appendChild(el('div', 'cell mono', r.input || ''));
-    const c2 = el('div', 'cell');
+    row.appendChild(el('div', 'cell mono', r.host
+      ? (r.host + (r.port ? ':' + r.port : ''))
+      : '—'));
+    row.appendChild(el('div', 'cell sim-src', r.source || '—'));
+    const c4 = el('div', 'cell');
     const badge = el('span', 'sim-badge ' + actionClass(r));
     badge.textContent = !r.ok ? '无法解析' : (r.action || '未命中');
-    c2.appendChild(badge);
-    row.appendChild(c2);
-    row.appendChild(el('div', 'cell dim', !r.ok ? (r.err || '')
-      : ((r.ruleNo ? '第 ' + r.ruleNo + ' 条 ' : '') + (r.rule || '—') +
-        (r.chain ? ' → ' + r.chain : '') + (r.note ? '　（' + r.note + '）' : ''))));
+    c4.appendChild(badge);
+    row.appendChild(c4);
+    row.appendChild(el('div', 'cell', !r.ok ? '—'
+      : ((r.ruleNo ? '第 ' + r.ruleNo + ' 条 ' : '') + (r.rule || '—'))));
+    row.appendChild(el('div', 'cell dim wrap', !r.ok ? (r.err || '') : (r.note || '')));
     tbl.appendChild(row);
   });
   box.appendChild(tbl);
-  modal.open('批量模拟结果', [box], null);
+
+  if (detailText) {
+    const d = document.createElement('details');
+    d.className = 'sim-detail';
+    const s = document.createElement('summary');
+    s.textContent = '详细解释（链健康、目标巡检、被抢先的规则）';
+    d.appendChild(s);
+    const pre = el('pre', 'explain-out mono');
+    pre.textContent = detailText;
+    d.appendChild(pre);
+    box.appendChild(d);
+  }
 }
 
-// 单个目标：沿用原来的详细解释（含链健康、目标巡检、被抢先的规则）
-async function explainOne(raw) {
+// simAsText 把结果摊成**站得住的纯文本**（TSV）—— 发到群里也不会被表格吃掉对齐。
+function simAsText(v) {
+  const lines = [['输入', '实际连接', '来源', '动作', '规则', '链', '说明'].join('\t')];
+  (v.rows || []).forEach(r => lines.push([
+    r.input || '',
+    (r.host || '') + (r.port ? ':' + r.port : ''),
+    r.source || '',
+    r.ok ? (r.action || '') : '无法解析',
+    r.ok ? (r.rule || '') : (r.err || ''),
+    r.chain || '',
+    r.note || '',
+  ].join('\t')));
+  if (v.hints && v.hints.length) {
+    lines.push('', '前提：');
+    v.hints.forEach(h => lines.push('· ' + h));
+  }
+  return lines.join('\n');
+}
+
+// explainOneText 单个 IP 的详细解释（含链健康、目标巡检、被抢先的规则），返回纯文本。
+async function explainOneText(raw) {
   const i = raw.lastIndexOf(':');
   const ip = i > 0 ? raw.slice(0, i) : raw;
   const port = i > 0 ? raw.slice(i + 1) : '';
   let v;
   try { v = await call('ExplainTarget', ip, port); }
-  catch (e) { toast('查不了', (e && e.message) || String(e), 'error'); return; }
+  catch (e) { return '详细解释取不到：' + ((e && e.message) || String(e)); }
 
   const lines = [];
   if (!v.matched) {
@@ -308,9 +383,7 @@ async function explainOne(raw) {
     lines.push('被抢先、永远不会生效的规则：');
     v.shadowed.forEach(s => lines.push('  第 ' + (s.index + 1) + ' 条' + (s.name ? '「' + s.name + '」' : '') + ' → ' + s.action));
   }
-  const pre = el('pre', 'explain-out mono');
-  pre.textContent = lines.join('\n');
-  modal.open('这个目标怎么走 —— ' + v.input, [pre], null);
+  return lines.join('\n');
 }
 
 function actionClass(r) {

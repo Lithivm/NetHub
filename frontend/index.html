@@ -133,10 +133,11 @@
       <div class="card-body form">
         <div class="input-row" style="align-items:flex-start">
           <textarea id="explainIp" class="input textarea mono" spellcheck="false" rows="3"
-            placeholder="一批目标：一行一个（也支持逗号/分号分隔、# 注释），如&#10;10.0.0.5:5432&#10;172.16.0.0/24&#10;10.99.0.99:80   # 影像库"></textarea>
+            placeholder="按浏览器地址栏的写法贴进来（一行一个，也支持逗号/分号分隔、# 注释）：&#10;http://main.example.com/&#10;main.example.com&#10;10.0.0.5:5432&#10;172.16.0.0/24"></textarea>
           <button class="btn btn-sm btn-primary" id="btnExplain">模拟</button>
         </div>
-        <div class="hint">目标可以是 IP/CIDR、IP 区间（198.51.100.1-198.51.100.255）、IP 通配（198.51.100.*）、域名（main.example.com）或通配域名（*.example.com）。</div>
+        <div class="hint">支持 URL、域名、IP、网段、IP 区间（10.1.1.1-10.1.1.255）、IP 通配（198.51.100.*）。一个地址可能展开成几条连接（http/https 两个端口 × 每个解析地址）—— 浏览器会怎么连，这里就按什么判。</div>
+        <div class="sim-result" id="simResult" hidden></div>
       </div>
       <div class="table" id="ruleTable"></div>
     </div>

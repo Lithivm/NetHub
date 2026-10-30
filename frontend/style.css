@@ -626,13 +626,42 @@ html.is-tray *::after {
 .export-list li { font-size: var(--fs-xs); color: var(--muted); margin: 2px 0; }
 .export-warn { padding: var(--s2) var(--s3); border-radius: var(--r-btn); background: var(--error-soft); color: var(--error); font-size: var(--fs-sm); }
 
-/* 批量模拟结果（路由规则页「模拟」） */
-.sim-grid { grid-template-columns: minmax(140px, 1fr) 130px minmax(220px, 1.6fr); }
+/* 模拟结果（路由规则页「模拟」）：画在**页内**，不弹窗 ——
+   一条地址会展开成多条连接（http/https × 每个解析地址），必须能一边对照上面的
+   规则表一边看，还要能整块复制带走（现场要发群/贴工单）。 */
+.sim-result {
+  display: flex; flex-direction: column; min-height: 0;
+  flex: 0 1 auto; max-height: 50vh;
+  border: 1px solid var(--hairline); border-radius: var(--r-btn);
+  background: var(--card); overflow: hidden;
+}
+.sim-result[hidden] { display: none; }
+.sim-head {
+  display: flex; align-items: center; gap: var(--s2);
+  padding: var(--s2) var(--s3);
+  background: var(--card-strong); border-bottom: 1px solid var(--hairline);
+}
 .sim-summary {
   padding: var(--s2) var(--s4); font-size: var(--fs-sm); color: var(--ink);
   background: var(--canvas-soft); border-bottom: 1px solid var(--hairline);
 }
+.sim-head .sim-summary { flex: 1; min-width: 0; padding: 0; background: none; border: 0; }
+/* 模态框里的表格容器（规则重叠检查还在用）。模拟结果已改成页内，不再用它。 */
 .sim-box { display: flex; flex-direction: column; max-height: 60vh; }
+.sim-table { max-height: 38vh; }
+.sim2-grid { grid-template-columns: minmax(120px, 1.05fr) 148px 74px 100px minmax(110px, .95fr) minmax(140px, 1.35fr); }
+.sim-table .trow { min-height: 40px; }
+.sim-src { font-size: var(--fs-xs); color: var(--muted); }
+/* 说明列不能截断：别的列截断还能猜，这一列写的就是「为什么」。 */
+.sim2-grid .cell.wrap { white-space: normal; overflow: visible; line-height: 1.45; padding: var(--s1) 0; }
+.sim-hints, .sim-detail { border-top: 1px solid var(--hairline-soft); }
+.sim-hints summary, .sim-detail summary {
+  padding: var(--s2) var(--s3); cursor: pointer;
+  font-size: var(--fs-xs); color: var(--muted); background: var(--canvas-soft);
+}
+.sim-hint-list { margin: 0; padding: var(--s2) var(--s3) var(--s2) calc(var(--s3) + var(--s4)); }
+.sim-hint-list li { font-size: var(--fs-xs); color: var(--muted); margin: 2px 0; line-height: 1.5; }
+.sim-detail .explain-out { margin: 0; padding: var(--s3); }
 .sim-badge {
   display: inline-block; padding: 2px var(--s2); border-radius: var(--r-pill);
   font-size: var(--fs-xs); font-weight: 700;

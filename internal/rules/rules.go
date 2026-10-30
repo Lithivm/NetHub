@@ -201,14 +201,27 @@ func (r Route) Prefix() int {
 //
 // ignorePort 为真时只看目标（界面上没填端口的情况）。
 func (s *Set) Explain(ip net.IP, port uint16, ignorePort bool) (matched int, shadowed []int, ok bool) {
+	return s.ExplainName("", ip, port, ignorePort)
+}
+
+// ExplainName 同 Explain，但带上目标的**域名**。
+//
+// 为什么需要：Explain 只能靠 matchesHostIP（规则集里“域名→IP”映射的产物）
+// 反查域名规则 —— 一个还没被观测过的名字，在模拟里就不会命中通配规则，
+// 而引擎实际会命中（它拿得到名字）。带上名字才是同一条判定路径。
+//
+// ip 可以是 nil：内网域名在本机解析不到（DNS 在隧道另一端）是**最常见的情形**，
+// 这时仍要能回答“这条规则覆不覆盖这个域名”，所以只按名字判。
+func (s *Set) ExplainName(name string, ip net.IP, port uint16, ignorePort bool) (matched int, shadowed []int, ok bool) {
 	v4 := ip.To4()
-	if v4 == nil {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if v4 == nil && name == "" {
 		return -1, nil, false
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	matched = -1
-	// 与 MatchName 同样的两遍：先显式 IP/CIDR，再域名解析出来的 IP。
+	// 与 MatchName 同样的两遍：先显式 IP/CIDR，再域名目标。
 	// （带进程条件的规则这里无法判定，跳过 —— 和以前一样。）
 	pass := func(byNet bool) bool {
 		for i := range s.routes {
@@ -217,10 +230,14 @@ func (s *Set) Explain(ip net.IP, port uint16, ignorePort bool) (matched int, sha
 				continue
 			}
 			var hit bool
-			if byNet {
-				hit = r.matchesNet(v4)
-			} else {
-				hit = r.matchesHostIP(v4)
+			switch {
+			case byNet:
+				hit = v4 != nil && r.matchesNet(v4)
+			case name != "":
+				// 通配按名字、具体域名按名字、域名已解析到的 IP 也认
+				hit = r.matchesWildcard(name) || r.matchesHostName(name) || (v4 != nil && r.matchesHostIP(v4))
+			default:
+				hit = v4 != nil && r.matchesHostIP(v4)
 			}
 			if hit && !ignorePort {
 				hit = r.matchPort(port)
@@ -236,7 +253,7 @@ func (s *Set) Explain(ip net.IP, port uint16, ignorePort bool) (matched int, sha
 		}
 		return matched >= 0
 	}
-	if pass(true) {
+	if v4 != nil && pass(true) {
 		return matched, shadowed, true
 	}
 	pass(false)
