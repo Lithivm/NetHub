@@ -1,0 +1,7 @@
+#!/bin/sh
+# pre-commit：没脱敏就别提交（见 tools/check-secrets.ps1 的说明）。
+root=$(git rev-parse --show-toplevel)
+pwsh -NoProfile -File "$root/tools/check-secrets.ps1" -Staged || exit 1
+# 顺带挡 BOM 回归：PS 5.1 会把无 BOM 的 UTF-8 .ps1 当 GBK，中文变乱码还不报错。
+pwsh -NoProfile -File "$root/tools/fix-ps1-encoding.ps1" -Check || exit 1
+exit 0

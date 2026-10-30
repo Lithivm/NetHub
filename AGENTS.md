@@ -145,6 +145,7 @@ pwsh -NoProfile -File ./tools/accept.ps1 -InjectFault        # 门禁自检：�
 ./run/nethub.exe -check | -status | -apply <新配置> | -quit   # 控制面：验 / 看 / 切 / 停（不需管理员）
 pwsh -NoProfile -File ./tools/deploy.ps1 -Zip <zip> -Autostart -Start -Accept   # 无人值守部署（解压→配置→自启→启动→验收；并把该加的白名单打出来）
 pwsh -NoProfile -File ./tools/memwatch.ps1                  # 长跑采样（内存/句柄/名字表/假IP池）→ run/memwatch.csv
+pwsh -NoProfile -File ./tools/install-hooks.ps1             # **每台机器跑一次**：接上 pre-commit（脱敏扫描 + .ps1 的 BOM 检查）
 ```
 
 **`tools/` 与 `local/` 的分工**：`tools/` 里的通用工具（自检 / 截图 / 打包 / 装机 / 采样 / 验收）
