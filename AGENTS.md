@@ -78,7 +78,7 @@ Go + **Wails v2**（WebView2 界面）+ **WinDivert**（内核驱动），**仅 
   `ui.log_level` 管界面（环形缓冲/订阅者）、`ui.log_level_file` 管 `logs/nethub.log`（空 = 跟随屏幕）。
   `Detail`/`Debug` 的写入门槛是“**任一 sink 达档**”，分流在 `log()` 里按 sink 各判 ——
   所以屏幕 normal + 文件 verbose 是允许的（现场最常用的就是这个组合）。
-  `local/memwatch.ps1` 采的是 `stats` 行，所以它切的是**文件档**，不动屏幕。
+  `tools/memwatch.ps1` 采的是 `stats` 行，所以它切的是**文件档**，不动屏幕。
   **我们自己的探针在 normal 档一行都不写**（自检、共存检测走 `DialSelf` 的连接）：它们是仪器不是
   业务 —— 与“不进连接列表、不计累计、不进顶栏流量图”同一条原则；开机一串 `proc=nethub.exe`
   的 `intercept`/`relay.done` 会被当成“应用在连”（2026-10-14 用户报的），要看就切 verbose。
@@ -136,16 +136,21 @@ export PATH="/c/Program Files/Go/bin:$PATH"                 # git-bash
 gofmt -l . | grep -v '^local/'                              # 空即合规；**别只扫 internal/**（仓库根 main.go 也改）
 go vet ./... && go test ./internal/...
 go build -tags production -ldflags "-H=windowsgui -s -w" -o run/nethub.exe .
-pwsh -NoProfile -File ./local/check-ui.ps1                  # 改完前端必须跑（boot 不报错 + 无未定义函数 + **结构断言**：标签成对 / tab↔页面一一对应 / main 下无孤儿）
-pwsh -NoProfile -File ./local/ui-controls-test.ps1          # 勾选/下拉真的调到了后端 + 卡片标题不被挤成两行
-pwsh -NoProfile -File ./local/tray-fix.ps1                   # 托盘回归（**需管理员**）：换 exe+重启，验「X 收进托盘→托盘能叫回」+「强杀引擎不留孤儿界面」
+pwsh -NoProfile -File ./tools/check-ui.ps1                  # 改完前端必须跑（boot 不报错 + 无未定义函数 + **结构断言**：标签成对 / tab↔页面一一对应 / main 下无孤儿）
+pwsh -NoProfile -File ./tools/ui-controls-test.ps1          # 勾选/下拉真的调到了后端 + 卡片标题不被挤成两行
+pwsh -NoProfile -File ./tools/tray-fix.ps1                   # 托盘回归（**需管理员**）：换 exe+重启，验「X 收进托盘→托盘能叫回」+「强杀引擎不留孤儿界面」
 pwsh -NoProfile -File ./local/restart.ps1                   # 快速优雅重启 + 复测内网目标
 pwsh -NoProfile -File ./local/accept.ps1                    # 验收门禁（重启→驱动→连通→热生效→还原）；**退出码 0/非0 可判，发版前必须跑**
 pwsh -NoProfile -File ./local/accept.ps1 -InjectFault        # 门禁自检：故意注入故障，证明它真会失败（防“永远绿灯的假门禁”）
 ./run/nethub.exe -check | -status | -apply <新配置> | -quit   # 控制面：验 / 看 / 切 / 停（不需管理员）
-pwsh -NoProfile -File ./local/deploy.ps1 -Zip <zip> -Autostart -Start -Accept   # 无人值守部署（解压→配置→自启→启动→验收；并把该加的白名单打出来）
-pwsh -NoProfile -File ./local/memwatch.ps1                  # 长跑采样（内存/句柄/名字表/假IP池）→ run/memwatch.csv
+pwsh -NoProfile -File ./tools/deploy.ps1 -Zip <zip> -Autostart -Start -Accept   # 无人值守部署（解压→配置→自启→启动→验收；并把该加的白名单打出来）
+pwsh -NoProfile -File ./tools/memwatch.ps1                  # 长跑采样（内存/句柄/名字表/假IP池）→ run/memwatch.csv
 ```
+
+**`tools/` 与 `local/` 的分工**：`tools/` 里的通用工具（自检 / 截图 / 打包 / 装机 / 采样）
+**入库**，任何人 clone 下来都能跑（路径都基于 `$PSScriptRoot`，不写死本机目录）；
+`local/` 只放本机专属的（含现场地址、凭据、二进制、一次性实验），不入库也不入包。
+`restart.ps1` / `accept.ps1` 仍留在 `local/`——它们写死了现场地址，等脱敏参数化后再搬。
 
 `-status` 里的 `runtime` 块是**运行实例自己写的**（exe 同目录 `runtime.json`）：在不在跑、吃的
 是哪份配置（`configHash` / `configMatchesFile`）、有哪些改动还没生效（`restartNeeded`）。
