@@ -10,6 +10,7 @@ package hostsmgr
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -181,6 +182,59 @@ func readFileBlock(p string) (block []string, exists bool, full string, err erro
 		}
 	}
 	return block, exists, full, nil
+}
+
+// LookupHost 在**系统 hosts 文件全篇**里查一个名字（不只是我们维护的那一段）。
+//
+// 为什么需要它（2026-10-30 用户问的）：模拟"浏览器会连到哪"时，只查 config 里的托管条目
+// 不够 —— 现场常有一份**手工维护的 hosts**（写在块外，或者托管根本没开）。那种条目照样生效
+// （Windows 解析器先读 hosts 文件），但会被我们误标成"本机解析/DNS"。
+//
+// inBlock 说明命中的那条落在我们维护的标记段里（false = 块外的手工条目）。
+func LookupHost(name string) (ips []net.IP, inBlock bool, err error) {
+	want := strings.ToLower(strings.TrimSpace(name))
+	if want == "" {
+		return nil, false, nil
+	}
+	_, _, full, err := Read() // 复用 Read 的缓存（mtime+size 判失效）
+	if err != nil {
+		return nil, false, err
+	}
+	in := false
+	for _, line := range splitLines(full) {
+		switch {
+		case isBegin(line):
+			in = true
+			continue
+		case isEnd(line):
+			in = false
+			continue
+		}
+		hs := hostsOf(line)
+		if len(hs) == 0 {
+			continue
+		}
+		hit := false
+		for _, h := range hs {
+			if h == want {
+				hit = true
+				break
+			}
+		}
+		if !hit {
+			continue
+		}
+		f := strings.Fields(strings.TrimSpace(line))
+		ip := net.ParseIP(f[0])
+		if ip == nil || ip.To4() == nil {
+			continue
+		}
+		ips = append(ips, ip.To4())
+		if in {
+			inBlock = true
+		}
+	}
+	return ips, inBlock, nil
 }
 
 // ApplyResult 描述这次写入干了什么（用来给界面/日志一个能看见的结果）。

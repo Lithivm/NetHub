@@ -649,7 +649,7 @@ html.is-tray *::after {
 /* 模态框里的表格容器（规则重叠检查还在用）。模拟结果已改成页内，不再用它。 */
 .sim-box { display: flex; flex-direction: column; max-height: 60vh; }
 .sim-table { max-height: 38vh; }
-.sim2-grid { grid-template-columns: minmax(120px, 1.05fr) 148px 74px 100px minmax(110px, .95fr) minmax(140px, 1.35fr); }
+.sim2-grid { grid-template-columns: minmax(120px, 1.05fr) 148px 86px 100px minmax(110px, .95fr) minmax(140px, 1.35fr); }
 .sim-table .trow { min-height: 40px; }
 .sim-src { font-size: var(--fs-xs); color: var(--muted); }
 /* 说明列不能截断：别的列截断还能猜，这一列写的就是「为什么」。 */

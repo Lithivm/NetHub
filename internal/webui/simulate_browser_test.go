@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"net"
 	"strings"
 	"testing"
 
@@ -12,10 +13,16 @@ import (
 // 一条输入会展开成**多条连接**（http/https 两个端口 × 多个解析地址），每条独立判定。
 func TestSimulateBrowserTargets(t *testing.T) {
 	b, cfg := newRoutesBackend(t)
-	cfg.Hosts = config.HostsCfg{Manage: true, Entries: []string{
-		"10.0.0.5 main.example.com",
-		"10.0.0.6 main.example.com", // 同一域名两个地址：浏览器会同时试
-	}}
+	// 注入一份"系统 hosts"：模拟的答案不该依赖跑测试那台机器上真正写了什么。
+	// inBlock=false 就是"块外的手工条目"（现场最常见的那种）。
+	oldLookup := hostsLookup
+	hostsLookup = func(name string) ([]net.IP, bool, error) {
+		if strings.EqualFold(name, "main.example.com") {
+			return []net.IP{net.ParseIP("10.0.0.5"), net.ParseIP("10.0.0.6")}, false, nil
+		}
+		return nil, false, nil
+	}
+	t.Cleanup(func() { hostsLookup = oldLookup })
 	cfg.Routes = []config.Route{{Name: "内网业务", Targets: []string{"10.0.0.0/24"}, Chain: "proxy-a"}}
 	rs := rules.New()
 	if err := rs.Load([]rules.Route{{Name: "内网业务", Targets: []string{"10.0.0.0/24"}, Chain: "proxy-a"}}); err != nil {
@@ -41,7 +48,7 @@ func TestSimulateBrowserTargets(t *testing.T) {
 		t.Fatalf("http URL 应展开成 2 条（两个 hosts 地址 × 80），实际 %d：%+v", len(rows), rows)
 	}
 	for _, r := range rows {
-		if r.Port != 80 || r.Source != "hosts 条目" || !r.OK {
+		if r.Port != 80 || r.Source != "hosts手写" || !r.OK {
 			t.Errorf("http URL 的端口/来源不对：%+v", r)
 		}
 		if !strings.Contains(r.Action, "proxy-a") || r.Chain != "proxy-a" {

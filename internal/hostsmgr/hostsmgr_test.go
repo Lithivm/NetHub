@@ -140,3 +140,43 @@ func TestRemove(t *testing.T) {
 		t.Error("Read 应该报告块不存在")
 	}
 }
+
+// LookupHost：系统 hosts 全篇都能查，并且能说出命中的那条在不在我们的托管段里。
+//
+// 为什么必须分开：现场常有一份**手工维护的 hosts**（块外 / 托管没开），它照样生效；
+// 模拟页如果把它标成"DNS"，用户就分不清这条映射是谁给的（2026-10-30 实际被问到）。
+func TestLookupHostInAndOutOfBlock(t *testing.T) {
+	dir := t.TempDir()
+	etc := filepath.Join(dir, "System32", "drivers", "etc")
+	if err := os.MkdirAll(etc, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := "10.1.1.1 manual.example.com\n" +
+		"10.1.1.2 alias.example.com second.example.com\n" +
+		beginMark + "\n" +
+		"10.2.2.2 ours.example.com\n" +
+		endMark + "\n"
+	if err := os.WriteFile(filepath.Join(etc, "hosts"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SystemRoot", dir)
+	invalidateCache()
+
+	// 块外的手工条目
+	ips, inBlock, err := LookupHost("manual.example.com")
+	if err != nil || len(ips) != 1 || ips[0].String() != "10.1.1.1" || inBlock {
+		t.Fatalf("块外条目应查到且 inBlock=false：ips=%v inBlock=%v err=%v", ips, inBlock, err)
+	}
+	// 一行多个名字（别名）
+	if ips, _, _ := LookupHost("second.example.com"); len(ips) != 1 || ips[0].String() != "10.1.1.2" {
+		t.Errorf("别名应能查到：%v", ips)
+	}
+	// 我们托管段里的
+	if ips, inBlock, _ := LookupHost("OURS.example.com"); len(ips) != 1 || !inBlock {
+		t.Errorf("托管段条目应 inBlock=true：ips=%v inBlock=%v", ips, inBlock)
+	}
+	// 没有这条
+	if ips, _, _ := LookupHost("nope.example.com"); len(ips) != 0 {
+		t.Errorf("不该查到：%v", ips)
+	}
+}

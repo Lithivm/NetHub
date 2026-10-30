@@ -12,6 +12,7 @@ import (
 
 	"nethub/internal/config"
 	"nethub/internal/dnsmap"
+	"nethub/internal/hostsmgr"
 )
 
 // 「上客户现场之前，把服务器清单糊进来一次验完规则」——
@@ -127,7 +128,7 @@ func (b *Backend) simHints(rows []SimRow) []string {
 	needDNS, need443, needNoScheme, needNameOnly := false, false, false, false
 	for _, r := range rows {
 		switch {
-		case r.Source == "本机解析" || r.Source == "hosts 条目":
+		case r.Source == "DNS" || strings.HasPrefix(r.Source, "hosts"):
 			needDNS = true
 		case strings.HasPrefix(r.Source, "仅域名"):
 			needNameOnly = true
@@ -140,7 +141,7 @@ func (b *Backend) simHints(rows []SimRow) []string {
 		}
 	}
 	if needDNS || needNameOnly {
-		out = append(out, "名字按「先查 hosts、再查本机 DNS」解析；本工具只做 IPv4（AAAA 会被答空，所以浏览器不会走 IPv6）")
+		out = append(out, "名字按「先查 hosts（含手工维护的）、再查系统 DNS」解析；本工具只做 IPv4（AAAA 会被答空，所以浏览器不会走 IPv6）")
 	}
 	if needNameOnly {
 		out = append(out, "本机解析不到的名字按**域名规则**判定 —— 实际连接时由上游解析真实地址，这正是内网域名的常态")
@@ -400,14 +401,23 @@ func simPorts(port uint16, hasPort bool, scheme string) ([]uint16, string) {
 	}
 }
 
+// hostsLookup 查系统 hosts 全篇。做成包级变量是为了测试能注入 —— 模拟的答案不该
+// 依赖"跑测试那台机器的 hosts 文件里恰好写了什么"。
+var hostsLookup = hostsmgr.LookupHost
+
 // resolveSimName 把域名变成「浏览器实际会连的 IP」，返回结果与来源说明。
 //
 // 顺序必须与系统解析一致：**先 hosts**（应用也是先查 hosts，命中就不发 DNS），
 // 再本机 DNS。假 IP 段里的结果要剔除 —— 那是我们 DNS 接管自己发的地址，
 // 拿它当目标去判规则，结论必然是错的（它只存在于我们自己的映射里）。
 func (b *Backend) resolveSimName(name string) ([]net.IP, string) {
-	if ips := hostsIPsFor(b.a.Cfg.HostsCopy().Entries, name); len(ips) > 0 {
-		return ips, "hosts 条目"
+	// 先查**系统 hosts 文件全篇**（不只是 config 里的托管条目）：现场常有一份手工维护的
+	// hosts（块外 / 托管没开），它照样生效。分开报，用户才知道这条映射是谁给的。
+	if ips, inBlock, err := hostsLookup(name); err == nil && len(ips) > 0 {
+		if inBlock {
+			return ips, "hosts托管"
+		}
+		return ips, "hosts手写"
 	}
 	fake := fakeRange(b)
 	ctx, cancel := context.WithTimeout(context.Background(), simResolveTimeout)
@@ -432,29 +442,7 @@ func (b *Backend) resolveSimName(name string) ([]net.IP, string) {
 	if len(out) == 0 {
 		return nil, ""
 	}
-	return out, "本机解析"
-}
-
-// hostsIPsFor 在 hosts 托管条目里查这个名字（hosts 一行可以有多个域名）。
-func hostsIPsFor(entries []string, name string) []net.IP {
-	var out []net.IP
-	for _, e := range entries {
-		f := strings.Fields(strings.TrimSpace(e))
-		if len(f) < 2 || strings.HasPrefix(f[0], "#") {
-			continue
-		}
-		ip := net.ParseIP(f[0])
-		if ip == nil || ip.To4() == nil {
-			continue
-		}
-		for _, h := range f[1:] {
-			if strings.EqualFold(h, name) {
-				out = append(out, ip.To4())
-				break
-			}
-		}
-	}
-	return out
+	return out, "DNS"
 }
 
 // fakeRange 配置里的假 IP 段（解析失败返回 nil —— 那只是"没这条约束"）。
