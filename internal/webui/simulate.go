@@ -322,13 +322,13 @@ func (b *Backend) simIP(tok, host string, port uint16, hasPort bool, scheme ...s
 		ports, portNoteText = simPorts(port, hasPort, s)
 	}
 	out := make([]SimRow, 0, len(ports))
-	for _, p := range ports {
+	for i, p := range ports {
 		got := b.simEval(ip, p, p == 0)
 		row := SimRow{
 			Input: tok, Host: ip.String(), Port: int(p), Source: "直接输入", OK: true,
 			Rule: got.rule, RuleNo: got.ruleNo, Action: got.action, Chain: got.chain,
 		}
-		row.Note = joinNote(portNoteText, portNote(b, got.ruleNo, p != 0))
+		row.Note = joinNote(firstOnly(portNoteText, i), portNote(b, got.ruleNo, p != 0))
 		out = append(out, row)
 	}
 	return out
@@ -342,13 +342,14 @@ func (b *Backend) simDomain(tok, name string, port uint16, hasPort bool, scheme 
 
 	if len(ips) == 0 {
 		out := make([]SimRow, 0, len(ports))
-		for _, p := range ports {
+		for i, p := range ports {
 			got := b.simEvalName(name, nil, p, p == 0)
 			row := SimRow{
 				Input: tok, Host: name, Port: int(p), Source: "仅域名", OK: true,
 				Rule: got.rule, RuleNo: got.ruleNo, Action: got.action, Chain: got.chain,
 			}
-			row.Note = joinNote("本机解析不到真实地址 —— 实际连接由上游解析", portNoteText)
+			// 展开出来的多行只第一行说一次「本机解不开 / 未写协议」—— 同一输入的每行重复一遍是噪声
+			row.Note = joinNote(firstOnly("本机解析不到真实地址 —— 实际连接由上游解析", i), firstOnly(portNoteText, i))
 			row.Note = joinNote(row.Note, portNote(b, got.ruleNo, p != 0))
 			out = append(out, row)
 		}
@@ -357,18 +358,24 @@ func (b *Backend) simDomain(tok, name string, port uint16, hasPort bool, scheme 
 
 	out := make([]SimRow, 0, len(ips)*len(ports))
 	for _, ip := range ips {
-		for _, p := range ports {
+		for i, p := range ports {
 			got := b.simEvalName(name, ip, p, p == 0)
 			row := SimRow{
 				Input: tok, Host: ip.String(), Port: int(p), Source: src, OK: true,
 				Rule: got.rule, RuleNo: got.ruleNo, Action: got.action, Chain: got.chain,
 			}
-			row.Note = joinNote(portNoteText, portNote(b, got.ruleNo, p != 0))
+			row.Note = joinNote(firstOnly(portNoteText, i), portNote(b, got.ruleNo, p != 0))
 			out = append(out, row)
 		}
 	}
 	return out
 }
+
+// firstOnly 把“同一个输入展开成多行”时才说得上话的说明只留给第一行。
+//
+// 为什么要它（2026-10-30 用户看到实测输出后指出的）：“未写协议时浏览器先试哪个取决于
+// HTTPS-First/HSTS”对 80/443 两行说的是同一件事，逐行重复只是噪声；整段的解释在
+// 「模拟前提」里已经有了。
 
 // simPorts 决定这条输入会去连哪些端口（浏览器语义）。
 //
@@ -501,6 +508,13 @@ func ruleSuffix(name string) string {
 	return "「" + name + "」"
 }
 
+// firstOnly 多行展开时只让第一行带这条说明（i == 0 才返回）。
+func firstOnly(s string, i int) string {
+	if i != 0 {
+		return ""
+	}
+	return s
+}
 func joinNote(a, b string) string {
 	switch {
 	case a == "":
