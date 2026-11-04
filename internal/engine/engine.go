@@ -116,7 +116,7 @@ type connState struct {
 	killed bool
 
 	last    atomic.Int64  // unix nano：最后一次看到包/数据的时间
-	up      atomic.Uint64 // 应用 → 目标 的字节（直连只能统计出方向）
+	up      atomic.Uint64 // 应用 → 目标 的字节（环回直连含回包时按方向分账，见 passCount）
 	down    atomic.Uint64 // 目标 → 应用 的字节
 	packets atomic.Uint64 // 包数（直连/阻断时用得上）
 	ended   atomic.Bool
@@ -3586,6 +3586,42 @@ func (e *Engine) flow(sport uint16) *connState {
 	return e.conns[sport]
 }
 
+// passCount 直连/阻断包的一次记账：找出这条连接，按方向累加字节。
+//
+// **回包不能拿源端口查表**：出方向的包源端口 = 应用端口（连接表的 key），
+// 而回包的源端口是**对端端口**（例如 127.0.0.1:7897）—— 用它查表永远查不到，
+// 下行就一个字节都不记。这就是以前“直连只能统计出方向”的成因。
+// 环回直连的回包也会被内核过滤器当 outbound 交给我们（实测日志里 `[直连] 127.0.0.1:51028`
+// 的 dport 就是应用端口），所以它本来就到了我们手上，只是账没记对。
+// 回包只能按 dport（= 应用端口）反查，并要求 st.dport 正好是本包的源端口 ——
+// 两个端口严丝合缝才算同一条连接，否则出方向的包在连接表刚被回收时会串到别人头上。
+// 真网段直连的回包是 inbound，压根不进过滤器（见 buildFilter），那种目标仍然只有出方向。
+func (e *Engine) passCount(sport, dport uint16, n int, act rules.Action, fin bool) {
+	st, inbound := e.flow(sport), false
+	if st == nil {
+		if back := e.flow(dport); back != nil && back.dport == sport && back.action == rules.ActionDirect {
+			st, inbound = back, true
+		}
+	}
+	if st == nil {
+		return
+	}
+	st.touch()
+	st.packets.Add(1)
+	if act == rules.ActionDirect {
+		if inbound {
+			st.down.Add(uint64(n))
+			e.dirDown.Add(uint64(n)) // 顶栏流量图的直连口径
+		} else {
+			st.up.Add(uint64(n))
+			e.dirUp.Add(uint64(n)) // 同上：直连口径
+		}
+	}
+	if !inbound && fin { // 回包的 FIN 不重复收尾（它和出方向那条 FIN 是同一个连接）
+		e.finish(st)
+	}
+}
+
 // passThrough 处理直连与阻断：计数 + 必要时记一行日志（去重）。
 // 直连的包原样放回内核转发；阻断的包丢掉，并在 SYN 上回一个 RST。
 func (e *Engine) passThrough(h *divert.Handle, pkt []byte, addr *divert.Address, t int,
@@ -3624,17 +3660,7 @@ func (e *Engine) passThrough(h *divert.Handle, pkt []byte, addr *divert.Address,
 		e.routeMatchLog(sport, dst, dport, procName, pid, verdict)
 	}
 
-	if st := e.flow(sport); st != nil {
-		st.touch()
-		st.packets.Add(1)
-		if act == rules.ActionDirect {
-			st.up.Add(uint64(len(pkt)))
-			e.dirUp.Add(uint64(len(pkt))) // 同上：直连口径
-		}
-		if flags&0x05 != 0 { // FIN 或 RST：连接收了
-			e.finish(st)
-		}
-	}
+	e.passCount(sport, dport, len(pkt), act, flags&0x05 != 0) // FIN 或 RST 就在这一下里收尾
 
 	if act == rules.ActionBlock {
 		if isSyn(flags) {
