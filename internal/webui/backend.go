@@ -432,6 +432,13 @@ func (b *Backend) readOnlyState() (bool, string) {
 // describeEngineHolder 谁拿着引擎。能确定是服务版就说服务版，不确定就不猜。
 func describeEngineHolder() string {
 	if winsvc.State() == "running" {
+		// 两个自启都开着时，用户看到的"只读界面"其实是两者抢引擎的结果 ——
+		// 这是进程内部唯一能把这个事实告诉用户的地方（含修法），所以单独说清楚。
+		if _, auto, err := winsvc.AutoStart(); err == nil && auto && autostart.Enabled() {
+			return "Windows 服务版（headless）正在运行，而且**两个开机自启都开着**：" +
+				"服务在开机时先抢到引擎，登录后的界面只能当只读。" +
+				"修法：nethub.exe -service-autostart off（或界面「服务模式」里关掉服务自启）"
+		}
 		return "Windows 服务版（headless）正在运行"
 	}
 	return "另一个 NetHub 实例正在运行（可能是 -headless 模式）"

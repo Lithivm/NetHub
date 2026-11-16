@@ -79,12 +79,12 @@ nethub.exe -status               # 打印机器可读的 JSON 现状：版本/�
 nethub.exe -apply <新配置.yaml>   # 校验 → 落盘 → 让正在运行的实例热生效（不重启、不断已有连接）
 nethub.exe -headless             # 无界面只跑引擎（自动化用）
 nethub.exe -service-install      # 装成 Windows 服务（**只是备着**：不自己启动、也不随开机启动）
-nethub.exe -service-autostart on  # 启用服务形态：随开机启动、无人登录也跑（装 ≠ 启用）
+nethub.exe -service-autostart on  # 启用服务形态：随开机启动、无人登录也跑（装 ≠ 启用；会同时删掉计划任务那条自启）
 nethub.exe -service-autostart off # 停用：不再随开机（注册保留，随时能再打开）
 nethub.exe -service-uninstall    # 卸载服务
 nethub.exe -service-state        # 打印服务状态（含「开机自启开没开」）
 nethub.exe -quit                 # 让正在运行的实例优雅退出
-nethub.exe -autostart            # 装成计划任务开机自启（GUI 形态用，登录后延迟启动）
+nethub.exe -autostart            # 装成计划任务开机自启（GUI 形态用，登录后延迟启动；会同时把服务自启改回按需）
 nethub.exe -clash-check          # 只检测系统代理会不会把内网送进代理
 nethub.exe -test-upstream        # 直接实测上游链路（不经 gost）
 nethub.exe -import-bats <目录>    # 从 gost 的 .bat 目录导入链路配置
@@ -105,7 +105,9 @@ nethub.exe -version              # 打印版本号
 > 两种形态**都装着**没问题（装只是备着）；冲突的是两条自启。
 > 纠正：桌面机 → `-service-autostart off`（注册留着）+ `-autostart`；
 > 服务器 → `-service-autostart on` + 去掉计划任务（界面里关掉开机自启即可）。
-> 界面里拨「开机自启用服务形态」时会**自动关掉计划任务那条自启**，不用两边手动对着改。
+> 界面里拨「开机自启用服务形态」时会**自动关掉计划任务那条自启**；反过来 `-autostart` 也会把
+> 服务自启改回按需。**界面和命令行两条路都互斥**，不用两边手动对着改（CLI 侧 2026-11-16 补齐）。
+> 顺序一律是「先设目标、再清对方」：目标那步失败就停手，绝不会留下「两边都没自启」。
 
 **服务形态会自己从崩溃/被杀里恢复**（无人值守的机器靠这个）：装了服务之后，
 进程被外部结束或崩掉时 Windows 会在 5 秒、30 秒各拉一次，**本窗口（一天）内最多两次**

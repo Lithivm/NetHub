@@ -11,7 +11,7 @@ Go + **Wails v2**（WebView2 界面）+ **WinDivert**（内核驱动），**仅 
 
 **一条 exe 两种形态，同机只开一种自启**：GUI（有人在用）= 双击起界面+托盘，`-autostart` 装**计划任务**（**登录**事件后延迟 20 秒），有托盘有通知；headless/服务（服务器、无人登录）= `-service-install` + `-service-autostart on`（或界面「服务模式」开关）随**开机**由 SCM 拉起，**本来没有界面/托盘/通知，那是定义不是缺陷**。
 
-**安装 ≠ 启用**（同 Clash：装虚拟网卡 ≠ 开 TUN）：`-service-install` 只注册成**手动启动**，装好留着备用；拨开关才改 `StartType` 并当场交棒。两种形态都装着无害，**冲突的是两条自启**（服务开机先拿到引擎，登录后起的界面版只能当只读失败者）。开关打开会自动关掉计划任务那条（`SetServiceAutoStart`），关掉会停服务并把引擎接回界面版。**别当成同一个设置的两个落法**：GUI 是"登录后延迟启动"，headless 是"开机即启然后一直跑"。
+**安装 ≠ 启用**（同 Clash：装虚拟网卡 ≠ 开 TUN）：`-service-install` 只注册成**手动启动**，装好留着备用；拨开关才改 `StartType` 并当场交棒。两种形态都装着无害，**冲突的是两条自启**（服务开机先拿到引擎，登录后起的界面版只能当只读失败者）。开关打开会自动关掉计划任务那条（`SetServiceAutoStart`），关掉会停服务并把引擎接回界面版。**别当成同一个设置的两个落法**：GUI 是"登录后延迟启动"，headless 是"开机即启然后一直跑"。**跨形态的互斥统一走 `autostart.Plan`**（先设目标、再清对方；目标那步失败立即停手，绝不留下"两边都没自启"）—— 界面（`SetServiceAutoStart`）和 CLI（`-service-autostart on` / `-autostart`）两条路都调它，**别再各写一套**；`HKCU\Run` 是第三份历史来源，启用服务自启时由 `ClearLegacyRunValue` 清掉。
 
 界面 `frontend/`：无框架、无构建（`index.html`/`app.js`/`style.css`）；文案**中文**，用户是运维/实施人员 —— 写人话、别堆术语。
 后端 `internal/`：`app`（编排 Start/Stop/Restart）· `config`（读写/校验/体检/重叠）· `rules`（匹配）· `engine`（relay / 包循环 / 连接表 / 探测 / 预热池 / 抓包）· `upstream` + `socks`（上游客户端）· `webui`（界面 API / 托盘）· `secret`（DPAPI 保险箱）· `winsvc`（Windows 服务）。

@@ -109,7 +109,9 @@ func (b *Backend) SetServiceAutoStart(on bool) (string, error) {
 	}
 
 	b.a.Bus.Info("服务形态已设为随开机启动（无人登录也跑）")
-	if b.autostartCached() {
+	// 直接查一次计划任务：**不要用 b.autostartCached()** —— 缓存可能过期，
+	// 该清的那条没清掉，开机时又会两个形态抢引擎。只在用户拨开关时发生，成本可接受。
+	if autostart.Enabled() {
 		// 两个自启同时开着 = 开机时两个形态抢同一个引擎，必然有一个变只读失败者。
 		// 用户已经明确选了服务形态，这里替他把界面版那条自启关掉并留一行日志。
 		if err := autostart.Disable(); err != nil {

@@ -49,7 +49,7 @@ func main() {
 	cfgPath := flag.String("config", "", "配置文件路径（默认 exe 同目录 config.yaml）")
 	headless := flag.Bool("headless", false, "无界面模式：只跑引擎（自动化测试用）")
 	importBats := flag.String("import-bats", "", "从 gost 的 .bat 目录导入链路配置（含凭据），随后退出")
-	doAutostart := flag.Bool("autostart", false, "把本程序加入开机启动（计划任务，最高权限），随后退出")
+	doAutostart := flag.Bool("autostart", false, "把本程序加入开机启动（计划任务，最高权限；会同时把服务形态自启改回按需 —— 二选一），随后退出")
 	noAutostart := flag.Bool("no-autostart", false, "从开机启动中移除，随后退出")
 	noElevate := flag.Bool("no-elevate", false, "不要自动提权（调试用）")
 	serviceMode := flag.Bool("service", false, "以 Windows 服务方式运行（由 SCM 拉起，无界面）")
@@ -57,7 +57,7 @@ func main() {
 	svcUninstall := flag.Bool("service-uninstall", false, "卸载 Windows 服务，随后退出")
 	svcState := flag.Bool("service-state", false, "打印 Windows 服务状态，随后退出")
 	svcStop := flag.Bool("service-stop", false, "停止 Windows 服务（不卸载），随后退出")
-	svcAuto := flag.String("service-autostart", "", "on|off：服务形态是否随开机自启（**装 ≠ 启用**；脚本/无人值守部署用），随后退出")
+	svcAuto := flag.String("service-autostart", "", "on|off：服务形态是否随开机自启（**装 ≠ 启用**；on 会同时关掉界面版的开机自启 —— 二选一），随后退出")
 	doQuit := flag.Bool("quit", false, "请已在运行的界面版优雅退出（会先停服务、移除托盘图标），随后退出")
 	verFlag := flag.Bool("version", false, "打印版本号，随后退出")
 	rollbackFlag := flag.Bool("rollback", false, "回滚到上一版本并重启（一键更新出问题时用），随后退出")
@@ -125,66 +125,19 @@ func main() {
 		return
 	}
 
-	// 服务安装/卸载/启停/查状态/自启开关：不需要配置，也不需要界面
-	if *svcInstall || *svcUninstall || *svcState || *svcStop || *svcAuto != "" {
-		if *svcState {
-			installed, auto, err := winsvc.AutoStart()
-			fmt.Println("NetHub 服务状态：" + winsvc.State())
-			fmt.Printf("已安装=%v 开机自启=%v", installed, auto)
-			if err != nil {
-				fmt.Printf("（查不准：%v）", err)
-			}
-			fmt.Println()
-			return
-		}
-		if *svcAuto != "" {
-			switch strings.ToLower(*svcAuto) {
-			case "on", "1", "true", "yes":
-				if err := winsvc.SetAutoStart(true); err != nil {
-					fatal("%v", err)
-				}
-				fmt.Printf("服务形态已设为随开机自启（无人登录也跑）。现在想立刻用就 net start %s，或去界面「服务模式」卡片点「启动」。\n", winsvc.Name)
-			case "off", "0", "false", "no":
-				if err := winsvc.SetAutoStart(false); err != nil {
-					fatal("%v", err)
-				}
-				fmt.Printf("服务形态不再随开机自启（注册保留，随时可用 -service-autostart on 再打开）。\n")
-			default:
-				fatal("-service-autostart 只认 on / off，收到 %q", *svcAuto)
-			}
-			return
-		}
-		if *svcStop {
-			if err := winsvc.Stop(); err != nil {
-				fatal("%v", err)
-			}
-			if err := winsvc.WaitStopped(15 * time.Second); err != nil {
-				fatal("%v", err)
-			}
-			fmt.Println("已停止 Windows 服务 " + winsvc.Name)
-			return
-		}
-		exe, err := os.Executable()
+	// -service-state：只读查询，不需要管理员（服务的默认安全描述符允许 Users 查状态），
+	// 所以留在提权之前 —— 查个状态不该弹 UAC。
+	//
+	// 写类命令（-service-install / -service-uninstall / -service-stop / -service-autostart）
+	// 要改 SCM，必须提权，已移到自动提权之后（见 service_cmd.go）。
+	if *svcState {
+		installed, auto, err := winsvc.AutoStart()
+		fmt.Println("NetHub 服务状态：" + winsvc.State())
+		fmt.Printf("已安装=%v 开机自启=%v", installed, auto)
 		if err != nil {
-			fatal("拿不到自身路径: %v", err)
+			fmt.Printf("（查不准：%v）", err)
 		}
-		cfgPath := *cfgPath
-		if cfgPath == "" {
-			cfgPath = filepath.Join(filepath.Dir(exe), "config.yaml")
-		}
-		if *svcUninstall {
-			if err := winsvc.Uninstall(); err != nil {
-				fatal("%v", err)
-			}
-			fmt.Println("已卸载 Windows 服务 " + winsvc.Name)
-			return
-		}
-		if err := winsvc.Install(exe, cfgPath); err != nil {
-			fatal("%v", err)
-		}
-		fmt.Printf("已安装 Windows 服务 %s（**不**随开机自启，只是备好）\n", winsvc.Name)
-		fmt.Printf("· 要无人值守（开机即跑、不等登录）：nethub.exe -service-autostart on，或界面「服务模式」卡片里拨开开关\n")
-		fmt.Printf("· 现在就想用一次：net start %s\n", winsvc.Name)
+		fmt.Println()
 		return
 	}
 
@@ -258,6 +211,12 @@ func main() {
 		p = config.DefaultPath()
 	}
 
+	// 服务写类命令：要改 SCM / 起停服务，必须在自动提权之后（见 service_cmd.go）。
+	if *svcInstall || *svcUninstall || *svcStop || *svcAuto != "" {
+		runServiceControl(*svcInstall, *svcUninstall, *svcStop, *svcAuto, *cfgPath)
+		return
+	}
+
 	if *importBats != "" {
 		if err := doImportBats(p, *importBats); err != nil {
 			fatal("%v", err)
@@ -273,8 +232,30 @@ func main() {
 		if cfg, err := config.Load(p); err == nil {
 			delay = int(cfg.AutostartDelayDur() / time.Second)
 		}
-		if err := autostart.Enable(delay); err != nil {
-			fatal("设置开机启动失败: %v", err)
+		// 两条自启互斥：服务形态自启开着的话，开机时它会先抢到引擎，
+		// 登录后起来的界面只能当只读失败者（2026-10-15 / 2026-11-16 两次现场）。
+		// 顺序由 autostart.Plan 决定：**先装计划任务，成功后再关服务自启** ——
+		// 反过来的话 Enable 失败就会两边都没自启（开机什么也不跑），比并存更糟。
+		_, svcAuto, svcErr := winsvc.AutoStart()
+		for _, st := range autostart.Plan(autostart.FormTask, svcAuto, svcErr, true) {
+			switch st {
+			case autostart.StepEnableTask:
+				if err := autostart.Enable(delay); err != nil {
+					fatal("设置开机启动失败: %v", err)
+				}
+			case autostart.StepDisableService:
+				if err := winsvc.SetAutoStart(false); err != nil {
+					fmt.Fprintf(os.Stderr,
+						"警告：服务形态的开机自启没关掉（%v）—— 开机时两个形态会抢引擎；请手动 nethub.exe -service-autostart off。\n", err)
+				} else {
+					fmt.Println("· 已同时关掉服务形态的开机自启（注册保留，随时能再打开）。")
+				}
+			}
+		}
+		if svcErr != nil {
+			// 查不到 ≠ 没开（winsvc.AutoStart 的语义），只告警、不动手。
+			fmt.Fprintf(os.Stderr,
+				"警告：查不到服务形态的自启状态（%v）。若它也是自动，开机时两者会抢引擎；可用 -service-state 确认。\n", svcErr)
 		}
 		fmt.Printf("已加入开机启动（计划任务 %s，登录后延迟 %d 秒）\n", autostart.TaskName, delay)
 		return

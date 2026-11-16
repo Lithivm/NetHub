@@ -261,6 +261,14 @@ func xmlEsc(s string) string {
 	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&apos;").Replace(s)
 }
 
+// ClearLegacyRunValue 清掉早期版本写在 HKCU\Run 里的自启值。
+//
+// 单独导出是因为它是**第三份**自启来源：HKCU\Run 既不经过计划任务、也不经过服务的
+// StartType，两条互斥逻辑都管不到它。早期（Run 键时代）留下的值会让机器上凭空多一份
+// 登录自启，症状与"两个自启都开着"完全一样（开机有人抢引擎）。
+// 启用服务形态自启时顺手清一次（2026-11-16 排查确认这条路径当时没有清理）。
+func ClearLegacyRunValue() { removeRunValue() }
+
 func removeRunValue() {
 	k, err := registry.OpenKey(registry.CURRENT_USER, RunKeyPath, registry.SET_VALUE|registry.QUERY_VALUE)
 	if err != nil {
