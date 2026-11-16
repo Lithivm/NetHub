@@ -5,12 +5,30 @@ package app
 import (
 	"errors"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
 
 // waitTimeout WAIT_TIMEOUT：等一个句柄等到超时了（说明它还没被激发）。
 const waitTimeout = 0x102
+
+var procGetTickCount64 = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetTickCount64")
+
+// bootTime 这次开机的时刻（≈ 现在 - 已开机时长），秒级。
+//
+// 用途：区分「进程在本次开机周期里消失了」（＝被外部结束/崩溃，值得报一条）
+// 与「上一次是关机/重启时被系统结束的」（＝正常关机，系统不给收尾机会，
+// runtime.json 必然留下）。本机实测：2026-10-30 17:32 正常关机、11-02 09:09 开机，
+// 就误报了一条“未正常退出”。
+//
+// 为什么不用事件日志（6006/6008）：那要 wevtapi 或外部命令，还得看日志有没有被清；
+// 开机时刻一个 API 就够 —— 判据是“两次开机时刻是否相同”，不依赖日志完整性。
+func bootTime() time.Time {
+	r, _, _ := procGetTickCount64.Call()
+	up := time.Duration(uint64(r)) * time.Millisecond
+	return time.Now().Add(-up).Truncate(time.Second)
+}
 
 // processAlive 进程是否还活着。
 //

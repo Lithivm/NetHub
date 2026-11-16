@@ -477,11 +477,19 @@ func (a *App) clearRuntime() {
 // noteUncleanExit 上一轮没干净退出的话先写一行。
 //
 // 为什么要它：runtime.json 是“停就撤、启再写”的 —— 它还在，就说明上一次进程
-// 没走到收尾（被外部结束 / 崩 / 断电）。而这正是“隧道为什么重启了”这个现场唯一
-// 会问的问题，不能只靠猜：按形态约定（AGENTS 里的两种形态），
-// 这种重启通常就是服务管理器或计划任务把我们拉起来的。
+// 没走到收尾。而那正是“隧道为什么重启了”这个现场唯一会问的问题。
 //
-// 不是错误的**事**就不报错：被杀之后被拉起是正常工作，写 Warn 让人看得见就行。
+// 但“文件还在”本身不是异常：**正常关机/重启时系统会直接结束进程**（GUI 进程不处理
+// WM_QUERYENDSESSION；服务形态的关机等待也只有几秒），收尾没机会跑，文件必然留下。
+// 本机实测：2026-10-30 17:32 正常关机（事件 6006）、11-02 09:09 开机 →
+// 曾误报一条“进程被外部结束或崩溃”。
+//
+// 所以判据是**开机周期**而不是“文件在不在”：runtime.json 里记了上次那次开机的时刻，
+//
+//	· 与本次开机时刻差 > bootSkew → 中间关过机/重启过 → 关机残留，写 Info 就完事；
+//	· 同一次开机里 → 进程真是被外部结束/崩溃的 → 这才值得 Warn（现场要的就是这一条）。
+//
+// 不报错的**事**不该报错：被杀之后被拉起是正常工作。
 func (a *App) noteUncleanExit() {
 	prev, ok := ReadRuntime()
 	if !ok || prev.PID == os.Getpid() {
@@ -492,14 +500,34 @@ func (a *App) noteUncleanExit() {
 		a.Bus.Warn("发现另一个实例的运行态文件（pid=%d 仍在运行）", prev.PID)
 		return
 	}
+	prevBoot, err := time.Parse(time.RFC3339, prev.BootAt)
+	if err != nil {
+		// 判不出来（老版本写的运行态没有 bootAt）→ 不猜也不报，说一句就够
+		a.Bus.Info("上次的 runtime.json 没撤（pid=%d，没有开机时刻可判）—— 不判断是否异常", prev.PID)
+		return
+	}
+	if d := sysBootTime().Sub(prevBoot); d > bootSkew || d < -bootSkew {
+		a.Bus.Info("上次的 runtime.json 没撤（pid=%d，上次开机 %s，本次开机 %s）—— 关机/重启时系统直接结束进程，收尾来不及，不算异常",
+			prev.PID, prevBoot.Format(time.RFC3339), sysBootTime().Format(time.RFC3339))
+		return
+	}
 	from := prev.StartedAt
 	if from == "" {
 		from = prev.UpdatedAt
 	}
-	a.Bus.Warn("上次未正常退出（runtime.json 还在：pid=%d，启动于 %s）—— 进程被外部结束或崩溃；本次由%s拉起",
+	a.Bus.Warn("上次未正常退出（runtime.json 还在：pid=%d，启动于 %s，与本次同一次开机）—— 进程被外部结束或崩溃；本次由%s拉起",
 		prev.PID, from, launchReason())
 	a.notify("上次未正常退出", "隧道进程被外部结束或崩溃过；本次已重新拉起，详见日志", NotifyWarn)
 }
+
+// bootSkew 两次“开机时刻”相差超过它就算不是同一次开机。
+//
+// 同一开机周期内两次算出来只差采样误差（毫秒级）；跨开机至少要关机+开机
+// （本机实测最快的一次重启相隔 15 秒）。取 5 秒：比误差大很多、比重启过程小很多。
+const bootSkew = 5 * time.Second
+
+// sysBootTime 取“这次开机的时刻”；做成变量是给测试换掉（测试没法伪造真实开机时刻）。
+var sysBootTime = bootTime
 
 // launchReason 这次大概是谁把我们拉起来的（在日志里说清，不猜得过分）。
 func launchReason() string {

@@ -363,6 +363,9 @@ type RuntimeDoc struct {
 	LastError     string   `json:"lastError,omitempty"`
 	RestartNeeded []string `json:"restartNeeded,omitempty"`
 	UpdatedAt     string   `json:"updatedAt"`
+	// BootAt 本次进程所在那次开机的时刻（秒级）：判「上次是不是同一次开机里消失的」。
+	// 关机/重启时系统直接结束进程，收尾来不及 → runtime.json 必然残留，不能当异常报。
+	BootAt string `json:"bootAt,omitempty"`
 }
 
 // Runtime 当前运行态（也供界面显示“配置生效于 …”）。
@@ -392,6 +395,7 @@ func (a *App) Runtime() RuntimeDoc {
 		doc.StartedAt = startedAt.Format(time.RFC3339)
 	}
 	doc.RestartNeeded = a.RestartRequired()
+	doc.BootAt = sysBootTime().Format(time.RFC3339)
 	return doc
 }
 

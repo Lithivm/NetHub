@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -219,5 +220,117 @@ func TestCleanupAfterStopLeavesHostsWhenUnmanaged(t *testing.T) {
 	a.cleanupAfterStop()
 	if _, exists, _, _ := hostsmgr.Read(); !exists {
 		t.Error("hosts.manage=false 时不该动 hosts 文件")
+	}
+}
+
+// 正常关机/重启时系统直接结束进程（GUI 进程不处理 WM_QUERYENDSESSION，服务形态的
+// 关机等待也只有几秒），收尾来不及跑 → runtime.json 必然留下。
+// 那不是“被外部结束或崩溃”，判据是**同一次开机**：跨开机就只写一行 Info。
+//
+// 实测来源：2026-10-30 17:32 正常关机（事件 6006）、11-02 09:09 开机，曾误报一条 WARN。
+func TestNoteUncleanExitSkipsShutdownLeftover(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	restore := sysBootTime
+	sysBootTime = func() time.Time { return now }
+	t.Cleanup(func() { sysBootTime = restore })
+
+	// 上次那次开机是一小时前，进程已经不在 → 中间关过机/重启过
+	writeRuntimeDoc(t, RuntimeDoc{
+		PID:       999999, // 不存在的 pid：processAlive 为 false
+		Running:   true,
+		StartedAt: now.Add(-30 * time.Minute).Format(time.RFC3339),
+		BootAt:    now.Add(-time.Hour).Format(time.RFC3339),
+	})
+	bus := logbus.New(50)
+	a := New(nil, bus)
+	a.noteUncleanExit()
+	if msg := warnAbout(bus, "未正常退出"); msg != "" {
+		t.Errorf("跨开机周期的残留（正常关机）不该报 WARN，实际：%s", msg)
+	}
+	if msg := infoAbout(bus, "没撤"); msg == "" {
+		t.Error("跨开机周期的残留应当留一行 Info 说明（现场要能解释 runtime.json 为什么还在）")
+	}
+}
+
+// 同一次开机里进程消失了 = 真被外部结束/崩溃 → 这条 WARN 必须还在
+// （否则“隧道为什么重启了”在现场就没人回答）。
+func TestNoteUncleanExitWarnsWithinSameBoot(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	restore := sysBootTime
+	sysBootTime = func() time.Time { return now }
+	t.Cleanup(func() { sysBootTime = restore })
+
+	writeRuntimeDoc(t, RuntimeDoc{
+		PID:       999999,
+		Running:   true,
+		StartedAt: now.Add(-time.Minute).Format(time.RFC3339),
+		BootAt:    now.Format(time.RFC3339), // 同一次开机
+	})
+	bus := logbus.New(50)
+	a := New(nil, bus)
+	a.noteUncleanExit()
+	if msg := warnAbout(bus, "未正常退出"); msg == "" {
+		t.Error("同一次开机内进程消失应当报 WARN（这才是这条告警的意义）")
+	}
+}
+
+// 老版本写的运行态没有 bootAt → 判不出来，不猜也不报。
+func TestNoteUncleanExitSilentWhenBootAtMissing(t *testing.T) {
+	writeRuntimeDoc(t, RuntimeDoc{PID: 999999, Running: true, StartedAt: time.Now().Format(time.RFC3339)})
+	bus := logbus.New(50)
+	a := New(nil, bus)
+	a.noteUncleanExit()
+	if msg := warnAbout(bus, "未正常退出"); msg != "" {
+		t.Errorf("缺 bootAt 时不该硬报 WARN，实际：%s", msg)
+	}
+}
+
+func writeRuntimeDoc(t *testing.T, doc RuntimeDoc) {
+	t.Helper()
+	dir := exeDir()
+	if dir == "" {
+		t.Fatal("exeDir 为空，没法造运行态文件")
+	}
+	path := filepath.Join(dir, RuntimeFile)
+	b, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(path) })
+}
+
+// warnAbout 环形缓冲里有没有含 substr 的 WARN 行（返回那行，便于报错时看清实际写了什么）。
+func warnAbout(bus *logbus.Bus, substr string) string {
+	for _, l := range bus.Snapshot() {
+		if l.Level == "WARN" && strings.Contains(l.Text, substr) {
+			return l.String()
+		}
+	}
+	return ""
+}
+
+func infoAbout(bus *logbus.Bus, substr string) string {
+	for _, l := range bus.Snapshot() {
+		if l.Level == "INFO" && strings.Contains(l.Text, substr) {
+			return l.String()
+		}
+	}
+	return ""
+}
+
+// bootTime 取不到时（GetTickCount64 的 Call 失败会静默返回 0）算出来的就是“现在”，
+// 那样跨开机会被误判成同一次开机 —— 又回到“正常关机也报 WARN”。
+// 所以这条要钉住：必须是过去的时刻，而且同一开机内两次算出来一致（容差内）。
+func TestBootTimeIsPastAndStable(t *testing.T) {
+	b1 := bootTime()
+	if d := time.Since(b1); d < 10*time.Second || d > 30*24*time.Hour {
+		t.Fatalf("开机时刻算成了 %v 之前，不像真的开机时刻（GetTickCount64 没取到？）", d)
+	}
+	b2 := bootTime()
+	if d := b2.Sub(b1); d > bootSkew || d < -bootSkew {
+		t.Fatalf("同一开机内两次算出的开机时刻差 %v（容差 %v）—— 跨开机会判错", d, bootSkew)
 	}
 }
