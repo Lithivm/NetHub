@@ -3,6 +3,7 @@ package engine
 import (
 	"io"
 	"net"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -246,8 +247,11 @@ func BenchmarkRelayPerConn(b *testing.B) {
 //
 //	go test -bench 'LoopbackCeiling|RelayCopy' -benchtime=4x ./internal/engine
 //
-// 参考（2026-11-26，老 4 核 + 火绒）：本机 42MB/s —— 说明环境被压得很低；
-// 干净机器应在 500MB/s 以上。低于 300MB/s 时，任何吞吐基准的绝对值都别信。
+// 参考（2026-11-26，老 4 核 + 火绒 hrwfpdrv.sys）：本机 TCP loopback 42~231MB/s
+// （波动极大），同一台机器 AF_UNIX 1519MB/s —— 说明瓶颈在网络栈（WFP + TCP 协议
+// 处理），不是 CPU/内存。低于 300MB/s 时，任何吞吐基准的绝对值都别信。
+//
+// 和 BenchmarkUnixSocketCeiling 一起看：两者的差距 = 网络栈（含安全软件过滤）的成本。
 func BenchmarkLoopbackCeiling(b *testing.B) {
 	const total = 8 << 20
 	upLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -278,6 +282,49 @@ func BenchmarkLoopbackCeiling(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		c, err := net.Dial("tcp", upLn.Addr().String())
+		if err != nil {
+			b.Fatal(err)
+		}
+		io.Copy(io.Discard, c)
+		c.Close()
+	}
+}
+
+// BenchmarkUnixSocketCeiling 用 AF_UNIX 量"不经 WFP 网络层"的同规模搬运，
+// 与 BenchmarkLoopbackCeiling 配对：差距 = TCP 协议栈 + 安全软件 WFP 过滤的成本。
+//
+// 用途：客户说"装了以后慢"时，先分辨是**网络栈被过滤**（两者差距大）还是
+// **机器本身就慢**（两者都低）。AF_UNIX 需要 Win10 1803+，不支持时自动 SKIP。
+func BenchmarkUnixSocketCeiling(b *testing.B) {
+	const total = 8 << 20
+	ln, err := net.Listen("unix", filepath.Join(b.TempDir(), "s"))
+	if err != nil {
+		b.Skipf("本机不支持 AF_UNIX: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				chunk := make([]byte, 64*1024)
+				for sent := 0; sent < total; {
+					n, err := c.Write(chunk)
+					if err != nil {
+						return
+					}
+					sent += n
+				}
+			}(c)
+		}
+	}()
+	b.SetBytes(total)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		c, err := net.Dial("unix", ln.Addr().String())
 		if err != nil {
 			b.Fatal(err)
 		}
