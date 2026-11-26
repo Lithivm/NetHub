@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"io"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -115,6 +116,12 @@ func BenchmarkRewriteOutboundPure(b *testing.B) {
 
 // 段 2：走完整 copyAndClose（relay 真实用的那段代码）的单向搬运吞吐。
 // 拓扑：upstream(写) →(relay 的 copyAndClose)→ app(读)，全是回环 TCP。
+//
+// **这个数字只能做 A/B 对照，不能当吞吐结论**（2026-11-26 实测）：
+// 在一台装了火绒（HipsDaemon）、网卡与 CPU 都老的机器上，纯回环 8MB 单向只有
+// 42MB/s 上限；同一环境下 copyAndClose 27MB/s、io.Copy 24MB/s —— 即我们的实现
+// 不输标准库，慢的是环境（安全软件的过滤驱动会拦所有 TCP，含 loopback）。
+// 要量真实吞吐，先跑 BenchmarkLoopbackCeiling 校准本机环境。
 func BenchmarkRelayCopy(b *testing.B) {
 	const total = 8 << 20 // 每轮 8MB
 	chunk := make([]byte, 64*1024)
@@ -228,5 +235,53 @@ func BenchmarkRelayPerConn(b *testing.B) {
 		}
 		var counter, grand atomic.Uint64
 		copyAndClose(app, up, &counter, &grand, nil)
+	}
+}
+
+// BenchmarkLoopbackCeiling 量本机"回环 TCP 单向搬运"的上限 —— **环境校准基准**，不是产品指标。
+//
+// 为什么需要它：上面各基准的数字会被环境整段压下去（安全软件的过滤驱动、老网卡、
+// 虚拟化网卡都会拦/降速 loopback），拿绝对值讨论性能会得出完全错误的结论。
+// 先跑它，再跑其他基准，两个数一起看才有意义：
+//
+//	go test -bench 'LoopbackCeiling|RelayCopy' -benchtime=4x ./internal/engine
+//
+// 参考（2026-11-26，老 4 核 + 火绒）：本机 42MB/s —— 说明环境被压得很低；
+// 干净机器应在 500MB/s 以上。低于 300MB/s 时，任何吞吐基准的绝对值都别信。
+func BenchmarkLoopbackCeiling(b *testing.B) {
+	const total = 8 << 20
+	upLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer upLn.Close()
+	go func() {
+		for {
+			c, err := upLn.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				chunk := make([]byte, 64*1024)
+				for sent := 0; sent < total; {
+					n, err := c.Write(chunk)
+					if err != nil {
+						return
+					}
+					sent += n
+				}
+			}(c)
+		}
+	}()
+	b.SetBytes(total)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		c, err := net.Dial("tcp", upLn.Addr().String())
+		if err != nil {
+			b.Fatal(err)
+		}
+		io.Copy(io.Discard, c)
+		c.Close()
 	}
 }
