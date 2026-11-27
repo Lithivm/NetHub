@@ -783,48 +783,36 @@ function trafficColor(name, fallback) {
    每来一拍就把整块往左滑一格（150~260ms）—— 新点从右边缘滑进来，而不是整条瞬间重画。
    为什么是它：Verge 顺滑的核心不是插值（我们两边都是"过中点二次贝塞尔"），
    而是这条合成器上的平移动画。**不要**改成每帧重绘，那会把 CPU 从"每秒一次"变成"每秒 60 次"。 */
-/* ── 连续滚动（2026-11-27 最后一次改法）──
+let trafficAnim = null;
+let trafficLastAt = 0;   // 上一拍的时刻：动画时长按"实际间隔"给，才不会有静止段
 
-   用户："流动是流动了，但线的更新还是一次一次的，Clash 是完全平滑的移动。"
-
-   症结：不管动画时长怎么调，**曲线本身每秒重画一次**（新点插入、旧点挤出），
-   平移只是盖住了整体位置，形状的突变一眼就能看出来。WAAPI 平移还带来一个隐患：
-   动画终点必须与下一拍的重画严丝合缝，任何抖动都表现为"跳一下"。
-
-   现在的做法：**每帧重绘，位置由"这一拍走了多少"（相位）算出**。
-   - trafficPhaseAt = 本拍起点（数据到达的时刻）；phase = (now - trafficPhaseAt) / 1000 秒，钳到 1；
-   - 绘制时整条曲线左移 phase × 一格 → 画面持续匀速流动；
-   - 新数据到达时 phase 归零，而数据也前移了一格 → 位置完全接上（下面 renderTraffic 的推导）；
-   - 30fps 节流；托盘冻结 / 页面不可见时停掉 rAF（否则白烧 CPU）。
-
-   代价：从"合成器上一段 transform"变成"每秒 30 次 canvas 重绘"。
-   画布只有 190×190、二十来个点，单帧在 1ms 量级；这是拿到"真正平滑"必须付的价。 */
-let trafficRaf = null;
-let trafficPhase = 0;       // 0..1：本拍已经走了多少（1 = 走满一格）
-let trafficPhaseAt = 0;     // 本拍起点的 performance.now()
-
-function startTrafficLoop() {
-  if (trafficRaf !== null) return;
-  let last = 0;
-  const step = (now) => {
-    trafficRaf = requestAnimationFrame(step);
-    if (now - last < 33) return;                 // ≈30fps，够平滑也省电
-    last = now;
-    if (trayFrozen || document.hidden) return;   // 没人看就不画
-    const p = Math.min((now - trafficPhaseAt) / 1000, 1);
-    if (Math.abs(p - trafficPhase) < 0.005) return;
-    trafficPhase = p;
-    renderTraffic();                              // 只重画，不动数据
-  };
-  trafficRaf = requestAnimationFrame(step);
+/* 滑入动画。两条约束（缺一条就会"一秒一顿"）：
+   ① **位移 = 一格**：一格 = 一拍的数据量（窗口 20 秒 / 20 格 → 每秒正好一格），
+      所以数据前进多少、画面就滑多少，绝不会往回跳；
+   ② **时长 = 这一拍的实际间隔**（约 1000ms），**不是 150ms** —— 150ms 滑完就停 850ms，
+      肉眼看到的是"闪一下、停一下"，那就是用户说的"一秒一顿"。
+      铺满整拍 = 画面持续匀速流动，下一拍 cancel+重画正好接上（新内容已左移一格，
+      与动画终点重合，所以无缝）。
+   前提：图够宽（一格 ≥ 9px）。一格像素 = 图宽/窗口秒数，由后端 trafficSlots 决定。 */
+function slideTraffic(cv, slots, animate) {
+  const now = performance.now();
+  // 实际间隔；时钟/调度抖动时给个下限，避免动画提前结束露出静止段
+  const dt = trafficLastAt ? Math.min(Math.max(now - trafficLastAt, 850), 1600) : 1000;
+  trafficLastAt = now;
+  // 上一拍的动画先收掉：fill:forwards 被 cancel 后 transform 回到 0，
+  // 而重画的新内容正好左移了同样的距离 —— 两下相抵，画面无缝。
+  if (trafficAnim) { try { trafficAnim.cancel(); } catch (e) {} trafficAnim = null; }
+  if (!animate || !cv || typeof cv.animate !== 'function') return;
+  if (trayFrozen) return;
+  try {
+    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  } catch (e) { /* 老引擎没有 matchMedia：照常动 */ }
+  const pct = 100 / (Math.max(Number(slots) || 2, 2) + 1);   // 正好一格
+  trafficAnim = cv.animate(
+    [{ transform: 'translateX(0)' }, { transform: 'translateX(-' + pct + '%)' }],
+    { duration: dt, easing: 'linear', fill: 'forwards' }
+  );
 }
-
-function stopTrafficLoop() {
-  if (trafficRaf !== null) { cancelAnimationFrame(trafficRaf); trafficRaf = null; }
-}
-
-/* 画一帧。数据/尺寸变化时用 drawTraffic()，动画帧只调 renderTraffic()。 */
-let trafficGeom = null;     // { cv, w, h, slots, plotW, step, pts, max, stepV, zeroY, topY }
 
 function drawTraffic(animate) {
   const cv = document.getElementById('trafficCanvas');
@@ -846,13 +834,21 @@ function drawTraffic(animate) {
   }
   const w = cv.clientWidth;
   if (!w) return;
-
   const dpr = window.devicePixelRatio || 1;
   const pw = Math.round(w * dpr), ph = Math.round(h * dpr);
   if (cv.width !== pw || cv.height !== ph) { cv.width = pw; cv.height = ph; }
   const g = cv.getContext('2d');
   if (!g) return;
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
 
+  const colDown = trafficColor('--primary', '#3a7bd5');
+  const colUp = trafficColor('--muted', '#8a8f98');
+
+  // 右端那个"当前值"点是 2.2px 的整圆，所以**画布上下都要留出它的半径**：
+  // 以前零线贴着 h 画、峰值贴着 0 画，值一旦贴到最低/最高，点就有一半被画布边缘裁掉
+  // （2026-10-19 用户报的"最低端时被裁切"）。内框（topY..zeroY）之外只留点半径的余量。
+  // zeroY 取"整+半"像素：1px 的零线要落在半像素上才锐，不然会糊成两像素灰。
   const DOT_R = 2.2;
   const zeroY = Math.round(h - DOT_R - 0.6) - 0.5;
   const topY = Math.min(DOT_R + 0.4, zeroY - 8);
@@ -870,34 +866,20 @@ function drawTraffic(animate) {
   while (peak / stepV > 4) stepV *= 2;
   const max = Math.max(stepV, Math.ceil(peak / stepV) * stepV);
 
-  // 绘图区右端让出一个点半径（plotW = w - DOT_R），曲线末端与"当前值"点才同心。
-  // 一格 = plotW/(slots+1)：画布共 slots+1 格，多的一格在左侧（滑出去的）。
+  // 绘图区右端要**让出一个点半径**（plotW = w - DOT_R），曲线末端与"当前值"点才同心。
+  // 旧写法是曲线画到 w、点画在 w-DOT_R 上 —— 点比线末端偏左 2.2px，
+  // 值上下跳的时候一眼就看出"点没长在线上"（2026-11-27 用户报的）。
   const plotW = w - DOT_R;
+  // 画布宽 = (slots+1) 格，所以一格 = plotW/(slots+1)；绘制时最新点贴在 plotW 上，
+  // 动画把整块左移一格后，它正好落到可见区的右边缘。
   const step = plotW / (slots + 1);
-
-  trafficGeom = { cv, g, dpr, w, h, slots, plotW, step, pts, max, stepV, zeroY, topY };
-
-  if (animate) { trafficPhaseAt = performance.now(); trafficPhase = 0; }
-  renderTraffic();
-  startTrafficLoop();
-}
-
-/* 只画，不重算（每帧都走这里）：x 坐标再减去 phase 格 —— 整条曲线随时间连续左移。 */
-function renderTraffic() {
-  const G = trafficGeom;
-  if (!G) return;
-  const { g, dpr, w, h, plotW, step, pts, max, stepV, zeroY, topY } = G;
-  const shift = trafficPhase * step;        // 本拍已走过的像素
-  g.setTransform(dpr, 0, 0, dpr, 0, 0);
-  g.clearRect(0, 0, w, h);
-
-  const colDown = trafficColor('--primary', '#3a7bd5');
-  const colUp = trafficColor('--muted', '#8a8f98');
+  const xOf = (i) => plotW - (pts.length - 1 - i) * step;
+  const yOf = (val) => zeroY - Math.min(Number(val) || 0, max) / max * (zeroY - topY);
 
   // 横线：零线深一档、其余淡一档（不画竖线、不写字）。颜色不用 --hairline-soft：
   // 深色下它只比卡片亮 7 级，几乎看不见；改用"墨色的固定透明度"，明暗两套都清楚。
   for (let gy = 0; gy <= max + 1; gy += stepV) {
-    const y = Math.round(zeroY - Math.min(gy, max) / max * (zeroY - topY)) - 0.5;
+    const y = Math.round(yOf(gy)) - 0.5;
     g.strokeStyle = inkAlpha(gy === 0 ? 0.2 : 0.12, trafficColor('--ink', '#0a0a0a'));
     g.lineWidth = 1;
     g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke();
@@ -905,13 +887,10 @@ function renderTraffic() {
 
   if (pts.length < 2) return; // 刚起来：只有横线
 
-  // 最新点贴 plotW，往左每点 step，再整体左移 shift（shift ∈ [0, step)）。
-  const xOf = (i) => plotW - (pts.length - 1 - i) * step - shift;
-  const yOf = (val) => zeroY - Math.min(Number(val) || 0, max) / max * (zeroY - topY);
-
   // 路径：**过中点的二次贝塞尔**（轻平滑，2026-10-19 用户挑的）。
-  // 过中点平滑**不移动任何采样点**（不是拟合/插值），所以"哪一秒多高"仍然一眼可读 ——
-  // 别换成 Catmull-Rom 之类会过冲的曲线，那会画出数据里没有的峰。
+  // 为什么不直接 lineTo：60 格落在 236px 上、每格 4px，折角在 41px 高里就是一排"锯齿山"，
+  // 尖峰段尤其像障碍物。过中点平滑**不移动任何采样点**（不是拟合/插值，只是把折角磨圆），
+  // 所以"哪一秒多高"仍然一眼可读 —— 别换成 Catmull-Rom 之类会过冲的曲线，那会画出数据里没有的峰。
   function trace(key) {
     const n = pts.length;
     g.moveTo(xOf(0), yOf(pts[0][key]));
@@ -928,6 +907,7 @@ function renderTraffic() {
     g.strokeStyle = color; g.lineWidth = 1.4; g.lineJoin = 'round'; g.lineCap = 'round';
     g.stroke();
     if (alpha) {
+      // 面积用 globalAlpha 变淡，不另外写一个半透明色值：改色只改 :root（见 style.css 头）
       g.beginPath(); trace(key);
       g.lineTo(xOf(pts.length - 1), zeroY);
       g.lineTo(xOf(0), zeroY);
@@ -938,11 +918,17 @@ function renderTraffic() {
   line('up', colUp, 0);     // 先画上行（在下面），下行盖在上面
   line('down', colDown, 0.22);
 
-  // 右端"当前值"落点：与曲线末端同心（同一个 xOf），值上下跳时不会看出“点没长在线上”。
+  // 右端"当前值"落点：曲线右端原来悬在读数左边、没有任何东西告诉眼睛"现在在哪里"。
+  // 点画在**下行**末端（有面积那条就是主数据），颜色同曲线。
+  // 圆心就取 plotW（= 曲线末端的 x）：点的右缘刚好贴住画布右边缘不会被裁，同时**与线同心** ——
+  // 别再写成"线到 w、点退一个半径"，那会偏半个点，值上下跳时看得出来。
   g.beginPath();
-  g.arc(xOf(pts.length - 1), yOf(pts[pts.length - 1].down), 2.2, 0, Math.PI * 2);
+  g.arc(plotW, yOf(pts[pts.length - 1].down), DOT_R, 0, Math.PI * 2);
   g.fillStyle = colDown;
   g.fill();
+
+  // 画完再滑：内容已经是"新的一帧"，动画负责把画面从上一帧带过去。
+  slideTraffic(cv, slots, animate);
 }
 
 /* 只改一个元素的文本（不存在就跳过）：流量读数每拍都要刷，innerHTML 重建会让定宽列重排。 */
@@ -3168,8 +3154,8 @@ function freezeForTray() {
   if (trayFrozen) return;
   trayFrozen = true;
   document.documentElement.classList.add('is-tray');
-  // 流量图是 rAF 每帧重绘的（不受 html.is-tray 的 `animation:none` 管），自己停掉
-  stopTrafficLoop();
+  // 流量图那条滑入动画是 Web Animations（不受 html.is-tray 的 `animation:none` 管），自己收掉
+  if (trafficAnim) { try { trafficAnim.cancel(); } catch (e) {} trafficAnim = null; }
   pauseLoops();
 }
 
