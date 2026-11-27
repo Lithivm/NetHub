@@ -808,9 +808,13 @@ function drawTraffic() {
   while (peak / stepV > 4) stepV *= 2;
   const max = Math.max(stepV, Math.ceil(peak / stepV) * stepV);
 
+  // 绘图区右端要**让出一个点半径**（plotW = w - DOT_R），曲线末端与"当前值"点才同心。
+  // 旧写法是曲线画到 w、点画在 w-DOT_R 上 —— 点比线末端偏左 2.2px，
+  // 值上下跳的时候一眼就看出"点没长在线上"（2026-11-27 用户报的）。
+  const plotW = w - DOT_R;
   const slots = Math.max(Number(v.window) || pts.length, 2);
-  const step = w / (slots - 1);
-  const xOf = (i) => w - (pts.length - 1 - i) * step;
+  const step = plotW / (slots - 1);
+  const xOf = (i) => plotW - (pts.length - 1 - i) * step;
   const yOf = (val) => zeroY - Math.min(Number(val) || 0, max) / max * (zeroY - topY);
 
   // 横线：零线深一档、其余淡一档（不画竖线、不写字）。颜色不用 --hairline-soft：
@@ -857,11 +861,10 @@ function drawTraffic() {
 
   // 右端"当前值"落点：曲线右端原来悬在读数左边、没有任何东西告诉眼睛"现在在哪里"。
   // 点画在**下行**末端（有面积那条就是主数据），颜色同曲线。
-  // 横向往回让一个半径：曲线末端正好落在 w 上（右边缘），贴着边画会被裁掉一半 ——
-  // 让到"圆的右缘刚好贴住右边缘"，读数又在它右边紧挨着，看着才是一个整体。
-  const dx = Math.max(DOT_R, xOf(pts.length - 1) - DOT_R);
+  // 圆心就取 plotW（= 曲线末端的 x）：点的右缘刚好贴住画布右边缘不会被裁，同时**与线同心** ——
+  // 别再写成"线到 w、点退一个半径"，那会偏半个点，值上下跳时看得出来。
   g.beginPath();
-  g.arc(dx, yOf(pts[pts.length - 1].down), DOT_R, 0, Math.PI * 2);
+  g.arc(plotW, yOf(pts[pts.length - 1].down), DOT_R, 0, Math.PI * 2);
   g.fillStyle = colDown;
   g.fill();
 }
