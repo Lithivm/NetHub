@@ -787,18 +787,32 @@ function trafficColor(name, fallback) {
    为什么是它：Verge 顺滑的核心不是插值（我们两边都是"过中点二次贝塞尔"），
    而是这条合成器上的平移动画。**不要**改成每帧重绘，那会把 CPU 从"每秒一次"变成"每秒 60 次"。 */
 let trafficAnim = null;
-function slideTraffic(cv, slots, animate) {
-  // 上一拍的动画先收掉：fill:forwards 被 cancel 后 transform 回到 0，接着这次重画才是连续的一帧
+let trafficLastAt = 0;   // 上一次绘制的时间戳：动画时长与位移都按"实际过了多久"算
+
+/* 滑入动画（Clash Verge 的做法）：把整块画布往左推，新点从右边缘进来。
+   ⚠ 两处必须按**实际经过的时间**算，否则会"一顿一顿"（2026-11-27 用户报的就是这个）：
+     ① 位移 = 这段时间推进的秒数（1 秒 = 画布宽的 1/(window+1)），不是"固定一格" ——
+        固定一格时，data 每秒只前进半格（合并比 2）却滑了一格，每拍都要往回跳半格；
+     ② 时长 = 这一拍的真实间隔（约 1000ms），铺满整拍 → 匀速流动，而不是"滑 260ms 再停 740ms"。
+   在合成器上跑（WAAPI），不占主线程；托盘冻结时自己 cancel（html.is-tray 的
+   `animation:none` 管不到 Web Animations）。 */
+function slideTraffic(cv, windowSec, animate) {
+  const now = performance.now();
+  const dt = trafficLastAt ? Math.min(Math.max(now - trafficLastAt, 200), 5000) : 1000;
+  trafficLastAt = now;
+  // 上一拍的动画先收掉：fill:forwards 被 cancel 后 transform 回到 0，
+  // 而重画的新内容正好左移了同样的距离 —— 两下相抵，画面无缝。
   if (trafficAnim) { try { trafficAnim.cancel(); } catch (e) {} trafficAnim = null; }
   if (!animate || !cv || typeof cv.animate !== 'function') return;
-  if (trayFrozen) return;                                   // 托盘里没人看（WAAPI 不受 is-tray 的 CSS 影响，得自己停）
+  if (trayFrozen) return;
   try {
     if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
   } catch (e) { /* 老引擎没有 matchMedia：照常动 */ }
-  const pct = 100 / (slots + 1);                            // 正好一格（画布共 slots+1 格）
+  const span = Math.max(Number(windowSec) || 60, 2);
+  const pct = (100 * (dt / 1000)) / (span + 1);   // 平移 = 这段时间前进的秒数
   trafficAnim = cv.animate(
     [{ transform: 'translateX(0)' }, { transform: 'translateX(-' + pct + '%)' }],
-    { duration: 260, easing: 'linear', fill: 'forwards' }
+    { duration: dt, easing: 'linear', fill: 'forwards' }
   );
 }
 
@@ -917,8 +931,8 @@ function drawTraffic(animate) {
   g.fillStyle = colDown;
   g.fill();
 
-  // 画完再滑：内容已经是"新的一帧"，动画负责把观众的视线从上一格带过去。
-  slideTraffic(cv, slots, animate);
+  // 画完再滑：内容已经是"新的一帧"，动画负责把画面从上一帧带过去。
+  slideTraffic(cv, Number(v.window) || 60, animate);
 }
 
 /* 把窗口内的原始采样按 n 个一组合并（取上下行最大值）——用于让"每格"更宽、曲线更平。 */
