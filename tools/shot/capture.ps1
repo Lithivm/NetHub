@@ -1,6 +1,9 @@
 ﻿# 用假数据（tools/shot/mock.js）把前端渲染出来截图，生成 docs/screenshot.png。
 # 用法： pwsh -NoProfile -File ./tools/shot/capture.ps1 [页面名]   （默认 rule）
-param([string]$Page = 'rule', [string]$Out = '', [string]$Size = '1180,720', [int]$Scale = 1, [string]$Click = '')
+param([string]$Page = 'rule', [string]$Out = '', [string]$Size = '1180,720', [int]$Scale = 1, [string]$Click = '',
+  # dark = 深色主题（README 那张就是深色）；默认浅色。实现方式是在 Bridge 层改 GetState.theme，
+  # 而不是去动 DOM：app.js 的 applyTheme 会以 GetState 为准，先改 DOM 会被它盖回去。
+  [ValidateSet('light','dark')][string]$Theme = 'light')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)   # tools/shot -> tools -> 项目根
 $fe = Join-Path $root 'frontend'
@@ -35,14 +38,19 @@ $bridge = @'
   window.go.webui.Bridge = {
     Call: function (method, args) {
       args = args || [];
-      try { var fn = M[String(method)]; return (typeof fn === 'function') ? fn.apply(M, args) : null; }
+      try {
+        var v = (typeof M[String(method)] === 'function') ? M[String(method)].apply(M, args) : null;
+        // -Theme dark：只改"生效色"，不动偏好（ThemePref 仍按 mock 的 system）
+        if (window.__forceTheme && method === "GetState" && v && typeof v === "object") { v.theme = window.__forceTheme; }
+        return v;
+      }
       catch (e) { return null; }
     },
     GetEngineLink: function () { return { connected: true, pipe: 'mock', lastError: '' }; }
   };
 })();
 '@
-Set-Content $tmpMock ($mockRaw + "`n" + $bridge) -Encoding UTF8
+Set-Content $tmpMock (("window.__forceTheme = '" + $Theme + "';`n") + $mockRaw + "`n" + $bridge) -Encoding UTF8
 $probe = @"
 <script>
 window.addEventListener("load", function(){
