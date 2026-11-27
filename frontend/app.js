@@ -717,8 +717,6 @@ function setTargetProbing(on, count) {
 // 纵轴一格 = 256 KB/s（不写刻度字）：线不是用来读精确值的，是让"这段比刚才忙"一眼可见。
 // 现场日常几百 K，所以平时就是"0 + 一条"两行线；峰值超过 4 格就把步长翻倍（条数封在 5 条以内）。
 const TRAFFIC_STEP = 256 * 1024;
-// 窗口格数 = 后端 window（30 格 × 1 秒）。**不合并采样**：
-// 每拍数据正好前进一格，动画"固定滑一格"才自洽（合并会让数据每拍只走半格、动画滑一格 → 往回跳）。
 let trafficView = null;
 let trafficBusy = false;
 
@@ -731,21 +729,14 @@ async function loadTraffic() {
     const v = await call('GetTraffic');
     if (!v) return;
     trafficView = v;
-    drawTraffic(true);          // true = 数据推进一步，画完播一格滑入动画
-    const last = trafficLast(v);
-    // 这张图窗口内的两个汇总（与图同源，读图就能对上）：
-    //   peak  = 单秒最大速率（上下行取大者）；total = 窗口内收发合计。
-    let peak = 0, total = 0;
-    for (const p of (v.series || [])) {
-      const pt = trafficPoint(p, !!v.countDirect);
-      peak = Math.max(peak, pt.up, pt.down);
-      total += pt.up + pt.down;
+    drawTraffic();
+    const rate = document.getElementById('trafficRate');
+    if (rate) {
+      // 槽内是「箭头列（定宽）+ 数字列（左对齐）」——箭头位置和数字起始位都不随位数变
+      //（归零时 fmtRate 给“—”也不会把箭头往右拉）。**上行在上、下行在下**（用户要求颠倒）。
+      rate.innerHTML = '<span class="tr-up"><i>↑</i><b>' + fmtRate(trafficLast(v).up) + '</b></span>' +
+                       '<span class="tr-down"><i>↓</i><b>' + fmtRate(trafficLast(v).down) + '</b></span>';
     }
-    // 只改文本、不重建 DOM：定宽列每拍重排会抖（箭头/标签位置都不许动）。
-    setText('rateUp', fmtRate(last.up));
-    setText('rateDown', fmtRate(last.down));
-    setText('ratePeak', fmtRate(peak));
-    setText('rateTotal', fmtBytes(total));
   } catch (e) {
     /* 老桥/探针没这个方法：图留白就好，不报错（与 InitialTheme 同样处理） */
   } finally {
@@ -779,61 +770,12 @@ function trafficColor(name, fallback) {
   return v || fallback;
 }
 
-/* 滑入动画（抄 Clash Verge 的做法）：画布**比容器宽一格**，
-   每来一拍就把整块往左滑一格（150~260ms）—— 新点从右边缘滑进来，而不是整条瞬间重画。
-   为什么是它：Verge 顺滑的核心不是插值（我们两边都是"过中点二次贝塞尔"），
-   而是这条合成器上的平移动画。**不要**改成每帧重绘，那会把 CPU 从"每秒一次"变成"每秒 60 次"。 */
-let trafficAnim = null;
-let trafficLastAt = 0;   // 上一拍的时刻：动画时长按"实际间隔"给，才不会有静止段
-
-/* 滑入动画。两条约束（缺一条就会"一秒一顿"）：
-   ① **位移 = 一格**：一格 = 一拍的数据量（窗口 20 秒 / 20 格 → 每秒正好一格），
-      所以数据前进多少、画面就滑多少，绝不会往回跳；
-   ② **时长 = 这一拍的实际间隔**（约 1000ms），**不是 150ms** —— 150ms 滑完就停 850ms，
-      肉眼看到的是"闪一下、停一下"，那就是用户说的"一秒一顿"。
-      铺满整拍 = 画面持续匀速流动，下一拍 cancel+重画正好接上（新内容已左移一格，
-      与动画终点重合，所以无缝）。
-   前提：图够宽（一格 ≥ 9px）。一格像素 = 图宽/窗口秒数，由后端 trafficSlots 决定。 */
-function slideTraffic(cv, slots, animate) {
-  const now = performance.now();
-  // 实际间隔；时钟/调度抖动时给个下限，避免动画提前结束露出静止段
-  const dt = trafficLastAt ? Math.min(Math.max(now - trafficLastAt, 850), 1600) : 1000;
-  trafficLastAt = now;
-  // 上一拍的动画先收掉：fill:forwards 被 cancel 后 transform 回到 0，
-  // 而重画的新内容正好左移了同样的距离 —— 两下相抵，画面无缝。
-  if (trafficAnim) { try { trafficAnim.cancel(); } catch (e) {} trafficAnim = null; }
-  if (!animate || !cv || typeof cv.animate !== 'function') return;
-  if (trayFrozen) return;
-  try {
-    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-  } catch (e) { /* 老引擎没有 matchMedia：照常动 */ }
-  const pct = 100 / (Math.max(Number(slots) || 2, 2) + 1);   // 正好一格
-  trafficAnim = cv.animate(
-    [{ transform: 'translateX(0)' }, { transform: 'translateX(-' + pct + '%)' }],
-    { duration: dt, easing: 'linear', fill: 'forwards' }
-  );
-}
-
-function drawTraffic(animate) {
+function drawTraffic() {
   const cv = document.getElementById('trafficCanvas');
   const v = trafficView;
   if (!cv || !v) return;
-  const h = cv.clientHeight;
-  if (!h) return; // 还没布局出来（很短的启动窗口）
-
-  // 画布 CSS 宽 = 容器内容宽 × (slots+1)/slots：多出的一格是"新点滑进来的入口"，
-  // 由 .side-spark 的 overflow:hidden 裁掉。
-  const slots = Math.max(Number(v.window) || 0, 2);   // 一格 = 一秒
-  const box = cv.parentElement;
-  if (box) {
-    const cs = getComputedStyle(box);
-    // clientWidth **已经排除边框**（= 内容 + padding），所以这里只扣 padding，别再扣 border 一次
-    const inner = box.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
-    const cssW = Math.max(60, Math.round(inner * (slots + 1) / slots));
-    if (cv.style.width !== cssW + 'px') cv.style.width = cssW + 'px';
-  }
-  const w = cv.clientWidth;
-  if (!w) return;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (!w || !h) return; // 顶栏还没布局出来（很短的启动窗口）
   const dpr = window.devicePixelRatio || 1;
   const pw = Math.round(w * dpr), ph = Math.round(h * dpr);
   if (cv.width !== pw || cv.height !== ph) { cv.width = pw; cv.height = ph; }
@@ -870,9 +812,8 @@ function drawTraffic(animate) {
   // 旧写法是曲线画到 w、点画在 w-DOT_R 上 —— 点比线末端偏左 2.2px，
   // 值上下跳的时候一眼就看出"点没长在线上"（2026-11-27 用户报的）。
   const plotW = w - DOT_R;
-  // 画布宽 = (slots+1) 格，所以一格 = plotW/(slots+1)；绘制时最新点贴在 plotW 上，
-  // 动画把整块左移一格后，它正好落到可见区的右边缘。
-  const step = plotW / (slots + 1);
+  const slots = Math.max(Number(v.window) || pts.length, 2);
+  const step = plotW / (slots - 1);
   const xOf = (i) => plotW - (pts.length - 1 - i) * step;
   const yOf = (val) => zeroY - Math.min(Number(val) || 0, max) / max * (zeroY - topY);
 
@@ -926,15 +867,6 @@ function drawTraffic(animate) {
   g.arc(plotW, yOf(pts[pts.length - 1].down), DOT_R, 0, Math.PI * 2);
   g.fillStyle = colDown;
   g.fill();
-
-  // 画完再滑：内容已经是"新的一帧"，动画负责把画面从上一帧带过去。
-  slideTraffic(cv, slots, animate);
-}
-
-/* 只改一个元素的文本（不存在就跳过）：流量读数每拍都要刷，innerHTML 重建会让定宽列重排。 */
-function setText(id, txt) {
-  const e = document.getElementById(id);
-  if (e) e.textContent = txt;
 }
 
 /* canvas 不认 color-mix：把 --ink 换算成"固定透明度的墨色"（style.css 里是 #0a0a0a / #fafafa）。 */
@@ -3154,8 +3086,6 @@ function freezeForTray() {
   if (trayFrozen) return;
   trayFrozen = true;
   document.documentElement.classList.add('is-tray');
-  // 流量图那条滑入动画是 Web Animations（不受 html.is-tray 的 `animation:none` 管），自己收掉
-  if (trafficAnim) { try { trafficAnim.cancel(); } catch (e) {} trafficAnim = null; }
   pauseLoops();
 }
 

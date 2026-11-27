@@ -222,9 +222,6 @@ code, .mono { font-family: var(--font-mono); }
 .side {
   flex: 0 0 var(--side-w);
   display: flex; flex-direction: column;
-  /* min-width:0 必须写：作为 flex item 的 auto 最小宽度会等于内容最小宽度，
-     而流量画布是**故意比容器宽一格**的（滑入动画），不写就会被它撑到 500+ px。 */
-  min-width: 0;
   min-height: 0;
   border-right: 1px solid var(--hairline);
   background: var(--canvas-soft);
@@ -271,7 +268,6 @@ code, .mono { font-family: var(--font-mono); }
 .side-dash {
   margin-top: auto;
   display: flex; flex-direction: column; gap: var(--s2);
-  min-width: 0;                    /* 同上：别让里面的画布把这一列撑开 */
   padding: var(--s3) var(--s2) var(--s2);
   border-top: 1px solid var(--hairline);
 }
@@ -291,35 +287,19 @@ code, .mono { font-family: var(--font-mono); }
 .side-spark {
   width: 100%; height: 120px;      /* 兜底高度：JS 没跑起来（或还没布局）时不至于塌成一条 */
   display: flex; padding: 4px;
-  /* 画布比容器**宽一格**（见 app.js 的滑入动画）：多出来的那格必须裁掉 */
-  overflow: hidden;
-  min-width: 0;
   background: var(--card); border: 1px solid var(--hairline); border-radius: var(--r-input);
 }
-/* 宽度由 app.js 按 slots 算好写进 style.width（= 容器内容宽 × (slots+1)/slots），
-   这里**不能**写 flex:1 或 width:100% —— 那会把多出来的一格又压回去，动画就没内容可滑了。 */
-.side-spark > canvas { flex: 0 0 auto; min-width: 0; height: 100%; display: block; }
+.side-spark > canvas { flex: 1 1 0; min-width: 0; width: 100%; height: 100%; display: block; }
 
-/* 速率读数：2×2 —— 左列 ↑/↓（此刻速率，上行在上）、右列 peak/total（本窗口峰值与合计）。
-   两列各自「标签列定宽 + 数字列左对齐」：位数变了、标签长短不同（peak/total），
-   数字的起始位都不动。 */
+/* 速率读数：上行在上、下行在下（每行「箭头列 + 数字列」，箭头位置不随位数变） */
 .side-rate {
-  display: grid;
-  grid-template-columns: auto auto;
-  justify-content: space-between;
-  column-gap: var(--s2); row-gap: 1px;
-  padding: 0 2px;
+  display: flex; flex-direction: column; gap: 1px; padding: 0 2px;
   font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--muted);
   white-space: nowrap;
 }
-.side-rate span { display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
-.side-rate i { flex: 0 0 auto; font-style: normal; color: var(--muted-soft); }
-.side-rate .tr-up i, .side-rate .tr-down i { width: 10px; }        /* ↑ ↓ */
-.side-rate .tr-peak i, .side-rate .tr-total i { width: 5ch; }      /* peak / total 定宽 → 数字起点对齐 */
-.side-rate b {
-  font-weight: 600; font-variant-numeric: tabular-nums; text-align: left;
-  min-width: 0; overflow: hidden; text-overflow: ellipsis;
-}
+.side-rate span { display: inline-flex; align-items: center; gap: 6px; }
+.side-rate i { flex: 0 0 auto; width: 10px; font-style: normal; color: var(--muted); }
+.side-rate b { font-weight: 600; font-variant-numeric: tabular-nums; text-align: left; }
 /* 下行主色（与曲线同色）、上行中性色 —— 不拿警告色画数据 */
 .side-rate .tr-up b { color: var(--body); }
 .side-rate .tr-down b { color: var(--primary); }

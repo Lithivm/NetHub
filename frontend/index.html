@@ -73,14 +73,7 @@
       <!-- 底/边由这层 div 承载，canvas 只画曲线：drawTraffic 用 clientWidth/clientHeight 定画布，
            内边距写在 canvas 上会把曲线画到边框底下 -->
       <div class="side-spark" id="sparkBox"><canvas id="trafficCanvas" aria-label="实时流量曲线"></canvas></div>
-      <!-- 读数 2×2：左列 ↑/↓（此刻速率）、右列 peak/total（这张图窗口里的峰值与合计）。
-           为什么四个数值槽各自带 id、由 JS 只改文本：innerHTML 重建会让定宽列每拍重排。 -->
-      <div class="side-rate" id="trafficRate">
-        <span class="tr-up"><i>↑</i><b id="rateUp">—</b></span>
-        <span class="tr-peak"><i>peak</i><b id="ratePeak">—</b></span>
-        <span class="tr-down"><i>↓</i><b id="rateDown">—</b></span>
-        <span class="tr-total"><i>total</i><b id="rateTotal">—</b></span>
-      </div>
+      <div class="side-rate" id="trafficRate"><span class="tr-up"><i>↑</i><b>—</b></span><span class="tr-down"><i>↓</i><b>—</b></span></div>
     </div>
 
     <!-- 引擎行：常驻可见、不折叠。

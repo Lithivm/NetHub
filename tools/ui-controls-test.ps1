@@ -727,9 +727,8 @@ window.addEventListener("load", function () {
       tv.push('boxW=' + Math.round(rect(box).width) + ' boxH=' + Math.round(rect(box).height));
       tv.push('canvasW=' + Math.round(rect(cvs).width) + ' canvasH=' + Math.round(rect(cvs).height));
       tv.push('sideW=' + Math.round(rect(side).width));
-      // ① 方形：量**图框**（.side-spark）。画布比图框宽一格（滑入动画要那一格），
-      //    所以画布本身不是正方形 —— 钉画布会把"刻意多一格"报成错。
-      var cw = rect(box).width, ch = rect(box).height;
+      // ① 方形：画布必须**接近正方形**（用户要的就是正方形，不是一条扁带）
+      var cw = rect(cvs).width, ch = rect(cvs).height;
       tv.push('square=' + (Math.abs(cw - ch) <= 3 && cw > 60));
       // ② 图框不能比侧栏还宽（宽度是侧栏内容宽，不是窗口宽）
       tv.push('fitsSide=' + (rect(box).width > 0 && rect(box).width <= rect(side).width));
@@ -769,33 +768,21 @@ window.addEventListener("load", function () {
       var appNums = rateEl ? rateEl.querySelectorAll('b').length : -1;
       var appRateText = rateEl ? rateEl.textContent : '';
       if (rateEl && cvs) {
-        // 读数现在是 2×2（↑ / peak / ↓ / total），DOM 由 index.html 定义，JS 只改文本 ——
-        // 所以这里**不能**用 innerHTML 覆盖结构（那会把 4 个槽压回 2 个，几何就量不出来了），
-        // 改成直接改各个数字的文本，量完再还原。
-        var spans = [].slice.call(rateEl.querySelectorAll('span'));
-        var bs = [].slice.call(rateEl.querySelectorAll('b'));
-        var saved = bs.map(function (b) { return b.textContent; });
-        function setAll(txt) { bs.forEach(function (b) { b.textContent = txt; }); }
-        setAll('999.9 MB/s');
-        var aLong = spans[0].querySelector('i').getBoundingClientRect();
+        function rateHTML(dn, up) {
+          return '<span class="tr-up"><i>↑</i><b>' + up + '</b></span><span class="tr-down"><i>↓</i><b>' + dn + '</b></span>';
+        }
+        rateEl.innerHTML = rateHTML('999.9 MB/s', '999.9 MB/s');
+        var aLong = rateEl.querySelector('i').getBoundingClientRect();
         var cwLong = cvs.clientWidth;
-        var cellsLong = spans.map(function (s) { return s.getBoundingClientRect(); });
-        setAll('—');
-        var aShort = spans[0].querySelector('i').getBoundingClientRect();
+        rateEl.innerHTML = rateHTML('—', '—');
+        var aShort = rateEl.querySelector('i').getBoundingClientRect();
         var cwShort = cvs.clientWidth;
-        var cellsShort = spans.map(function (s) { return s.getBoundingClientRect(); });
-        bs.forEach(function (b, i) { b.textContent = saved[i]; });
-        // 画布宽与"位数变了"无关（宽度由 slots 决定，不由读数长度决定）
         tv.push('widthStable=' + (cwLong === cwShort));
-        // ↑ 的位置不许随数字位数移动（标签列定宽）
         tv.push('arrowFixed=' + (Math.round(aLong.left) === Math.round(aShort.left)));
-        tv.push('arrowsSeparate=' + (appArrows === 4 && appNums === 4) + '(' + appArrows + '/' + appNums + ')');
-        // 2×2：第 1 行 ↑ / peak，第 2 行 ↓ / total；两列不重叠。
-        var c = cellsShort;
-        var twoByTwo = c.length === 4 &&
-          Math.abs(c[0].top - c[1].top) < 1 && Math.abs(c[2].top - c[3].top) < 1 &&
-          c[2].top - c[0].top > 4 && c[1].left >= c[0].right - 1;
-        tv.push('stacked=' + twoByTwo + '(' + c.length + ' cells, long=' + cellsLong.length + ')');
+        tv.push('arrowsSeparate=' + (appArrows === 2 && appNums === 2) + '(' + appArrows + '/' + appNums + ')');
+        var rowRects = [].slice.call(rateEl.querySelectorAll('span')).map(function (s) { return s.getBoundingClientRect(); });
+        tv.push('stacked=' + (rowRects.length === 2 && Math.abs(rowRects[0].left - rowRects[1].left) < 1 &&
+          rowRects[1].top - rowRects[0].top > 4));
         tv.push('upFirst=' + (appRateText.indexOf('↑') >= 0 && appRateText.indexOf('↑') < appRateText.indexOf('↓')));
       }
       // ⑥ 「也统计直连流量」影响整段窗口，且只换口径重画时画布必须变
