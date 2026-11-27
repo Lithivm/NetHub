@@ -1084,7 +1084,11 @@ html.is-tray *::after {
 /* 每行 4px 网格的紧凑布局微调 */
 @media (max-height: 720px) {
   :root { --titlebar-h: 32px; }
-  .page { padding: var(--s3); }
+  /* 矮窗口把普通页的内边距从 16 收到 12。
+     **必须排掉 .page-flat**：这条规则在文件后面、与 .page-flat{padding:0} 同特异性，
+     否则窗口一矮（≤720px，正好是默认窗口高度）横幅就又被推进去 12px ——
+     "横幅背景贴不了边"就是这么来的（2026-11-27 用户报的）。 */
+  .page:not(.page-flat) { padding: var(--s3); }
 }
 
 /* 规则重叠检查结果 */

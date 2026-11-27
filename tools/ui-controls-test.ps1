@@ -118,8 +118,15 @@ window.addEventListener("load", function () {
       var ph = pg.querySelector('.page-head');
       if (ph) {
         var h1 = ph.querySelector('h1');
+        // 横幅必须**通栏贴边**：它的左右边缘要与页面（.page）一致。
+        // 这条是 2026-11-27 用户报"横幅背景贴不了边"补的 —— 起因是
+        // @media (max-height:720px) 里的 .page{padding:12px} 在文件后面，
+        // 把 .page-flat{padding:0} 盖掉了：窗口一矮横幅就被推进去 12px。
+        var pr = pg.getBoundingClientRect(), hr = ph.getBoundingClientRect();
+        var flush = Math.abs(hr.left - pr.left) < 1 && Math.abs(hr.right - pr.right) < 1;
         window.__scan.push(pages[i] + ":head=" + Math.round(h1 ? h1.getBoundingClientRect().height : -1) +
-          "/" + (ph.scrollWidth > ph.clientWidth + 1 ? "OVERFLOW" : "ok"));
+          "/" + (ph.scrollWidth > ph.clientWidth + 1 ? "OVERFLOW" : "ok") +
+          "/" + (flush ? "eq" : "inset"));
       }
       boxes.forEach(function (el) {
         if (typeof el.onchange !== "function") return;
@@ -1091,11 +1098,12 @@ else {
 # ① 三页都必须有 .page-head（否则就是退回"整页一个大卡片"）
 # ② 横幅标题不许折行（≤26px）；③ 横幅里的东西不许横向溢出（挤不下会横向滚）
 foreach ($p in 'log','chain','rule') {
-  $mh = [regex]::Match($layout, ($p + ':head=(\d+)/(\w+)'))
+  $mh = [regex]::Match($layout, ($p + ':head=(\d+)/(\w+)/(\w+)'))
   if (-not $mh.Success) { $bad += ('page head (banner) not measured on ' + $p + ': ' + $layout); continue }
   $hh = [int]$mh.Groups[1].Value
   if ($hh -gt 26) { $bad += ('page head title wrapped on ' + $p + ': ' + $hh + 'px') }
   if ($mh.Groups[2].Value -ne 'ok') { $bad += ('page head overflows on ' + $p + ': ' + $layout) }
+  if ($mh.Groups[3].Value -ne 'eq') { $bad += ('page head is not flush with the page (banner must be edge-to-edge) on ' + $p + ': ' + $layout) }
 }
 $mt = [regex]::Match($layout, 'maxTitle=([0-9]+)')
 if ($mt.Success -and [int]$mt.Groups[1].Value -gt 34) { $bad += ('card title wrapped: ' + $mt.Groups[1].Value + 'px') }
