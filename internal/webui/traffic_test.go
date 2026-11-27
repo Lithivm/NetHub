@@ -4,16 +4,20 @@ import "testing"
 
 // 顶栏流量图的环形：满了挤掉最老的、窗口秒数对、开关状态透传。
 func TestTrafficRingWindow(t *testing.T) {
+	// 期望值按 trafficSlots 推导，不写死格子数 —— 窗口长度是会调的（60→30 秒那次就撞过，
+	// 写死 "69/138" 的断言会假红）。
+	const extra = 10
+	n := trafficSlots + extra
 	var r trafficRing
-	for i := 0; i < trafficSlots+10; i++ {
+	for i := 0; i < n; i++ {
 		r.push(TrafficPoint{TunUp: uint64(i), TunDown: uint64(i * 2)})
 	}
 	v := r.snapshot(false, true)
 	if len(v.Series) != trafficSlots {
 		t.Fatalf("窗口应当是 %d 格，得到 %d 格", trafficSlots, len(v.Series))
 	}
-	if got := v.Series[0].TunUp; got != 10 {
-		t.Errorf("挤掉最老的一格后，第一格应当是 10，得到 %d", got)
+	if got := v.Series[0].TunUp; got != extra {
+		t.Errorf("挤掉最老的 %d 格后，第一格应当是 %d，得到 %d", extra, extra, got)
 	}
 	if v.Window != trafficSlots {
 		t.Errorf("Window 应当是 %d，得到 %d", trafficSlots, v.Window)
@@ -22,8 +26,9 @@ func TestTrafficRingWindow(t *testing.T) {
 		t.Errorf("开关/运行状态要原样透传：%+v", v)
 	}
 	last := v.Series[len(v.Series)-1]
-	if last.TunUp != 69 || last.TunDown != 138 {
-		t.Errorf("最后一格应当是 69/138，得到 %d/%d", last.TunUp, last.TunDown)
+	wantLast := uint64(n - 1)
+	if last.TunUp != wantLast || last.TunDown != wantLast*2 {
+		t.Errorf("最后一格应当是 %d/%d，得到 %d/%d", wantLast, wantLast*2, last.TunUp, last.TunDown)
 	}
 }
 

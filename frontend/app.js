@@ -717,11 +717,8 @@ function setTargetProbing(on, count) {
 // 纵轴一格 = 256 KB/s（不写刻度字）：线不是用来读精确值的，是让"这段比刚才忙"一眼可见。
 // 现场日常几百 K，所以平时就是"0 + 一条"两行线；峰值超过 4 格就把步长翻倍（条数封在 5 条以内）。
 const TRAFFIC_STEP = 256 * 1024;
-// 每个可见点合并几个采样。
-//   1 = 60 点 / 60 秒（原始粒度）—— 每格只有约 3px，滑入动画几乎看不出来；
-//   2 = 30 点 / 60 秒 —— 和 Clash Verge 同密度（它 30 点、每格 10px），每格约 6px，
-//       动画才看得出"在走"，曲线也更平。合并取**最大值**：峰值不许被平均掉。
-const TRAFFIC_DOT_MERGE = 2;
+// 窗口格数 = 后端 window（30 格 × 1 秒）。**不合并采样**：
+// 每拍数据正好前进一格，动画"固定滑一格"才自洽（合并会让数据每拍只走半格、动画滑一格 → 往回跳）。
 let trafficView = null;
 let trafficBusy = false;
 
@@ -787,19 +784,15 @@ function trafficColor(name, fallback) {
    为什么是它：Verge 顺滑的核心不是插值（我们两边都是"过中点二次贝塞尔"），
    而是这条合成器上的平移动画。**不要**改成每帧重绘，那会把 CPU 从"每秒一次"变成"每秒 60 次"。 */
 let trafficAnim = null;
-let trafficLastAt = 0;   // 上一次绘制的时间戳：动画时长与位移都按"实际过了多久"算
 
-/* 滑入动画（Clash Verge 的做法）：把整块画布往左推，新点从右边缘进来。
-   ⚠ 两处必须按**实际经过的时间**算，否则会"一顿一顿"（2026-11-27 用户报的就是这个）：
-     ① 位移 = 这段时间推进的秒数（1 秒 = 画布宽的 1/(window+1)），不是"固定一格" ——
-        固定一格时，data 每秒只前进半格（合并比 2）却滑了一格，每拍都要往回跳半格；
-     ② 时长 = 这一拍的真实间隔（约 1000ms），铺满整拍 → 匀速流动，而不是"滑 260ms 再停 740ms"。
-   在合成器上跑（WAAPI），不占主线程；托盘冻结时自己 cancel（html.is-tray 的
-   `animation:none` 管不到 Web Animations）。 */
-function slideTraffic(cv, windowSec, animate) {
-  const now = performance.now();
-  const dt = trafficLastAt ? Math.min(Math.max(now - trafficLastAt, 200), 5000) : 1000;
-  trafficLastAt = now;
+/* 滑入动画 —— **照 Clash Verge 的参数原样抄**（2026-11-27 用户："还是顿，不能原样抄吗"）：
+   每拍把整块画布**固定滑一格**、150ms、linear，然后停到下一拍。
+   两个前提缺一不可：
+     ① 一格 = 一拍的数据量（一格 1 秒；所以不合并采样，否则数据每拍只走半格、动画滑一格会往回跳）；
+     ② 图够宽（一格 ≥ 6px）。一格 3px 时无论怎么调时长都看不出来 —— 那是窗口秒数的问题，
+        由后端 trafficSlots 决定（现为 30 秒 / 图约 190px → 一格 6.2px）。
+   WAAPI 在合成器上跑，不占主线程；托盘冻结时自己 cancel（html.is-tray 的 animation:none 管不到它）。 */
+function slideTraffic(cv, slots, animate) {
   // 上一拍的动画先收掉：fill:forwards 被 cancel 后 transform 回到 0，
   // 而重画的新内容正好左移了同样的距离 —— 两下相抵，画面无缝。
   if (trafficAnim) { try { trafficAnim.cancel(); } catch (e) {} trafficAnim = null; }
@@ -808,11 +801,10 @@ function slideTraffic(cv, windowSec, animate) {
   try {
     if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
   } catch (e) { /* 老引擎没有 matchMedia：照常动 */ }
-  const span = Math.max(Number(windowSec) || 60, 2);
-  const pct = (100 * (dt / 1000)) / (span + 1);   // 平移 = 这段时间前进的秒数
+  const pct = 100 / (Math.max(Number(slots) || 2, 2) + 1);   // 正好一格（画布共 slots+1 格）
   trafficAnim = cv.animate(
     [{ transform: 'translateX(0)' }, { transform: 'translateX(-' + pct + '%)' }],
-    { duration: dt, easing: 'linear', fill: 'forwards' }
+    { duration: 150, easing: 'linear', fill: 'forwards' }
   );
 }
 
@@ -825,8 +817,7 @@ function drawTraffic(animate) {
 
   // 画布 CSS 宽 = 容器内容宽 × (slots+1)/slots：多出的一格是"新点滑进来的入口"，
   // 由 .side-spark 的 overflow:hidden 裁掉。
-  // 可见格数 = 窗口秒数 / 合并比（merge=2 时 60 秒 → 30 格）
-  const slots = Math.max(Math.ceil(Math.max(Number(v.window) || 0, 2) / TRAFFIC_DOT_MERGE), 2);
+  const slots = Math.max(Number(v.window) || 0, 2);   // 一格 = 一秒
   const box = cv.parentElement;
   if (box) {
     const cs = getComputedStyle(box);
@@ -856,8 +847,7 @@ function drawTraffic(animate) {
   const zeroY = Math.round(h - DOT_R - 0.6) - 0.5;
   const topY = Math.min(DOT_R + 0.4, zeroY - 8);
 
-  const rawPts = (v.series || []).map((p) => trafficPoint(p, !!v.countDirect));
-  const pts = mergeTraffic(rawPts, TRAFFIC_DOT_MERGE);
+  const pts = (v.series || []).map((p) => trafficPoint(p, !!v.countDirect));
 
   // 纵轴：一格 = TRAFFIC_STEP，上限取到整数格（**不按峰值自适应** ——
   // 峰值跟上限走的话线数永远不变，"线变多"就表达不出"流量涨了"）。
@@ -932,21 +922,7 @@ function drawTraffic(animate) {
   g.fill();
 
   // 画完再滑：内容已经是"新的一帧"，动画负责把画面从上一帧带过去。
-  slideTraffic(cv, Number(v.window) || 60, animate);
-}
-
-/* 把窗口内的原始采样按 n 个一组合并（取上下行最大值）——用于让"每格"更宽、曲线更平。 */
-function mergeTraffic(pts, n) {
-  if (!(n > 1) || pts.length <= n) return pts;
-  const out = [];
-  // 从**最新**往回分组，保证最后一点永远是"刚刚这一秒"，不会因为窗口长度不是整数倍而错位
-  for (let end = pts.length; end > 0; end -= n) {
-    const from = Math.max(0, end - n);
-    let up = 0, down = 0;
-    for (let i = from; i < end; i++) { up = Math.max(up, pts[i].up); down = Math.max(down, pts[i].down); }
-    out.unshift({ up, down });
-  }
-  return out;
+  slideTraffic(cv, slots, animate);
 }
 
 /* 只改一个元素的文本（不存在就跳过）：流量读数每拍都要刷，innerHTML 重建会让定宽列重排。 */
