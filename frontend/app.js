@@ -166,38 +166,11 @@ function applyThemeSoft(mode) {
 
 /* ═══════════════ 标签页 ═══════════════ */
 
-// 顶部标签条的滑动指示块：跟着当前 tab 走（位置/宽度由 JS 量出来，不写死）。
-//
-// 位置走 transform（合成器上跑，不触发布局）；宽度只有切到不等宽的「诊断」才会变。
-// opts.immediate = 直接落位、不滑动 —— 首次渲染、字体加载完、窗口尺寸变化时用，
-// 否则会看到它从 0 滑过来 / 拖着一路动画。
-function positionTabThumb(opts) {
-  const nav = document.getElementById('tabs');
-  if (!nav) return;
-  const thumb = nav.querySelector('.tab-thumb');
-  const active = nav.querySelector('.tab.is-active');
-  if (!thumb) return;
-  // 没有任何 tab 选中（在「设置」页 —— 那个齿轮是顶栏的 .tab-top，不在 #tabs 这一组里）：
-  // 胶囊必须收起来。**只 return 是不够的**：它会留在原处，而底下那个 tab 的 is-active
-  // 已经摘掉 → 灰字压在蓝胶囊上（用户反馈的“点了设置，运行日志四个字变灰”）。
-  if (!active) { thumb.classList.add('is-out'); return; }
-  thumb.classList.remove('is-out');
-  const immediate = !!(opts && opts.immediate);
-  if (immediate) {
-    thumb.classList.add('no-anim');
-    void thumb.offsetWidth;   // 强制回流：先让 no-anim 生效，这次改动才不会补动画
-  }
-  thumb.style.transform = 'translateX(' + active.offsetLeft + 'px)';
-  thumb.style.width = active.offsetWidth + 'px';
-  if (immediate) requestAnimationFrame(() => thumb.classList.remove('no-anim'));
-}
-
 function showPage(name) {
-  // 选项卡 + 顶部栏里的「设置」（它不在 tab 组里，但用的是同一套切换）
-  document.querySelectorAll('.tab, .tab-top').forEach(t =>
+  // 竖栏里的 6 项（「设置」现在也是其中一项，不再单独挂在顶栏）
+  document.querySelectorAll('.side-item').forEach(t =>
     t.classList.toggle('is-active', t.dataset.page === name));
   document.querySelectorAll('.page').forEach(p => p.classList.toggle('is-active', p.id === 'page-' + name));
-  positionTabThumb();
   if (name === 'log') { scrollLogToEnd(); loadLogLevel(); }
   if (name === 'conn') { loadConns(); loadCountDirect(); loadQuicBlock(); loadLogLevel(); }
   if (name === 'stats') {
@@ -741,7 +714,9 @@ function setTargetProbing(on, count) {
 
    与“累计/活跃”的口径差异（量纲不同）：那两个是**连接条数**，这里是**字节/秒**。
    两条口径口径都在界面上写明（顶栏 title + 连接页的「i」）。 */
-const TRAFFIC_FLOOR = 64 * 1024; // 纵轴下限（64 KB/s）
+// 纵轴一格 = 256 KB/s（不写刻度字）：线不是用来读精确值的，是让"这段比刚才忙"一眼可见。
+// 现场日常几百 K，所以平时就是"0 + 一条"两行线；峰值超过 4 格就把步长翻倍（条数封在 5 条以内）。
+const TRAFFIC_STEP = 256 * 1024;
 let trafficView = null;
 let trafficBusy = false;
 
@@ -809,7 +784,6 @@ function drawTraffic() {
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, w, h);
 
-  const colLine = trafficColor('--hairline', '#ddd');
   const colDown = trafficColor('--primary', '#3a7bd5');
   const colUp = trafficColor('--muted', '#8a8f98');
 
@@ -821,22 +795,34 @@ function drawTraffic() {
   const zeroY = Math.round(h - DOT_R - 0.6) - 0.5;
   const topY = Math.min(DOT_R + 0.4, zeroY - 8);
 
-  // 零线：没有流量时能看出“基线在哪”，不然空图就是一片空白
-  g.strokeStyle = colLine; g.lineWidth = 1;
-  g.beginPath(); g.moveTo(0, zeroY); g.lineTo(w, zeroY); g.stroke();
-
   const pts = (v.series || []).map((p) => trafficPoint(p, !!v.countDirect));
-  if (pts.length < 2) return; // 刚起来：只有零线
+
+  // 纵轴：一格 = TRAFFIC_STEP，上限取到整数格（**不按峰值自适应** ——
+  // 峰值跟上限走的话线数永远不变，"线变多"就表达不出"流量涨了"）。
+  let peak = 0;
+  for (const p of pts) {
+    if (p.up > peak) peak = p.up;
+    if (p.down > peak) peak = p.down;
+  }
+  let stepV = TRAFFIC_STEP;
+  while (peak / stepV > 4) stepV *= 2;
+  const max = Math.max(stepV, Math.ceil(peak / stepV) * stepV);
 
   const slots = Math.max(Number(v.window) || pts.length, 2);
   const step = w / (slots - 1);
-  let max = TRAFFIC_FLOOR;
-  for (const p of pts) {
-    if (p.up > max) max = p.up;
-    if (p.down > max) max = p.down;
-  }
   const xOf = (i) => w - (pts.length - 1 - i) * step;
   const yOf = (val) => zeroY - Math.min(Number(val) || 0, max) / max * (zeroY - topY);
+
+  // 横线：零线深一档、其余淡一档（不画竖线、不写字）。颜色不用 --hairline-soft：
+  // 深色下它只比卡片亮 7 级，几乎看不见；改用"墨色的固定透明度"，明暗两套都清楚。
+  for (let gy = 0; gy <= max + 1; gy += stepV) {
+    const y = Math.round(yOf(gy)) - 0.5;
+    g.strokeStyle = inkAlpha(gy === 0 ? 0.2 : 0.12, trafficColor('--ink', '#0a0a0a'));
+    g.lineWidth = 1;
+    g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke();
+  }
+
+  if (pts.length < 2) return; // 刚起来：只有横线
 
   // 路径：**过中点的二次贝塞尔**（轻平滑，2026-10-19 用户挑的）。
   // 为什么不直接 lineTo：60 格落在 236px 上、每格 4px，折角在 41px 高里就是一排"锯齿山"，
@@ -878,6 +864,33 @@ function drawTraffic() {
   g.arc(dx, yOf(pts[pts.length - 1].down), DOT_R, 0, Math.PI * 2);
   g.fillStyle = colDown;
   g.fill();
+}
+
+/* canvas 不认 color-mix：把 --ink 换算成"固定透明度的墨色"（style.css 里是 #0a0a0a / #fafafa）。 */
+function inkAlpha(a, hex) {
+  const v = (hex || '#0a0a0a').trim();
+  if (v[0] !== '#') return v;
+  const h = v.length === 4 ? v.slice(1).split('').map((c) => c + c).join('') : v.slice(1);
+  const n = parseInt(h, 16);
+  return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')';
+}
+
+/* 方形流量图的边长：取「侧栏内容宽」与「侧栏剩余高度」里的小者。
+   只写 aspect-ratio 不够 —— 窗口一矮就会把下面的速率读数挤出窗外，
+   所以矮窗口时让它自己变小（宁可图小一点，也不能把界面顶坏）。 */
+function fitSpark() {
+  const box = document.getElementById('sparkBox');
+  const side = document.querySelector('.side');
+  const nav = document.getElementById('sidenav');
+  const eng = document.querySelector('.side-engine');
+  if (!box || !side || !nav || !eng) return;
+  const stats = document.querySelector('.side-stats');
+  const rate = document.getElementById('trafficRate');
+  // 除了图以外，仪表块里还有：两个数字卡 + 速率读数 + 上下内边距与三段间距
+  const chrome = (stats ? stats.offsetHeight : 0) + (rate ? rate.offsetHeight : 0) + 28;
+  const avail = side.clientHeight - nav.offsetHeight - eng.offsetHeight - chrome;
+  const size = Math.max(88, Math.min(box.clientWidth || 0, avail));
+  box.style.height = size + 'px';
 }
 
 /* 顶栏尺寸变了（窗口缩放/页签变动）就重画一帧：不重画的话画布会被拉变形。 */
@@ -1522,9 +1535,10 @@ async function refreshState() {
   rs.classList.toggle('is-bad', bad && !ro);   // 只读不是故障：别同时挂 is-bad（琥珀会被红色盖掉）
   rs.classList.toggle('is-busy', ro);          // 只读：琥珀、静止
   rs.classList.toggle('is-starting', starting); // 启动中：琥珀 + 转圈（"正在动"与"就停在这"得能区分）
-  // 五态：Ready（绿，呼吸）/ 启动中（琥珀，转圈）/ Error（红，呼吸）/ 只读（琥珀，静止）/ 未启动（灰）
+  // 五态（文案与 DESIGN.md 一致）：运行中（绿，呼吸）/ 启动中（琥珀，转圈）/
+  // 出错（红，呼吸）/ 只读（蓝，静止）/ 已停止（灰）
   document.getElementById('runStateText').textContent =
-    ro ? '只读' : (starting ? '启动中' : (on ? 'Ready' : (bad ? 'Error' : '未启动')));
+    ro ? '只读' : (starting ? '启动中' : (on ? '运行中' : (bad ? '出错' : '已停止')));
   // 出错时点一下看全文并复制（跟规则页那条解析提示一个套路）
   rs.classList.toggle('is-clickable', bad);
   rs.onclick = bad ? () => showEvidence('运行错误 · NetHub', s.error) : null;
@@ -1539,8 +1553,20 @@ async function refreshState() {
   tog.style.display = ro ? 'none' : '';
   tog.textContent = starting ? '启动中…' : (on ? '停止' : '启动');
   tog.disabled = starting;
-  tog.className = on ? 'btn' : 'btn btn-primary';
+  // engine-btn = 定宽 60px（"启动中…"的宽度）+ 文字居中：换文案时按钮不抖、位置不动
+  tog.className = on ? 'btn engine-btn' : 'btn engine-btn btn-primary';
   document.getElementById('btnRestart').disabled = ro;
+
+  // 「待重启」：只在有热重载管不了的改动时出现（顺带给出「重启」入口 —— 平时这一行只有一颗按钮）。
+  // 判据在后端 app.RestartRequired()，比的是"现在这份配置 vs 引擎启动那一刻的配置"。
+  const need = s.restartNeeded || [];
+  const strip = document.getElementById('engineRestart');
+  if (strip) {
+    strip.hidden = need.length === 0;
+    const txt = document.getElementById('engineRestartText');
+    if (txt) txt.textContent = need.length + ' 项改动待重启';
+    strip.title = need.join('、');
+  }
   // 只读态不再弹 toast：后端会给一条**常驻**告警（顶上那条，带「接管引擎」按钮），
   // 一闪而过的提示反而容易错过 —— 用户 2026-10-13 就把只读理解成了"服务没拉起来"。
 
@@ -3103,7 +3129,7 @@ async function thawFromTray() {
   try { await refreshState(); } catch (e) {}
   try { await loadTraffic(); } catch (e) {}
   // 当前页一次性补齐：showPage 里本来就有“切到这一页要拉什么”
-  const cur = document.querySelector('.tab.is-active, .tab-top.is-active');
+  const cur = document.querySelector('.side-item.is-active');
   if (cur) { try { showPage(cur.dataset.page); } catch (e) {} }
   resumeLoops();
 }
@@ -3114,21 +3140,20 @@ function wire() {
   document.getElementById('winMax').onclick = () => R().WindowToggleMaximise();
   document.getElementById('winClose').onclick = () => call('HideToTray').catch(() => R().WindowHide());
 
-  // 标签
-  document.querySelectorAll('.tab').forEach(t => t.onclick = () => showPage(t.dataset.page));
+  // 竖栏导航（设置也是其中一项）
+  document.querySelectorAll('.side-item').forEach(t => t.onclick = () => showPage(t.dataset.page));
   window.addEventListener('resize', () => {
-    positionTabThumb({ immediate: true });
+    fitSpark();
     const seg = document.getElementById('segLogLevel');
     if (seg) positionSegThumb(seg, true);
   });
-  positionTabThumb({ immediate: true });
-  // 字体度量定下来后重新量一次（落位，不滑）：否则指示块可能停在旧宽度上
+  fitSpark();
+  // 字体度量定下来后再量一次（方形图按剩余高度算边长，字体变了高度会变）
   if (document.fonts && document.fonts.ready) {
-    document.fonts.ready.then(() => positionTabThumb({ immediate: true }));
+    document.fonts.ready.then(() => fitSpark());
   }
   wireRowDrag('ruleTable', moveRouteTo);
   wireRowDrag('chainTable', moveChainTo);
-  document.getElementById('btnSettings').onclick = () => showPage('settings');
 
   // 主操作
   document.getElementById('btnToggle').onclick = async () => {

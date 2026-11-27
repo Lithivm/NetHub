@@ -22,62 +22,78 @@
   </div>
 </div>
 
-<!-- ── 状态条 + 主操作 ── -->
-<header class="toolbar">  <div class="statusline">
-    <span class="runstate is-starting" id="runState"><span class="dot"></span><span id="runStateText">启动中</span></span>
-    <span class="sep"></span>
-    <span class="kv">累计 <b id="stTotal">0</b></span>
-    <span class="kv">活跃 <b id="stActive">0</b></span>
-  </div>
-  <!-- 实时流量图（顶栏右侧的另一半空白）。
-       为什么放这里、不放页签带：见 KB:决策/实时流量图放顶栏不放在页签带.md —— 一句话是
-       它跟"累计/活跃"回答同一个问题（现在忙不忙），而页签宽度会随徽章数字变，图的左边缘会跟着横move。
-       口径（用户 2026-10-14 要求**不准挂悬停提示**，所以这些口只能从别处查）：
-       图是**字节/秒**、旁边两个数字是**连接条数**（量纲不同）；只算走链路的 + 开了「直连流量统计」
-       时的直连（那个开关一改整窗立即重画）；我们自己的探针不算；纵轴按窗口峰值自适应但以 64KB/s 打底。
-       口径原文在 DESIGN.md「顶栏实时流量图」一节与 KB:决策/实时流量图放顶栏不放在页签带.md。 -->
-  <div class="traffic" id="traffic">
-    <span class="traffic-label">流量</span>
-    <!-- canvas 外面这层是它的**容器**（淡底 + 1px 边 + 6px 圆角）：顶栏里的胶囊/按钮都是
-         "hairline + 圆角 + 淡底"，曲线直接铺在白底上会像贴上去的（2026-10-19 用户挑的方案②）。
-         别把底/边直接加在 canvas 上：drawTraffic 靠 clientWidth/clientHeight 定画布，
-         内边距写在 canvas 上等于把曲线画到边框底下。 -->
-    <div class="traffic-box"><canvas id="trafficCanvas" aria-label="实时流量曲线"></canvas></div>
-    <!-- 读数**上下两行**（上行在上、下行在下），每行 =「箭头列 + 左对齐的数字列」
-         —— 数字位数变化（含归零成 —）时箭头不滑、数字起始位不动；并排会在两槽之间留一大片空 -->
-    <span class="traffic-rate" id="trafficRate"><span class="tr-up"><i>↑</i><b>—</b></span><span class="tr-down"><i>↓</i><b>—</b></span></span>
-  </div>
-  <div class="actions">
-    <!-- 只读态（服务版在跑）时显示：点一下就把引擎从服务版手里抢回界面 -->
-    <button class="btn" id="btnTakeover" style="display:none" title="停掉正在运行的 Windows 服务版，把引擎交回界面版（服务注册保留）">接管引擎</button>
-    <button class="btn btn-primary" id="btnToggle">启动</button>
-    <button class="btn" id="btnRestart">重启</button>
-    <button class="btn tab-top btn-icon" id="btnSettings" data-page="settings" title="设置" aria-label="设置">
-      <!-- 扁平齿轮：顶栏里文字“设置”换成图标（与旁边的按钮同高，宽度固定不跳动） -->
-      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
-           stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <circle cx="12" cy="12" r="3.2"/>
-        <path d="M19.1 14.4a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 8.8 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/>
-      </svg>
-    </button>
-  </div>
-</header>
-
 <!-- 常驻告警条：只在"内网会被别的代理接管"这类红线问题上出现，修好自行消失。
      为什么不只用 toast：toast 一闪而过，同事那次就是弹了没看见，最后只能从日志里挖。 -->
 <div class="noticebar" id="noticeBar" hidden></div>
 
-<!-- ── 标签条（分段式，不是文件夹书签） ── -->
-<div class="tabbar">
-  <nav class="tabs" id="tabs">
-    <span class="tab-thumb" aria-hidden="true"></span>
-    <button class="tab is-active" data-page="log">运行日志</button>
-    <button class="tab" data-page="chain">隧道链路<span class="tab-badge" id="badgeChain">0</span></button>
-    <button class="tab" data-page="rule">路由规则<span class="tab-badge" id="badgeRule">0</span></button>
-    <button class="tab" data-page="conn">连接<span class="tab-badge" id="badgeConn">0</span></button>
-    <button class="tab" data-page="diag">诊断</button>
-  </nav>
-</div>
+<!-- ── 主壳：左侧竖栏 + 内容。
+     为什么竖栏不放在 内容区 里：check-ui 断言 main 的子元素只能 section.page（页面不许有孤儿），
+     导航/仪表是页面之外的东西，得跟 main 平级。 ── -->
+<div class="shell">
+
+  <aside class="side">
+    <!-- 导航：6 个页平级（「设置」以前是顶栏齿轮，现在跟其它页一样是竖栏里的一项）。
+         图标是纯 SVG（无外部依赖、不随字体缺失变形），文字见 .side-label。 -->
+    <nav class="sidenav" id="sidenav">
+      <button class="side-item is-active" data-page="log">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 17h4"/></svg>
+        <span class="side-label">运行日志</span>
+      </button>
+      <button class="side-item" data-page="chain">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M6 8.5v1.5a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V8.5"/><path d="M12 12v3.5"/></svg>
+        <span class="side-label">隧道链路</span><span class="side-badge" id="badgeChain">0</span>
+      </button>
+      <button class="side-item" data-page="rule">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h18l-7 8v6l-4 2v-8z"/></svg>
+        <span class="side-label">路由规则</span><span class="side-badge" id="badgeRule">0</span>
+      </button>
+      <button class="side-item" data-page="conn">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 12h5"/><path d="M8.5 8.5H7a3.5 3.5 0 0 0 0 7h1.5"/><path d="M15.5 8.5H17a3.5 3.5 0 0 1 0 7h-1.5"/></svg>
+        <span class="side-label">连接</span><span class="side-badge" id="badgeConn">0</span>
+      </button>
+      <button class="side-item" data-page="diag">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h3.5l2.5-7 4 14 2.5-7H21"/></svg>
+        <span class="side-label">诊断</span>
+      </button>
+      <button class="side-item" data-page="settings">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M19.1 14.4a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 8.8 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 8.8a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
+        <span class="side-label">设置</span>
+      </button>
+    </nav>
+
+    <!-- 仪表：累计/活跃 + 方形流量图 + 速率。
+         为什么流量图在侧栏下半区、为什么是方形：见 DESIGN.md「侧栏仪表」一节。
+         口径：图是**字节/秒**、两个数字是**连接条数**（量纲不同）；只算走链路的 + 开了
+         「直连流量统计」时的直连；我们自己的探针不算；纵轴一格固定 256KB/s（线数体现增幅）。 -->
+    <div class="side-dash">
+      <div class="side-stats">
+        <div class="side-stat"><span>累计</span><b id="stTotal">0</b></div>
+        <div class="side-stat"><span>活跃</span><b id="stActive">0</b></div>
+      </div>
+      <!-- 底/边由这层 div 承载，canvas 只画曲线：drawTraffic 用 clientWidth/clientHeight 定画布，
+           内边距写在 canvas 上会把曲线画到边框底下 -->
+      <div class="side-spark" id="sparkBox"><canvas id="trafficCanvas" aria-label="实时流量曲线"></canvas></div>
+      <div class="side-rate" id="trafficRate"><span class="tr-up"><i>↑</i><b>—</b></span><span class="tr-down"><i>↓</i><b>—</b></span></div>
+    </div>
+
+    <!-- 引擎行：常驻可见、不折叠。
+         状态灯（.runstate 保留这个类：check-ui 靠它断言引擎状态刷过一轮）+
+         一个按钮（启动↔停止，或只读态下的接管）。「重启」不常驻，
+         只在有未生效改动时随上面那条提示出现 —— 平时这一行只有一个按钮。 -->
+    <div class="side-engine">
+      <div class="engine-restart" id="engineRestart" hidden>
+        <span id="engineRestartText">有改动待重启</span>
+        <button class="btn btn-sm" id="btnRestart" title="重启引擎，让这些改动生效">重启</button>
+      </div>
+      <div class="engine-row">
+        <span class="runstate is-starting" id="runState"><span class="dot"></span><span id="runStateText">启动中</span></span>
+        <div class="spacer"></div>
+        <!-- 只读态（服务版在跑）时显示：点一下就把引擎从服务版手里抢回界面 -->
+        <button class="btn engine-btn" id="btnTakeover" style="display:none" title="停掉正在运行的 Windows 服务版，把引擎交回界面版（服务注册保留）">接管</button>
+        <button class="btn btn-primary engine-btn" id="btnToggle">启动</button>
+      </div>
+    </div>
+  </aside>
 
 <main class="content">
 
@@ -615,6 +631,8 @@
   </section>
 
 </main>
+
+</div><!-- /.shell -->
 
 <!-- ── 应用内提示 ── -->
 <div class="toasts" id="toasts"></div>

@@ -9,4 +9,4 @@
 - **排查入口在用到它的那一页**：连接页右上角「详细日志」开关（点一下就是 verbose，不用跳去日志页）；两个控件管同一档，改完互相同步（`updateVerboseToggle`）。
 - **档位持久化，算"本机偏好"**（`config.LocalPrefs`）：重启保持；`-apply`/导入/回滚/`deploy.ps1` 都不许打回 normal —— 任何新加的"整份配置替换"路径都要调 `KeepLocalPrefsFrom`；启动打一行档位、`-status` 报 `logLevel`。
 - **屏幕与文件是两个档**（`Bus.SetLevels`）：`ui.log_level` 管界面（环形缓冲/订阅者）、`ui.log_level_file` 管 `logs/nethub.log`（空 = 跟随）。`Detail`/`Debug` 的门槛是"**任一 sink 达档**" → "屏幕 normal + 文件 verbose"合法（现场最常用）。`tools/memwatch.ps1` 采 `stats` 行，切的是**文件档**。
-- **我们自己的探针在 normal 档一行都不写**（自检、共存检测走 `DialSelf`）：仪器不是业务 —— 与"不进连接列表、不计累计、不进顶栏流量图"同一条原则。开机一串 `proc=nethub.exe` 的 `intercept`/`relay.done` 会被当成"应用在连"（用户报过）。
+- **我们自己的探针在 normal 档一行都不写**（自检、共存检测走 `DialSelf`）：仪器不是业务 —— 与"不进连接列表、不计累计、不进侧栏流量图"同一条原则。开机一串 `proc=nethub.exe` 的 `intercept`/`relay.done` 会被当成"应用在连"（用户报过）。

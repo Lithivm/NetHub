@@ -208,6 +208,10 @@ type StateView struct {
 	// 前端据此挂常驻告警条 —— 那个错误码字面像内存不够，实际基本只有杀软一种原因。
 	DriverBlocked bool   `json:"driverBlocked"`
 	DriverPath    string `json:"driverPath"` // 驱动文件绝对路径（告警条上「复制驱动路径」用）
+	// RestartNeeded 改了但**热重载管不了**的项（与引擎启动那一刻的配置比，见 app.RestartRequired）。
+	// 界面据此在侧栏引擎行上方挂一条「N 项改动待重启」并给出「重启」按钮 ——
+	// 「重启」平时不占位置，只有真需要重启时才出现。
+	RestartNeeded []string `json:"restartNeeded,omitempty"`
 	// Notices 该挂的常驻告警（后端出数据、前端只渲染；多条时前端取 Priority 最高的）。
 	// 跟着这个 1.5 秒的轮询走，就不用再单开一条 60 秒的横幅轮询。
 	Notices []Notice `json:"notices"`
@@ -388,6 +392,7 @@ func (b *Backend) GetState() StateView {
 		ReadOnlyWhy:   why,
 		DriverBlocked: b.a.DriverBlocked(),
 		DriverPath:    engine.DriverSysPath(),
+		RestartNeeded: b.a.RestartRequired(),
 		Notices:       b.Notices(),
 	}
 }

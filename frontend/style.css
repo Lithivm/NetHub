@@ -23,19 +23,9 @@
   --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px;
 
   --titlebar-h: 36px;
-  /* 顶栏（状态 · 累计/活跃 · 流量图 · 操作）高度。为什么比页签带(54px)高、比标题栏更高：
-     顶栏是"现在什么状态 + 能做什么"，信息密度最高，图要占满它的内容高度才看得清
-     （见 KB:决策/实时流量图放顶栏不放在页签带.md）。改这个值前先看一眼 .toolbar 的 padding。 */
-  --toolbar-h: 64px;
-  /* 顶栏流量图的宽度上限（用户 2026-10-14 两次要求：先"不占满左右宽度"，再把曲线缩短 30%）。
-     392px 之下画布约 236px（减去外面那层容器的边框与内边距后；60 点 ≈ 4.0px/点）。不铺满整条顶栏：右边那截要留给操作按钮，
-     图的左边缘又必须紧跟着"累计/活跃"（同一类信息）—— 所以是定宽、不是 flex:1。 */
-  --traffic-w: 392px;
-  /* 流量图右侧两个速率数字的槽宽（每个一个槽）。
-     槽内再分两列：固定的箭头列 + 右对齐的数字列 —— 不定宽的话数字位数一变（— / 8.8 KB/s），
-     不只是画布宽度在抖，**箭头自己也会跟着滑**（2026-10-14 用户连着报的两次）。 */
-  --traffic-num-w: 88px;
-  --traffic-arrow-w: 13px;
+  /* 左侧竖栏宽。为什么是定宽：导航文字最长是"隧道链路"+三枚徽章，
+     212px 下刚好放下；再窄就会让徽章和文字打架。（侧栏取代了原来的顶部横标签带） */
+  --side-w: 212px;
   /* --ease 是整条 transition 值（时长+曲线），只能整条用；
      需要自定义时长时必须用下面这条纯曲线，否则写成 `x .2s var(--ease)`
      会变成「200ms 时长 + 140ms 延迟」—— 动画看起来发僵，其实是慢半拍。 */
@@ -221,125 +211,177 @@ code, .mono { font-family: var(--font-mono); }
 #winMax { font-size: 19px; }
 #winClose { font-size: 12px; }
 
-/* ═══════════════ 状态条 ═══════════════ */
+/* ═══════════════ 主壳：左侧竖栏 + 内容 ═══════════════ */
 
-.toolbar {
-  flex: 0 0 auto;
-  display: flex; align-items: center; gap: var(--s4);
-  /* 必须是**定高**，不能写 min-height：里面的流量图是 align-self: stretch + canvas height:100%，
-     而 canvas 的固有高度是 150px —— 定高才把内容盒锁成 64-8-8-1=47px，图的 100% 才有确定的值，
-     否则会反着把顶栏撑高到 176px（2026-10-14 实测踩到）。
-     改高度只改 --toolbar-h。 */
-  height: var(--toolbar-h);
-  padding: var(--s2) var(--s4);
-  border-bottom: 1px solid var(--hairline);
-  background: var(--canvas);
+/* 一条 exe 一个窗口：标题栏 → 告警条 →（竖栏 | 内容），横向两段。
+   竖栏与 <main> 平级而不是包在 main 里 —— main 的子元素只允许是 section.page（见 tools/check-ui.ps1）。 */
+.shell { flex: 1 1 auto; min-height: 0; display: flex; }
+
+.side {
+  flex: 0 0 var(--side-w);
+  display: flex; flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--hairline);
+  background: var(--canvas-soft);
 }
 
-/* 顶栏内的元素比正文稍微大一点：顶栏加高到 64px 后，原来的 12px 字 / 31px 按钮
-   会显得缩在中间（2026-10-14 用户要求"顶栏内元素也相应稍微增大一点"）。
-   只作用于 .toolbar，不动卡片里的按钮 —— 那些在密集表格里，变大反而更挤。 */
-.toolbar .btn { padding: 10px var(--s4); font-size: var(--fs); }
-/* 图标按钮要**把 padding 抢回来**：上面那条 .toolbar .btn 与 .btn-icon 同为两级选择器、
-   但写在后面会赢，于是 38px 宽的图标按钮内容盒被削成 38-16-16=6px，16px 的齿轮被挤成一小点
-   （2026-10-14 自己踩的：用户报“设置图标小到几乎看不见”）。这条必须排在 .toolbar .btn 之后。 */
-.toolbar .btn-icon { width: 38px; height: 38px; padding: 0; }
-.toolbar .runstate { font-size: var(--fs); padding: 4px 12px 4px 9px; }
-.toolbar .kv { font-size: var(--fs); }
-.toolbar .kv b { font-size: var(--fs-sm); }
-.toolbar .sep { height: 20px; }
-
-/* 顶栏实时流量图：**占满顶栏内容高度、宽度有上限**（用户 2026-10-14 明确要求）。
-   数据与画法见 internal/webui/traffic.go + app.js 的 drawTraffic。 */
-.traffic {
-  flex: 0 1 var(--traffic-w);
-  align-self: stretch;              /* 撑满顶栏内容高度（顶栏是 align-items: center） */
-  /* 与顶栏的 gap 同值（--s4）：这样「活跃 ↔ 流量」与「流量 ↔ 曲线」「曲线 ↔ 读数」
-     三段的间距完全一致（用户 2026-10-14 提的：标签与曲线的间距要跟标签与活跃的一致）。 */
-  display: flex; align-items: center; gap: var(--s4);
-  min-width: 300px; max-width: var(--traffic-w);
+/* ── 导航（6 页平级：「设置」也在里面，不再挂在顶栏） ── */
+.sidenav {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: var(--s2) var(--s2) var(--s3);
+  min-height: 0; overflow: auto;   /* 窗口矮时让导航自己滚，别把仪表和引擎行挤出窗外 */
 }
-.traffic-label { font-size: var(--fs-xs); color: var(--muted); white-space: nowrap; }
-/* 速率读数：**上下两行**（下、上），每行都是「箭头列（定宽）+ 数字列（左对齐）」。
-   为什么不是并排：两个定宽槽并排放会在箭头和下一个数字之间留出一大片空，很松散。
-   竖排后读数只占一个槽宽（多出来的宽度全给曲线），箭头/数字的起始位也仍然固定。 */
-.traffic-rate {
-  flex: 0 0 auto;
-  display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
+.side-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 10px; border: 0; border-radius: var(--r-chip);
+  background: transparent; color: var(--muted);
+  font-family: inherit; font-size: var(--fs-sm); font-weight: 600;
+  text-align: left; cursor: pointer; white-space: nowrap;
+  transition: background var(--ease), color var(--ease);
+}
+.side-item svg { flex: 0 0 auto; opacity: .9; }
+.side-item .side-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.side-item:hover { background: var(--card-strong); color: var(--ink); }
+.side-item.is-active {
+  background: var(--primary); color: var(--on-primary);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .18);
+}
+.side-badge {
+  flex: 0 0 auto; min-width: 18px; padding: 0 5px; border-radius: var(--r-pill);
+  background: var(--card-strong); color: var(--muted);
+  font-size: var(--fs-xs); font-weight: 700; text-align: center;
+  transition: background 120ms var(--ease-soft), color 120ms var(--ease-soft);
+}
+.side-item.is-active .side-badge { background: rgba(255, 255, 255, .22); color: #fff; }
+@media (prefers-reduced-motion: reduce) {
+  .side-item, .side-badge { transition: none; }
+}
+
+/* ── 仪表：累计/活跃 + 方形流量图 + 速率（贴着侧栏下半区） ── */
+.side-dash {
+  margin-top: auto;
+  display: flex; flex-direction: column; gap: var(--s2);
+  padding: var(--s3) var(--s2) var(--s2);
+  border-top: 1px solid var(--hairline);
+}
+.side-stats { display: flex; gap: var(--s2); }
+.side-stat {
+  flex: 1 1 0; min-width: 0;
+  display: flex; flex-direction: column; gap: 1px;
+  padding: 5px 8px; border-radius: var(--r-input);
+  background: var(--card); border: 1px solid var(--hairline);
+}
+.side-stat span { font-size: var(--fs-xs); color: var(--muted); }
+.side-stat b { font-size: var(--fs); color: var(--ink); font-variant-numeric: tabular-nums; }
+
+/* 方形流量图：边长由 app.js 的 fitSpark() 按"侧栏宽度 / 剩余高度"取小值写进 height，
+   所以这里只写宽度与外观。**别把底/边写到 canvas 上**：drawTraffic 靠 clientWidth/clientHeight
+   定画布，内边距会让曲线画到边框底下（也会让画布尺寸随 padding 抖动）。 */
+.side-spark {
+  width: 100%; height: 120px;      /* 兜底高度：JS 没跑起来（或还没布局）时不至于塌成一条 */
+  display: flex; padding: 4px;
+  background: var(--card); border: 1px solid var(--hairline); border-radius: var(--r-input);
+}
+.side-spark > canvas { flex: 1 1 0; min-width: 0; width: 100%; height: 100%; display: block; }
+
+/* 速率读数：上行在上、下行在下（每行「箭头列 + 数字列」，箭头位置不随位数变） */
+.side-rate {
+  display: flex; flex-direction: column; gap: 1px; padding: 0 2px;
   font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--muted);
   white-space: nowrap;
 }
-.traffic-rate span { display: inline-flex; width: var(--traffic-num-w); }
-.traffic-rate i { flex: 0 0 auto; width: var(--traffic-arrow-w); font-style: normal; }
-/* 数字**左对齐**（紧接自己的箭头）：右对齐时每一位都会跟着位数左右跳，而且归零变“—”
-   会躺到槽的右端、离箭头很远。左对齐下起始位固定、只有末尾字符在变 —— 看着才稳。 */
-.traffic-rate b { flex: 1 1 auto; text-align: left; }
-/* **上行在上、下行在下**（用户 2026-10-14 要求颠倒）：颜色跟曲线一致 ——
-   下行主色（与曲线同色）、上行中性色，不拿警告色画数据（警告色在这套界面里有固定含义）。 */
-.traffic-rate .tr-up b { color: var(--body); font-weight: 600; }
-.traffic-rate .tr-down b { color: var(--primary); font-weight: 600; }
-/* 曲线外面这层容器（用户 2026-10-19 挑的方案②）：与顶栏里其它控件同一套语汇 ——
-   淡底 canvas-soft + 1px hairline + 6px 圆角。以前曲线直接铺在白底上，看着像"贴上去的一块色板"；
-   加了容器之后它与状态胶囊、"启动"按钮属于同一视觉族。
-   **底和边必须由这层 div 承载，不能直接写在 canvas 上**：drawTraffic 用 clientWidth/clientHeight
-   定画布尺寸，边/内边距写在 canvas 上会让曲线画到边框底下（也会让画布尺寸随 padding 变化而抖动）。 */
-.traffic-box {
-  flex: 1 1 0; min-width: 0;
-  align-self: stretch;
-  display: flex;
-  padding: 2px 6px;                 /* 竖向只留 2px：图要几乎占满顶栏内容高度（见 DESIGN.md） */
-  background: var(--canvas-soft);
-  border: 1px solid var(--hairline);
-  border-radius: 6px;
+.side-rate span { display: inline-flex; align-items: center; gap: 6px; }
+.side-rate i { flex: 0 0 auto; width: 10px; font-style: normal; color: var(--muted); }
+.side-rate b { font-weight: 600; font-variant-numeric: tabular-nums; text-align: left; }
+/* 下行主色（与曲线同色）、上行中性色 —— 不拿警告色画数据 */
+.side-rate .tr-up b { color: var(--body); }
+.side-rate .tr-down b { color: var(--primary); }
+
+/* ── 引擎行（常驻、不折叠；整窗只有这一处能启停） ── */
+.side-engine {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: var(--s2) var(--s2) var(--s2);
+  border-top: 1px solid var(--hairline-soft);
 }
-.traffic-box > canvas { flex: 1 1 0; min-width: 0; width: 100%; height: 100%; display: block; }
-.statusline { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; }
+.engine-row { display: flex; align-items: center; gap: var(--s2); }
+.engine-row .spacer { flex: 1 1 auto; }
+/* 定宽 60px（= 「启动中…」的宽度）+ 文字居中：换文案时按钮不抖、位置不动。
+   .btn 是 inline-flex 且没有 justify-content，光写 text-align 不管用（2026-11-27 用户报过"字不居中"）。 */
+.engine-btn {
+  width: 60px; padding: 4px 0; font-size: var(--fs-xs);
+  display: inline-flex; align-items: center; justify-content: center;
+}
+#btnTakeover { padding: 4px 8px; font-size: var(--fs-xs); }
+
+/* 「待重启」提示：只在有热重载管不了的改动时出现（「重启」按钮也只在里面） */
+.engine-restart {
+  display: flex; align-items: center; gap: var(--s2);
+  padding: 4px 6px; border-radius: var(--r-input);
+  background: var(--warning-soft); color: var(--warning);
+  border: 1px solid color-mix(in srgb, var(--warning) 28%, transparent);
+  font-size: var(--fs-xs); font-weight: 600;
+}
+.engine-restart span { flex: 1 1 auto; min-width: 0; }
+.engine-restart .btn { padding: 3px 8px; font-size: var(--fs-xs); }
+
+/* ── 运行状态灯：**不套药丸**，就是面板上一颗灯 + 状态词 ──
+   语言固定：绿=运行中 · 琥珀转圈=启动中 · 蓝=只读（静止）· 红=出错 · 灰=已停止。
+   运行中与出错用**同一套**呼吸动画（用户 2026-11-27 要求"绿点动画与出错一致"），
+   颜色走 currentColor，一套 keyframes 服务两种色。 */
 .runstate {
-  display: inline-flex; align-items: center; gap: var(--s2);
-  font-weight: 700; color: var(--ink);
-  padding: 3px 10px 3px 8px; border-radius: var(--r-pill);
-  background: var(--canvas-soft); border: 1px solid var(--hairline);
-  transition: background var(--ease), border-color var(--ease);
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: var(--fs); font-weight: 600; color: var(--muted);
+  white-space: nowrap;
 }
-.runstate.is-on { background: var(--success-soft); border-color: color-mix(in srgb, var(--success) 28%, transparent); }
-.runstate.is-busy { background: var(--warning-soft); border-color: color-mix(in srgb, var(--warning) 28%, transparent); }
-.runstate.is-bad { background: var(--error-soft); border-color: color-mix(in srgb, var(--error) 28%, transparent); }
-/* 启动中：琥珀 + 转圈。跟 is-busy（只读，琥珀但静止）区分开——“正在动”和“就停在这”不能长一样。 */
-.runstate.is-starting { background: var(--warning-soft); border-color: color-mix(in srgb, var(--warning) 28%, transparent); }
 .dot {
+  flex: 0 0 auto;
   width: 8px; height: 8px; border-radius: 50%;
   background: var(--muted-soft);
   box-shadow: 0 0 0 3px transparent;
   transition: background var(--ease), box-shadow var(--ease);
 }
-.runstate.is-on .dot { background: var(--success); color: var(--success); box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 22%, transparent); }
-.runstate.is-busy .dot { background: var(--warning); }
+.runstate.is-on { color: var(--ink); }
+.runstate.is-on .dot {
+  background: var(--success); color: var(--success);
+  animation: dot-breathe 2.4s ease-in-out infinite;
+}
+/* 只读（服务版在跑）：蓝灯、静止 —— 它不是故障，也不是"活着"，所以不呼吸 */
+.runstate.is-busy { color: var(--primary); }
+.runstate.is-busy .dot {
+  background: var(--primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 18%, transparent);
+}
+/* 启动中：琥珀 + 转圈。跟 is-busy（静止蓝）区分开 —— "正在动"和"就停在这"不能长一样 */
+.runstate.is-starting { color: var(--warning); }
 .runstate.is-starting .dot {
   background: transparent;
+  width: 9px; height: 9px;          /* 含边框比实心点大一圈，视觉上还是同一个位子 */
   border: 2px solid color-mix(in srgb, var(--warning) 32%, transparent);
   border-top-color: var(--warning);
-  width: 9px; height: 9px;   /* 含边框比实心点大一圈，视觉上还是同一个位子 */
   animation: dot-spin .9s linear infinite;
 }
 @keyframes dot-spin { to { transform: rotate(360deg); } }
-
-/* 指示灯：ready 绿、出错红 —— **保留无限呼吸动画（2026-10-14 用户拍板）**。
-
-   权衡记录（别再反复）：这个 8px 的呼吸动画在窗口**可见**时吃 15.6% 单核
-   （真机 WebView2 上量到 47.8%）；而窗口**隐藏/最小化**时 Chromium 会把页面置为
-   `hidden` 并节流渲染，只花 **0.2~0.5%**。没人盯着看的时候它几乎不花钱，
-   而偶尔有人打开界面时观感值这点代价 —— 所以留。
-
-   ⚠ 这个决定**建立在一个前提上**：“托盘态必须真的停帧”。
-   若哪天发现托盘里它还在烧，那不是删动画就行了 —— 是托盘路径的 bug，
-   而且界面上所有持续工作（1.5 秒的 GetState 轮询、日志页每行一次同步布局）
-   都会跟着一直付费。判据与验证方法见 DESIGN.md 硬规则第 9 条。
-
-   做过的优化尝试（都不采用，因为省不掉）：只动 opacity 更贵（31.8%）、
-   加 will-change 无效（19.3%）—— 在这个界面上任何持续动画都会让整窗每帧重绘。 */
-.runstate.is-on .dot,
+.runstate.is-bad { color: var(--error); }
 .runstate.is-bad .dot {
-  animation: dot-breathe 2s ease-in-out infinite;
+  background: var(--error); color: var(--error);
+  animation: dot-breathe 2.4s ease-in-out infinite;
+}
+
+/* 呼吸的幅度（2026-11-27 用户："最暗的时候不够暗"）：
+   以前只到 .55 / scale .82，眼睛基本看不出在喘。现在最暗 .1、缩到 .55、光环扩散 7px，
+   周期拉长到 2.4s（大振幅再配快频率会看着心慌）。
+
+   代价（别再反复）：这颗灯在窗口**可见**时一直出帧；而托盘态由 html.is-tray 全站停帧
+   （见下面那段），实测只在 0.2~0.5% 的量级。判据见 DESIGN.md 硬规则第 9 条。 */
+@keyframes dot-breathe {
+  0%, 100% {
+    opacity: 1; transform: scale(1);
+    box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 55%, transparent);
+  }
+  50% {
+    opacity: .1; transform: scale(.55);
+    box-shadow: 0 0 0 7px color-mix(in srgb, currentColor 0%, transparent);
+  }
 }
 
 /* 托盘冻结：界面收进托盘时，**由我们自己**声明（html.is-tray），不留任何会出帧的东西。
@@ -352,29 +394,14 @@ html.is-tray *::after {
   animation: none !important;
   transition: none !important;
 }
-.runstate.is-bad .dot { background: var(--error); color: var(--error); }
-@keyframes dot-breathe {
-  0%, 100% {
-    opacity: 1;
-    transform: scale(1);
-    box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 45%, transparent);
-  }
-  50% {
-    opacity: .55;
-    transform: scale(.82);
-    box-shadow: 0 0 0 5px color-mix(in srgb, currentColor 0%, transparent);
-  }
-}
-/* 系统里开了“减少动态效果”就别动（无障碍） */
+/* 系统里开了"减少动态效果"就别动（无障碍）；不让动也得看得出状态：
+   运行/出错留一圈静态光环，启动中留个缺口环，靠文字说清楚。 */
 @media (prefers-reduced-motion: reduce) {
   .runstate.is-on .dot, .runstate.is-bad .dot { animation: none; opacity: 1; }
-  /* 不让动也必须看得出“在启动”：留个缺口环，靠文字「启动中」说清楚 */
+  .runstate.is-on .dot { box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 22%, transparent); }
+  .runstate.is-bad .dot { box-shadow: 0 0 0 3px color-mix(in srgb, var(--error) 22%, transparent); }
   .runstate.is-starting .dot { animation: none; border-top-color: color-mix(in srgb, var(--warning) 32%, transparent); }
 }
-.sep { width: 1px; height: 16px; background: var(--hairline); }
-.kv { font-size: var(--fs-sm); color: var(--muted); }
-.kv b { color: var(--body); font-weight: 600; font-family: var(--font-mono); font-size: var(--fs-xs); }
-.actions { margin-left: auto; display: flex; gap: var(--s2); }
 
 /* ═══════════════ 按钮 ═══════════════ */
 
@@ -409,102 +436,9 @@ html.is-tray *::after {
 .btn:disabled { opacity: .45; cursor: not-allowed; }
 .btn:disabled:hover { background: var(--card); color: var(--body); }
 
-/* ═══════════════ 标签条（分段式胶囊组） ═══════════════ */
-
-/* 不是文件夹书签：整组包在一个圆角容器里，选中项是一块填充的胶囊 */
-.tabbar {
-  flex: 0 0 auto;
-  display: flex; align-items: center;
-  padding: var(--s2) var(--s4);
-  border-bottom: 1px solid var(--hairline);
-  background: var(--canvas);
-}
-.tabs {
-  display: inline-flex;
-  gap: 2px;
-  padding: 3px;
-  background: var(--canvas-soft);
-  border: 1px solid var(--hairline);
-  /* 圆角必须与内层胶囊**同心**：外 = 内 + 1px 边框 + 3px 内边距。
-     写小了（旧值只加了 3）会在两端的选中项那个角上漏出一条背景缝 —— 看着就像
-     “内外圆角不统一”。改这两个值时要一起改（以及下面 .seg 的同名值）。 */
-  border-radius: calc(var(--r-chip) + 4px);
-}
-/* 顶部栏里的「设置」：外观与旁边的 .btn 完全一致（它就是 .btn），
-   只额外兼容 .tab 的选中态（在设置页时高亮成主色，否则看不出当前在哪一页） */
-.tab-top { padding: 7px var(--s3); border-radius: var(--r-btn); font-weight: 600; }
-/* 图标按钮（顶栏「设置」）：与旁边文字按钮同高，宽度固定不跳动 */
-.btn-icon {
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 34px; padding: 0; height: 34px;
-}
-.btn-icon svg { display: block; }
-.tab-top.is-active { background: var(--primary-soft); color: var(--primary); border-color: var(--primary); }
-.tab-top.is-active:hover { background: var(--primary-soft); color: var(--primary); }
-.tabs { position: relative; }
-.tabs .tab-thumb {
-  /* 上下也按 padding 内缩：top:0/height:100% 量的是**内边距盒**，会比按钮高出 6px、
-     顶进 padding 区，四个角就不再同心（两端最明显）。 */
-  position: absolute; top: 3px; left: 0; height: calc(100% - 6px); width: 0;
-  background: var(--primary); border-radius: var(--r-chip);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, .18);
-  /* 位置走 transform（合成器上跑，不碰布局）；只有切到不等宽的「诊断」时宽度才会变 */
-  transform: translateX(0);
-  transition: transform var(--dur-tab) var(--ease-soft), width var(--dur-tab) var(--ease-soft),
-              opacity 120ms var(--ease-soft);
-  will-change: transform;
-  z-index: 0; pointer-events: none;
-}
-.tabs .tab-thumb.no-anim { transition: none; }
-/* 没有选中的 tab（在「设置」页）：胶囊收起来。留一条淡出，切回任一 tab 时再淡入。 */
-.tabs .tab-thumb.is-out { opacity: 0; }
-.tabs .tab { position: relative; z-index: 1; transition: background var(--ease), color 120ms var(--ease-soft); }/* 出去的标签立刻变灰，进来的等胶囊快到了再变白 —— 否则白字会先落在浅底上闪一下 */
-.tabs .tab.is-active { background: transparent; box-shadow: none; color: var(--on-primary);
-  transition: color 140ms var(--ease-soft) 80ms; }
-.tabs .tab.is-active:hover { background: transparent; color: var(--on-primary); }
-@media (prefers-reduced-motion: reduce) {
-  .tabs .tab-thumb, .tabs .tab, .tabs .tab.is-active,
-  .tab-badge, .tab.is-active .tab-badge { transition: none; }
-}
-.tabs .tab {
-  /* 紧凑：横向内边距用 --s3（比默认 --s4 窄 8px） */
-  padding: 6px var(--s3);
-  justify-content: center;
-  white-space: nowrap;
-}
-/* 前四个等宽（以最宽的“隧道链路 + 角标”为准，避免切页时宽度跳动）；
-   最后一个（诊断）自身内容窄，就让它自适应、窄一点。 */
-.tabs .tab:not(:last-child) {
-  min-width: 104px;
-}
-.tab {
-  font-family: inherit; font-size: var(--fs-sm); font-weight: 600;
-  padding: 6px var(--s4);
-  border: 0; border-radius: var(--r-chip);
-  background: transparent; color: var(--muted);
-  cursor: pointer;
-  display: inline-flex; align-items: center; gap: var(--s2);
-  transition: background var(--ease), color var(--ease);
-}
-.tab:hover { color: var(--ink); background: var(--card-strong); }
-.tab.is-active {
-  background: var(--primary); color: var(--on-primary);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, .18);
-}
-.tab.is-active:hover { background: var(--primary); color: var(--on-primary); }
-.tab-badge {
-  font-size: var(--fs-xs); font-weight: 700;
-  min-width: 18px; padding: 0 5px; border-radius: var(--r-pill);
-  background: var(--card-strong); color: var(--muted);
-  text-align: center;
-  transition: background 120ms var(--ease-soft), color 120ms var(--ease-soft);
-}
-.tab.is-active .tab-badge { background: rgba(255, 255, 255, .22); color: #fff;
-  transition: background 140ms var(--ease-soft) 80ms, color 140ms var(--ease-soft) 80ms; }
-
 /* ═══════════════ 内容区 ═══════════════ */
 
-.content { flex: 1 1 auto; min-height: 0; position: relative; }
+.content { flex: 1 1 auto; min-width: 0; min-height: 0; position: relative; }
 .page { display: none; height: 100%; min-height: 0; padding: var(--s4); }
 .page.is-active { display: flex; flex-direction: column; }
 
@@ -527,7 +461,9 @@ html.is-tray *::after {
   border-bottom: 1px solid var(--hairline-soft);
   background: var(--card);
 }
-.card-head h2 { font-size: var(--fs-lg); }
+/* 标题**永不成两行**（tools/ui-controls-test.ps1 钉住 ≤34px）。
+   竖栏占了 212px 之后若干卡片头的 hint 变长，宁可让 hint 折行也不能挤标题。 */
+.card-head h2 { font-size: var(--fs-lg); flex: 0 0 auto; white-space: nowrap; }
 .card-head .hint { font-size: var(--fs-xs); color: var(--muted); }
 .card-head .spacer { flex: 1; }
 /* 连接页的历史连接条：贴着列表下方，不抢卡片头的位置 */
@@ -672,7 +608,23 @@ html.is-tray *::after {
 .sim-badge.bad { background: var(--error-soft); color: var(--error); }
 .sim-badge.none { background: var(--card-strong); color: var(--muted); }
 .rule-grid  { grid-template-columns: 34px 46px 200px minmax(220px, 1.5fr) 130px 104px; }
-.conn-grid  { grid-template-columns: 40px 132px minmax(160px, 1.2fr) 62px 92px 74px 84px 84px 76px 92px; }
+/* 列宽：**给下限、不写死**。竖栏占掉 212px 之后，原来那串定宽（合计 896 + 9 个间距）
+   会横向溢出（tools/ui-controls-test 的 fit 断言就是抓这个）。单元里是 nowrap+省略号，
+   所以压窄只是省略，不会折行变高。 */
+.conn-grid  {
+  column-gap: var(--s2);
+  grid-template-columns:
+    34px                  /* 序号 */
+    minmax(88px, 110px)   /* 进程 */
+    minmax(120px, 1.4fr)  /* 目标（IP:端口，最长的那个，吃剩余宽） */
+    52px                  /* 动作 */
+    minmax(60px, 88px)    /* 链 */
+    56px                  /* 时长 */
+    minmax(62px, 78px)    /* 上行 */
+    minmax(62px, 78px)    /* 下行 */
+    minmax(58px, 74px)    /* 速率 */
+    minmax(56px, 76px);   /* 状态 */
+}
 /* 统计表：这一页跟连接页不一样 —— 除了第一列全是数字，所以数字列**右对齐**，
    一列千位才能对齐着竖读（左对齐的数字表得靠右边缘才能比大小，实际读不下来）。
    列宽按“最多能有多宽”定：连接数带一个小尾巴（1.5k）、字节数是“45.6 MB”这种宽度。 */
@@ -819,7 +771,7 @@ html.is-tray *::after {
 .check em { font-weight: 400; color: var(--muted); }
 
 /* 日志档位：三段滑块（normal | verbose | debug）。
-   外观与动画都跟顶栏标签条**同一套**（见 .tabs .tab-thumb）：位置/宽度由 JS 量（positionSegThumb），
+   位置/宽度由 JS 量（positionSegThumb），与侧栏导航的选中块同一套语汇：
    胶囊滑动 240ms `--ease-soft`，出去的档位立刻变灰、进来的等胶囊快到了再变白。 */
 .seg {
   position: relative;
@@ -828,7 +780,7 @@ html.is-tray *::after {
   padding: 3px;
   background: var(--canvas-soft);
   border: 1px solid var(--hairline);
-  /* 与 .tabs 同一个公式：外 = 内 + 1px 边框 + 3px 内边距（不同心就会在两端漏缝） */
+  /* 外 = 内 + 1px 边框 + 3px 内边距（不同心就会在两端漏缝） */
   border-radius: calc(var(--r-chip) + 4px);
 }
 .seg .seg-thumb {
@@ -1235,8 +1187,7 @@ html.is-tray *::after {
    要求（用户明确提的）：三个选项**完全等宽**、看起来像滑块。
    做法：grid 三列 1fr 保证等宽（不靠 padding 凑），选中态由底下那块
    .seg3-thumb 滑过去表示（transform 过渡），文字颜色随之切换。
-   为什么不用 .tabs/.tab：那是顶部标签条，.tab:not(:last-child) 带 min-width，
-   几段宽度会不一样（就是当初的起因）。
+   为什么不用 .seg：.seg 的按钮按内容自适应宽度，三段会不等宽（就是当初的起因）。
    为什么是三段："系统"是默认值 —— Windows 自己管深浅色，在那里改一次比在我们
    这里改一次更自然（见 ui.theme 的注释）。 */
 .seg3 {

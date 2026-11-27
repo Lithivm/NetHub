@@ -72,9 +72,9 @@ window.addEventListener("load", function () {
     var pages = ["rule", "chain", "conn", "log", "settings", "diag"];
     var layers = [], maxTitle = 0, missing = [], scrollInfo = [];
     for (var i = 0; i < pages.length; i++) {
-      // 设置页的入口是顶栏齿轮（.tab-top，不是 .tab）—— 只查 .tab 会点不到它，
-      // 页面保持 display:none，量出来的几何全是 0（会误报成“滚不动”）。
-      var tb = document.querySelector('.tab[data-page="' + pages[i] + '"], .tab-top[data-page="' + pages[i] + '"]');
+      // 六个页现在都是左侧竖栏里的一项（.side-item，含「设置」）：
+      // 以前「设置」是顶栏齿轮，只查 .tab 会点不到它，页面保持 display:none，几何量出来全是 0。
+      var tb = document.querySelector('.side-item[data-page="' + pages[i] + '"]');
       if (tb && tb.click) tb.click();
       await new Promise(function (r) { setTimeout(r, 450); });
       var pg = document.getElementById("page-" + pages[i]);
@@ -95,29 +95,12 @@ window.addEventListener("load", function () {
         sc.scrollTop = 0;
         sc.style.maxHeight = restore;
         scrollInfo.push(pages[i] + ":" + (overflows ? (moved ? "scroll-ok" : "STUCK") : (moved ? "scroll-ok(forced)" : "STUCK")));
-        if (pages[i] === "settings") {
-          var par = sc.parentElement;
-          var cs = getComputedStyle(sc);
-          window.__geo = "sc{h=" + sc.clientHeight + ",sh=" + sc.scrollHeight + ",ov=" + cs.overflowY + ",flex=" + cs.flex + "}" +
-            " parent{id=" + (par.id || par.className) + ",h=" + par.clientHeight + ",disp=" + getComputedStyle(par).display + ",dir=" + getComputedStyle(par).flexDirection + "}" +
-            " children=" + sc.children.length + " actions=" + !!pg.querySelector(".settings-actions");
-        }
       }
-      // 胶囊与“谁被选中”必须一致：设置页的入口是顶栏齿轮（不在 #tabs 里），
-      // 这时不该有任何 .tab 是选中态，胶囊也必须收起来 —— 否则蓝胶囊还留在
-      // 「运行日志」底下、那四个字却已经变灰（用户反馈的那条 bug）。
-      if (pages[i] === "settings") {
-        var th = document.querySelector("#tabs .tab-thumb");
-        var at = document.querySelector("#tabs .tab.is-active");
-        // 量「最终形态」：先加 no-anim 把过渡关掉再读 computed opacity。
-        // 直接读会随机误报 —— headless 的虚拟时钟下 CSS 过渡不推进，
-        // 读到的是过渡开始前的 1（is-out 已经在元素上了，只是动画没跑完）。
-        // cls 一并带出去：类里有 is-out 才是真正的状态证据。
-        th.classList.add("no-anim");
-        void th.offsetWidth;
-        window.__thumb = "opacity=" + getComputedStyle(th).opacity + " active=" + (at ? at.dataset.page : "none") +
-          " cls=" + th.className;
-      }
+      // 选中态必须**有且只有一个**，而且就是刚点的那一页（竖栏取代了原来的滑动胶囊）。
+      // 以前这里是"设置页不该有胶囊"；现在「设置」是竖栏里的普通一项，条件反过来：
+      // 点完必须有一项 .is-active，且它的 data-page === 当前页。
+      window.__thumb = (window.__thumb || "") + "[" + pages[i] + "] active=" +
+        ([].slice.call(document.querySelectorAll(".side-item.is-active")).map(function (e) { return e.dataset.page; }).join(",") || "none");
       var lines = [];
       pg.querySelectorAll(".card-head").forEach(function (h) {
         var hint = h.querySelector(".hint");
@@ -363,6 +346,8 @@ window.addEventListener("load", function () {
         // ⑤ 清零不可逆 → 必须二次确认，而且**确认之前不能真调** ⑥ 复制文本以结论开头、制表符分隔
         try {
           var st = [];
+          // 先把统计拉回来：进页时 loadStats 是异步的，探针跑得快就会在"表还没渲染"时去量
+          if (typeof loadStats === "function") { await loadStats(); await new Promise(function (r) { setTimeout(r, 60); }); }
           var sC = document.getElementById("statConns"), sS = document.getElementById("statConnsSub");
           st.push("conns=" + sC.textContent + " sub=" + sS.textContent);
           st.push("traffic=" + document.getElementById("statTraffic").textContent +
@@ -645,7 +630,7 @@ window.addEventListener("load", function () {
     // ── 规则弹窗里的「不拦 QUIC」：勾上后保存，SaveRoute 的参数里必须带 allowQuic ──
     var rq = [];
     try {
-      var tbr = document.querySelector('.tab[data-page="rule"]');
+      var tbr = document.querySelector('.side-item[data-page="rule"]');
       if (tbr && tbr.click) tbr.click();
       await nap(300);
       ruleForm(0);
@@ -694,13 +679,13 @@ window.addEventListener("load", function () {
     // ── QUIC 卡上的“拦了多少、拦了谁”（档 1a）与 UDP 能力探测（档 1b） ──
     var uv = [];
     try {
-      var tbc = document.querySelector('.tab[data-page="conn"]');
+      var tbc = document.querySelector('.side-item[data-page="conn"]');
       if (tbc && tbc.click) tbc.click();
       await nap(300);
       await loadQuicBlock();
       await nap(150);
       uv.push("quicInfo=" + ((document.getElementById("quicBlockInfo") || {}).textContent || ""));
-      var tbd = document.querySelector('.tab[data-page="diag"]');
+      var tbd = document.querySelector('.side-item[data-page="diag"]');
       if (tbd && tbd.click) tbd.click();
       await nap(300);
       var pb = document.getElementById("btnUdpProbe");
@@ -715,30 +700,23 @@ window.addEventListener("load", function () {
     //    ③ 有新样本真的把画布重画了 ④ 口径标签在（不能只靠悬停）
     try {
       var tv = [];
-      var tb = document.querySelector('.toolbar');
-      var wrap = document.getElementById('traffic');
       var cvs = document.getElementById('trafficCanvas');
-      var acts = document.querySelector('.toolbar .actions');
-      tv.push('toolbarH=' + Math.round(tb ? tb.getBoundingClientRect().height : -1));
-      var box = document.querySelector('.traffic-box');
-      tv.push('boxH=' + Math.round(box ? box.getBoundingClientRect().height : -1));
-      tv.push('boxW=' + Math.round(box ? box.getBoundingClientRect().width : -1));
-      tv.push('canvasH=' + Math.round(cvs ? cvs.getBoundingClientRect().height : -1));
-      tv.push('canvasW=' + Math.round(cvs ? cvs.getBoundingClientRect().width : -1));
-      tv.push('wrapW=' + Math.round(wrap ? wrap.getBoundingClientRect().width : -1));
-      tv.push('rightGap=' + Math.round((wrap && acts) ? acts.getBoundingClientRect().left - wrap.getBoundingClientRect().right : -1));
-      tv.push('label=' + ((document.querySelector('.traffic-label') || {}).textContent || '-'));
-      // 间距一致（用户 2026-10-14）：活跃↔流量 与 流量↔曲线 必须同宽
-      var lbl = document.querySelector('.traffic-label');
-      var stl = document.querySelector('.statusline');
-      var gapA = (stl && wrap) ? Math.round(wrap.getBoundingClientRect().left - stl.getBoundingClientRect().right) : -1;
-      var gapB = (lbl && cvs && cvs.parentElement) ? Math.round(cvs.parentElement.getBoundingClientRect().left - lbl.getBoundingClientRect().right) : -1;
-      tv.push('gaps=' + gapA + '/' + gapB + ' even=' + (gapA === gapB && gapA > 0));
-      // 用户 2026-10-14：曲线上**不准挂悬停提示**（口径写在 DESIGN.md/代码注释里，不从鼠标悬浮拿）
-      tv.push('noTip=' + !(wrap && (wrap.getAttribute('title') || (cvs && cvs.getAttribute('title')))));
-      tv.push('rate=' + ((document.getElementById('trafficRate') || {}).textContent || '-'));
-      // “画了东西”用 toDataURL 长度判：空画布（或只剩一条底线）非常短；
-      // 取像素抽样反而会漏掉曲线的细线，断言就不稳了。
+      var box = cvs ? cvs.parentElement : null;
+      var wrap = document.getElementById('trafficRate');
+      var side = document.querySelector('.side');
+      function rect(el) { return el ? el.getBoundingClientRect() : { width: -1, height: -1, left: -1, right: -1, top: -1 }; }
+      tv.push('boxW=' + Math.round(rect(box).width) + ' boxH=' + Math.round(rect(box).height));
+      tv.push('canvasW=' + Math.round(rect(cvs).width) + ' canvasH=' + Math.round(rect(cvs).height));
+      tv.push('sideW=' + Math.round(rect(side).width));
+      // ① 方形：画布必须**接近正方形**（用户要的就是正方形，不是一条扁带）
+      var cw = rect(cvs).width, ch = rect(cvs).height;
+      tv.push('square=' + (Math.abs(cw - ch) <= 3 && cw > 60));
+      // ② 图框不能比侧栏还宽（宽度是侧栏内容宽，不是窗口宽）
+      tv.push('fitsSide=' + (rect(box).width > 0 && rect(box).width <= rect(side).width));
+      // ③ 曲线上**不准挂悬停提示**
+      tv.push('noTip=' + !(box && (box.getAttribute('title') || (cvs && cvs.getAttribute('title')))));
+      tv.push('rate=' + ((wrap || {}).textContent || '-'));
+      // “画了东西”用 toDataURL 长度判：空画布（或只剩一条底线）非常短
       function shot() { return cvs ? cvs.toDataURL().length : -1; }
       await loadTraffic();
       var s1 = shot();
@@ -747,9 +725,26 @@ window.addEventListener("load", function () {
       var s2 = shot();
       tv.push('drawn=' + (s1 > 400));
       tv.push('redraws=' + (s1 !== s2));
-      // 宽度不能跟着数字位数变（用户 2026-10-14 报的：数字一变，画布宽度和字符位置都在动）
+      // ④ 横线背景：数"整行都是浅灰且不透明"的行（网格线），至少两条（0 线 + 一格）。
+      //    填充面积是主色（偏蓝），用 R≈G≈B 把线和平涂区分开。
+      try {
+        var ctx = cvs.getContext('2d');
+        var img = ctx.getImageData(0, 0, cvs.width, cvs.height).data;
+        var cwPx = cvs.width, chPx = cvs.height;
+        var rules = 0;
+        for (var y = 0; y < chPx; y++) {
+          var grey = 0;
+          for (var x = 0; x < cwPx; x += 4) {
+            var o = (y * cwPx + x) * 4;
+            var r = img[o], g = img[o + 1], b = img[o + 2], a = img[o + 3];
+            if (a > 12 && Math.abs(r - b) <= 6 && r < 245) grey++;
+          }
+          if (grey >= (cwPx / 4) * 0.25) rules++;
+        }
+        tv.push('rules=' + rules);
+      } catch (e) { tv.push('rules=ERR:' + e.message); }
+      // ⑤ 读数：结构（箭头/数字各是独立元素）、两行、上行在上、定宽（位数变了不许动）
       var rateEl = document.getElementById('trafficRate');
-      // 先量**应用自己**渲染出来的结构（下面会把 innerHTML 改掉，改完再量就变成量探针自己了）
       var appArrows = rateEl ? rateEl.querySelectorAll('i').length : -1;
       var appNums = rateEl ? rateEl.querySelectorAll('b').length : -1;
       var appRateText = rateEl ? rateEl.textContent : '';
@@ -759,30 +754,19 @@ window.addEventListener("load", function () {
         }
         rateEl.innerHTML = rateHTML('999.9 MB/s', '999.9 MB/s');
         var aLong = rateEl.querySelector('i').getBoundingClientRect();
-        var cwLong = cvs.clientWidth, rwLong = Math.round(rateEl.getBoundingClientRect().width);
+        var cwLong = cvs.clientWidth;
         rateEl.innerHTML = rateHTML('—', '—');
         var aShort = rateEl.querySelector('i').getBoundingClientRect();
-        var cwShort = cvs.clientWidth, rwShort = Math.round(rateEl.getBoundingClientRect().width);
-        // 画布与读数盒定宽（位数变了不许动）
-        tv.push('widthStable=' + (cwLong === cwShort && rwLong === rwShort));
-        // 箭头位置定宽（归零时 fmtRate 给“—”，箭头不许往右滑 —— 用户 2026-10-14 报的）
+        var cwShort = cvs.clientWidth;
+        tv.push('widthStable=' + (cwLong === cwShort));
         tv.push('arrowFixed=' + (Math.round(aLong.left) === Math.round(aShort.left)));
-        // 箭头必须是**独立元素**：跟数字拼成一串文本的话，右对齐会让箭头跟着数字跑
-        tv.push('arrowsSeparate=' + (appArrows === 2 && appNums === 2) + '(' + appArrows + '/' + appNums + ':' + appRateText + ')');
-        // 读数必须是**上下两行**（用户 2026-10-14：并排时两槽之间的空太松散）：
-        // 两行的左边缘相同、顶边不同，且整块宽只有一个槽（不超过 100px）——
-        // 竖排多出来的宽度全给了曲线。
+        tv.push('arrowsSeparate=' + (appArrows === 2 && appNums === 2) + '(' + appArrows + '/' + appNums + ')');
         var rowRects = [].slice.call(rateEl.querySelectorAll('span')).map(function (s) { return s.getBoundingClientRect(); });
-        var stacked = rowRects.length === 2 && Math.abs(rowRects[0].left - rowRects[1].left) < 1 &&
-          rowRects[1].top - rowRects[0].top > 4 && Math.round(rateEl.getBoundingClientRect().width) <= 100;
-        tv.push('stacked=' + stacked + '(' + Math.round(rateEl.getBoundingClientRect().width) + 'px)');
-        // 位置：**上行在上、下行在下**（用户 2026-10-14 要求颠倒）
+        tv.push('stacked=' + (rowRects.length === 2 && Math.abs(rowRects[0].left - rowRects[1].left) < 1 &&
+          rowRects[1].top - rowRects[0].top > 4));
         tv.push('upFirst=' + (appRateText.indexOf('↑') >= 0 && appRateText.indexOf('↑') < appRateText.indexOf('↓')));
-        tv.push('canvasW2=' + cwLong + '/' + cwShort + ' arrowX=' + Math.round(aShort.left));
       }
-      // 「也统计直连流量」开关要影响**整段窗口**（不是只影响新增的那几秒）：
-      // ① 开关状态要真的传到数据里 ② 同一份数据按两种口径算出的窗口必须不同
-      // ③ 同一份数据只换口径重画，画布必须变
+      // ⑥ 「也统计直连流量」影响整段窗口，且只换口径重画时画布必须变
       function effDown(v, cd) {
         var s = 0;
         (v.series || []).forEach(function (p) { s += trafficPoint(p, cd).down; });
@@ -806,23 +790,22 @@ window.addEventListener("load", function () {
       window.__traffic = tv.join(' ');
     } catch (e) { window.__traffic = 'ERR:' + e.message; }
 
-
-    // ── 顶栏图标按钮：图标不能被内边距挤成一小点 ──
+    // ── 竖栏导航：图标不能被挤成一小点、文字不能被截断 ──
     //    2026-10-14 用户报“设置图标小到几乎看不见”：.toolbar .btn 的 padding 抢过了
     //    .btn-icon 的 padding:0，38px 的按钮内容盒只剩 6px，16px 的 svg 被压扁。
     //    这类“尺寸被挤”不会报错、也不影响功能，只看截图才发现 —— 所以拿断言钉住。
     try {
-      var ibs = [].slice.call(document.querySelectorAll('.toolbar .btn-icon'));
+      // 竖栏导航：6 个图标都不能被内边距挤成一小点，文字也不能被截断（ellipsis 了就是宽度不够）
+      var ibs = [].slice.call(document.querySelectorAll('.side-item'));
       var bad = [];
       ibs.forEach(function (b, i) {
         var svg = b.querySelector('svg');
-        if (!svg) { bad.push('#' + i + ':no-svg'); return; }
-        var r = svg.getBoundingClientRect();
-        if (r.width < 14 || r.height < 14) {
-          bad.push('#' + (b.id || i) + ':' + Math.round(r.width) + 'x' + Math.round(r.height));
-        }
+        var r = svg ? svg.getBoundingClientRect() : { width: 0, height: 0 };
+        if (!svg || r.width < 14 || r.height < 14) bad.push(i + ':' + Math.round(r.width) + 'x' + Math.round(r.height));
+        var lb = b.querySelector('.side-label');
+        if (lb && lb.scrollWidth > lb.clientWidth + 1) bad.push(i + ':label-truncated');
       });
-      window.__icons = "n=" + ibs.length + " bad=" + (bad.length ? bad.join(',') : '0');
+      window.__icons = 'n=' + ibs.length + ' bad=' + bad.length + (bad.length ? ('(' + bad.join(',') + ')') : '');
     } catch (e) { window.__icons = 'ERR:' + e.message; }
 
     setTimeout(function () {
@@ -923,36 +906,26 @@ if ($icons -notmatch 'bad=0') { $bad += ('toolbar icon squeezed too small: ' + $
 $traffic = Attr 'traffic'
 Write-Output ('traffic: ' + $traffic)
 if ($traffic -match 'ERR:') { $bad += ('traffic probe threw: ' + $traffic) }
-if ($traffic -notmatch 'label=流量') { $bad += ('traffic graph label missing: ' + $traffic) }
-if ($traffic -notmatch 'rate=.*/s') { $bad += ('traffic rate readout missing (口径不能只靠悬停): ' + $traffic) }
+# 口径仍然要能从界面本身读出来（图没有悬停提示）：速率读数必须在（字节/秒）
+if ($traffic -notmatch 'rate=[^ ]*.*/s') { $bad += ('traffic rate readout missing (口径不能只靠悬停): ' + $traffic) }
 if ($traffic -notmatch 'drawn=True') { $bad += ('traffic canvas is blank: ' + $traffic) }
 if ($traffic -notmatch 'redraws=True') { $bad += ('traffic canvas did not redraw on new samples: ' + $traffic) }
-if ($traffic -notmatch 'widthStable=True') { $bad += ('traffic layout shifts with the rate digits (canvas/label width must be fixed): ' + $traffic) }
+if ($traffic -notmatch 'widthStable=True') { $bad += ('traffic layout shifts with the rate digits (canvas width must be fixed): ' + $traffic) }
 if ($traffic -notmatch 'arrowFixed=True') { $bad += ('traffic up/down arrows move when the digits change (each needs its own fixed column): ' + $traffic) }
 if ($traffic -notmatch 'arrowsSeparate=True') { $bad += ('rate readout must keep the arrow in its own element (not glued to the number): ' + $traffic) }
-if ($traffic -notmatch 'stacked=True') { $bad += ('rate readout must be two stacked rows (side by side leaves a big gap): ' + $traffic) }
+if ($traffic -notmatch 'stacked=True') { $bad += ('rate readout must be two stacked rows: ' + $traffic) }
 if ($traffic -notmatch 'upFirst=True') { $bad += ('rate readout must show ↑ above ↓: ' + $traffic) }
-if ($traffic -notmatch 'even=True') { $bad += ('label/graph spacing must match active↔label spacing: ' + $traffic) }
 if ($traffic -notmatch 'noTip=True') { $bad += ('traffic graph must not carry a hover tooltip: ' + $traffic) }
 if ($traffic -notmatch 'payloadFollowsToggle=True') { $bad += ('traffic payload does not follow the direct-count toggle: ' + $traffic) }
 if ($traffic -notmatch 'wholeWindowDiffers=True') { $bad += ('direct-count toggle does not apply to the whole window: ' + $traffic) }
 if ($traffic -notmatch 'redrawsOnToggle=True') { $bad += ('switching the direct-count toggle does not redraw the graph: ' + $traffic) }
-if ($traffic -notmatch 'rightGap=[1-9][0-9]*') { $bad += ('traffic graph stretches the whole toolbar (leave room for the actions): ' + $traffic) }
-$tm = [regex]::Match($traffic, 'toolbarH=(\d+) boxH=(\d+) boxW=(\d+) canvasH=(\d+) canvasW=(\d+)')
-if (-not $tm.Success) { $bad += ('traffic probe did not report sizes: ' + $traffic) }
-else {
-  $th = [int]$tm.Groups[1].Value; $bh = [int]$tm.Groups[2].Value; $bw = [int]$tm.Groups[3].Value
-  $ch = [int]$tm.Groups[4].Value; $cw = [int]$tm.Groups[5].Value
-  if ($th -lt 60 -or $th -gt 68) { $bad += ('toolbar height should be ~64px, got ' + $th) }
-  # 图要占满顶栏内容高度（顶栏高 - 上8 - 下8 - 底线1 = 47，容 20px）。
-  # 2026-10-19 起曲线外面多了一层容器（淡底 + 1px 边 + 6px 圆角，用户挑的方案②）：
-  # 该占满 47px 的是**容器**，画布只少一圈边框 + 2px 内边距。原来这条直接量画布，
-  # 加了容器必然差 6~8px —— 所以分开量，而不是把阈值偷偷放宽。
-  if ($bh -lt $th - 20) { $bad += ('traffic container does not fill the toolbar height: box=' + $bh + ' toolbar=' + $th) }
-  if ($ch -lt $bh - 8) { $bad += ('traffic canvas does not fill its container: canvas=' + $ch + ' box=' + $bh) }
-  if ($cw -lt 220) { $bad += ('traffic canvas got too narrow (the container must not eat the plot): ' + $cw) }
-  if ($bw -lt 240) { $bad += ('traffic container too narrow: ' + $bw) }
-}
+# 侧栏方形图（2026-11-27 改版）：① 必须接近正方形 ② 不能比侧栏还宽
+if ($traffic -notmatch 'square=True') { $bad += ('traffic graph is not square: ' + $traffic) }
+if ($traffic -notmatch 'fitsSide=True') { $bad += ('traffic graph sticks out of the sidebar: ' + $traffic) }
+# ③ 横线背景（一格固定 256KB/s，线数体现增幅）：至少 2 条全宽浅灰线
+$tm = [regex]::Match($traffic, 'rules=(\d+)')
+if (-not $tm.Success) { $bad += ('traffic grid rules not measured: ' + $traffic) }
+elseif ([int]$tm.Groups[1].Value -lt 2) { $bad += ('traffic grid lines missing (grid rules=' + $tm.Groups[1].Value + '): ' + $traffic) }
 # DOM 属性里的引号是转义过的（&quot;），断言前先复原，否则看的是转义后的文本
 $callsPlain = $calls -replace '&quot;', '"' -replace '&amp;', '&'
 # 两个开关都要真的调到后端（勾选后的值看 mock 初值：探针是把当前值取反，所以两种极性都算过）
@@ -1020,7 +993,9 @@ if ($connRows -notmatch 'detail=3') { $bad += ('expanding a merged row did not l
 if ($connRows -notmatch 'ports=yes') { $bad += ('expanded detail has no local port: ' + $connRows) }
 if ($connRows -notmatch 'keptAfterRerender=true') { $bad += ('expanded row collapsed after the 1.5s re-render: ' + $connRows) }
 if ($connRows -notmatch 'toggleRefreshed=true') { $bad += ('toggling 直连统计 did not refresh the list immediately: ' + $connRows) }
-if ($connRows -notmatch 'maxRows=5 ') { $bad += ('连接表 should show at most 5 rows (见 #connTable max-height): ' + $connRows) }
+# 行数由 #connTable 的 247px 定高决定，而行高随列宽/字体在 40~48 之间浮，所以是 4~6 行。
+# （原来钉死 5 行，加了左侧竖栏之后行高变化就误报了 —— 要钉的是"整页不被无限拉长"。）
+if ($connRows -notmatch 'maxRows=[4-6] ') { $bad += ('连接表行数超出卡片定高（见 #connTable max-height）: ' + $connRows) }
 if ($connRows -notmatch 'scrollable=true') { $bad += ('连接表 overflow 时应当能在卡片内滚动: ' + $connRows) }
 if ($connRows -notmatch 'fit=true') { $bad += ('连接表横向溢出（列挤不下，会被截断）: ' + $connRows) }
 if ($connRows -notmatch 'headSticky=true') { $bad += ('连接表表头应当 sticky（滚动时不飘走）: ' + $connRows) }
@@ -1082,18 +1057,17 @@ if ($patrol -notmatch 'held=巡检中…') { $bad += ('点完巡检的跟看窗�
 if ($unhandled) { $bad += ('unhandled error in the UI: ' + $unhandled) }
 # 保存后的提示靠它拼后端算出的附加说明（“已生效 / 还要重启”）
 if ($calls -notmatch 'LastApplyHint') { $bad += 'save note (LastApplyHint) never called' }
-# 顶部胶囊（蓝底）与“哪个 tab 被选中”必须一致。设置页的入口是顶栏齿轮（不在 #tabs 里）
-# → 这时不该有任何 .tab 选中，胶囊也必须收起来。旧代码在“没有 active”时直接 return，
-# 胶囊留在原处、字却变灰 = 灰字压在蓝胶囊上（用户反馈“点设置后运行日志变灰”）。
+# 竖栏选中态：每点开一页，都必须**有且只有一个** .side-item.is-active，且就是那一页。
+# （以前这里查的是顶部那个滑动胶囊；换成竖栏后判据换成"选中唯一且正确"，覆盖同一个 bug 面：
+#   选中项与页面不一致 / 同时亮两项 / 一个都不亮 —— 用户报过"点设置后运行日志变灰"。）
 $thumb = Attr 'thumb'
 Write-Output ('thumb  : ' + $thumb)
-$mth = [regex]::Match($thumb, 'opacity=([0-9.]+) active=(\S+)')
-if (-not $mth.Success) { $bad += 'tab pill state on the settings page not measured' }
-else {
-  $op = [double]$mth.Groups[1].Value
-  $act = $mth.Groups[2].Value
-  if ($act -ne 'none') { $bad += ('settings page still marks a tab as selected: ' + $act) }
-  if ($op -gt 0.05) { $bad += ('settings page leaves the tab pill visible (opacity=' + $op + ') -> grey label on a blue pill') }
+$pairs = [regex]::Matches($thumb, '\[([a-z]+)\] active=([^\[]*)')
+if ($pairs.Count -eq 0) { $bad += 'sidebar selected state not measured' }
+foreach ($m in $pairs) {
+  $pg = $m.Groups[1].Value
+  $act = $m.Groups[2].Value.Trim()
+  if ($act -ne $pg) { $bad += ('sidebar selection mismatch: page=' + $pg + ' active=' + $act) }
 }
 if ($calls -match 'ERR:') { $bad += ('handler threw: ' + $calls) }
 if ($toast) { $bad += ('a control failed with an error toast: ' + $toast) }
@@ -1149,12 +1123,12 @@ if ($roBar -notmatch 'afterOk=called') { $bad += ('确认后没有真的调 Take
 $runState = Attr 'runstate'
 $idxHtml = Get-Content (Join-Path $fe 'index.html') -Raw -Encoding UTF8
 if ($runState -match 'ERR:') { $bad += ('run-state probe threw: ' + $runState) }
-if (-not $runState.Contains('ready=Ready/on')) { $bad += ('Ready 态不对: ' + $runState) }
+if (-not $runState.Contains('ready=运行中/on')) { $bad += ('运行中态不对: ' + $runState) }
 if (-not $runState.Contains('starting=启动中/starting')) { $bad += ('启动中态不对（要有 is-starting 类）: ' + $runState) }
 if (-not $runState.Contains('启动中…(off)')) { $bad += ('启动中时启动按钮该禁用并写"启动中…": ' + $runState) }
-if (-not $runState.Contains('stopped=未启动/idle')) { $bad += ('未启动态不对: ' + $runState) }
-if (-not $runState.Contains('error=Error/bad')) { $bad += ('Error 态不对: ' + $runState) }
-if (-not $runState.Contains('readonly=只读/busy')) { $bad += ('只读态不对（该是琥珀静止）：: ' + $runState) }
+if (-not $runState.Contains('stopped=已停止/idle')) { $bad += ('已停止态不对: ' + $runState) }
+if (-not $runState.Contains('error=出错/bad')) { $bad += ('出错态不对: ' + $runState) }
+if (-not $runState.Contains('readonly=只读/busy')) { $bad += ('只读态不对（该是蓝灯静止）: ' + $runState) }
 # 打开程序的第一帧就应该是「启动中」（自动启动服务也走中间态），不是灰未启动
 if ($idxHtml -notmatch 'id="runState"[^>]*') { $bad += 'index.html 里找不到 runState' }
 if ($idxHtml -notmatch '<span class="runstate is-starting" id="runState">') { $bad += '首屏状态胶囊不是"启动中"（打开程序会先显示灰未启动、再直接跳 Ready）' }
