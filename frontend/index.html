@@ -103,7 +103,7 @@
   <section class="page page-flat is-active" id="page-log">
     <header class="page-head">
       <h1>运行日志</h1>
-      <span class="hint" id="logFileHint">同时写到程序目录的 nethub.log</span>
+      <span class="hint" id="logFileHint">同时写入 nethub.log</span>
       <div class="spacer"></div>
       <div class="seg" id="segLogLevel" title="日志档位：normal 只记连接与错误 · verbose 加每条连接的判定、DNS、走了哪个上游 · debug 加引擎内部状态。档位会记住，重启不变">
         <span class="seg-thumb"></span>
@@ -140,8 +140,7 @@
   <section class="page page-flat" id="page-rule">
     <header class="page-head">
       <h1>路由规则</h1>
-      <button class="info-btn" id="btnHelpRule" title="域名与通配域名的匹配规则">i</button>
-      <span class="hint">自上而下匹配，命中即停；一条规则可含多个目标。改动<b>即时保存并立即生效</b>（已在跑的连接不断）</span>
+      <button class="info-btn" id="btnHelpRule" title="匹配顺序、域名与通配的写法">i</button>
       <div class="spacer"></div>
       <button class="btn btn-sm" id="btnRuleSort" title="前缀长的（/32 比 /24 具体）排前面，带端口条件的更靠前；本机自身 / 环回（127.0.0.0/8）类规则放最后——它是兜底，不跟内网网段争位置；停用的规则原地不动">按优先级排序</button>
       <button class="btn btn-sm" id="btnRuleOverlap">检查重叠</button>
@@ -156,7 +155,7 @@
             placeholder="按浏览器地址栏的写法贴进来（一行一个，也支持逗号/分号分隔、# 注释）：&#10;http://main.example.com/&#10;main.example.com&#10;10.0.0.5:5432&#10;172.16.0.0/24"></textarea>
           <button class="btn btn-sm btn-primary" id="btnExplain">模拟</button>
         </div>
-        <div class="hint">支持 URL、域名、IP、网段、IP 区间（10.1.1.1-10.1.1.255）、IP 通配（198.51.100.*）。一个地址可能展开成几条连接（http/https 两个端口 × 每个解析地址）—— 浏览器会怎么连，这里就按什么判。</div>
+        <div class="hint">一行一个；URL / 域名 / 网段 / 通配都能贴，写法见右上「i」。</div>
         <div class="sim-result" id="simResult" hidden></div>
       </div>
       <div class="table" id="ruleTable"></div>
@@ -170,12 +169,11 @@
       <div class="card">
         <div class="card-head">
           <h2>当前连接</h2>
-          <span class="hint">同目标合并成一行（×N），点开看每条</span>
           <div class="spacer"></div>
           <span class="hint" id="connSummary">—</span>
           <button class="btn btn-sm" id="btnConnVerbose" title="打开详细日志（verbose）：每条连接为什么这么走、DNS、实际走了哪个上游">详细日志</button>
           <button class="btn btn-sm" id="btnConnRefresh">刷新</button>
-          <button class="info-btn" id="btnHelpConn" title="列表口径与操作">i</button>
+          <button class="info-btn" id="btnHelpConn" title="列表口径、合并规则与速率">i</button>
         </div>
         <div class="table" id="connTable"></div>
 
@@ -200,11 +198,10 @@
         <div class="card-head">
           <h2>统计</h2>
           <div class="spacer"></div>
-          <span class="hint">累计（本程序启动以来）</span>
           <span class="hint" id="statSince">—</span>
           <button class="btn btn-sm" id="btnStatCopy">复制</button>
           <button class="btn btn-sm" id="btnStatReset">清零</button>
-          <button class="info-btn" id="btnHelpStats" title="这一块的口径与边界">i</button>
+          <button class="info-btn" id="btnHelpStats" title="口径、边界与不落盘">i</button>
         </div>
         <div class="stat-figs">
           <div class="stat-fig">
@@ -278,11 +275,10 @@
       <div class="card" id="cardRuntime">
         <div class="card-head">
           <h2>接管状态</h2>
-          <span class="hint">内核面 / 域名面 / 连接面 的当前状态（进页刷新；可见时每 5 秒更新）</span>
           <div class="spacer"></div>
           <span class="hint mono" id="rtUptime">—</span>
           <button class="btn btn-sm" id="btnRtRefresh">刷新</button>
-          <button class="info-btn" id="btnHelpRuntime" title="各项指标的含义与判定口径">i</button>
+          <button class="info-btn" id="btnHelpRuntime" title="各指标含义与「需要注意」的判定">i</button>
         </div>
         <!-- 内容一律放进 card-body：卡片自己不设内边距（padding 在 .card-body 上），
              直接当子元素会被 overflow:hidden 贴着边切掉（展开按钮就被切过）。 -->
@@ -302,11 +298,10 @@
       <div class="card" id="cardWhitelist">
         <div class="card-head">
           <h2>安全软件白名单</h2>
-          <span class="hint">漏了这步，驱动可能在开机时被杀软拦掉</span>
           <div class="spacer"></div>
           <button class="btn btn-sm" id="btnCopySysPath">复制驱动路径</button>
           <button class="btn btn-sm" id="btnOpenProgDir">打开程序目录</button>
-          <button class="info-btn" id="btnHelpWhitelist" title="信任区与「例外驱动」的区别、需重启的原因">i</button>
+          <button class="info-btn" id="btnHelpWhitelist" title="为何只加信任区不够、为何要重启安全软件">i</button>
         </div>
         <div class="card-body form">
           <div class="wl-table">
@@ -316,7 +311,6 @@
             <div class="mono">WinDivert64.sys</div>
             <div>火绒 6.0：<b>系统防护 → 漏洞驱动拦截 → 例外驱动</b>；360 / 腾讯管家：驱动（内核）防护白名单</div>
           </div>
-          <div class="hint">两个文件都在程序目录里。火绒只加信任区往往不够 —— 驱动要进「例外驱动」，原因见右上「i」。</div>
         </div>
       </div>
 
@@ -344,10 +338,9 @@
       <div class="card">
         <div class="card-head">
           <h2>与其它代理共存 —— 以 Clash 为例</h2>
-          <span class="hint">看内网数据会走哪、走得对不对（只读，不改任何设置）</span>
           <div class="spacer"></div>
           <button class="btn btn-sm" id="btnClashCheck">重新检测</button>
-          <button class="info-btn" id="btnHelpClash" title="判定依据与修复方式">i</button>
+          <button class="info-btn" id="btnHelpClash" title="什么模式下能共存、怎么修">i</button>
         </div>
         <div class="card-body form">
           <div class="clash-state" id="clashState">尚未检测。点右上角「重新检测」。</div>
@@ -355,7 +348,7 @@
           <div class="hint" id="loopInfo">环路检测：—</div>
           <div class="field" id="clashFixWrap" hidden>
             <label>把下面这段填进 Clash Verge 的「绕过地址」
-              <em>入口：设置 → 系统代理 那一行【左侧的小齿轮】→「代理绕过设置」。<b>「i」</b>里有原因。</em>
+              <em>入口：设置 → 系统代理 → 该行左侧小齿轮 →「代理绕过设置」</em>
             </label>
             <div class="input-row">
               <input type="text" id="clashBypass" class="input mono" readonly>
@@ -401,18 +394,13 @@
       <div class="card">
         <div class="card-head">
           <h2>UDP（QUIC）能力探测</h2>
-          <span class="hint">本版本不转发 UDP —— QUIC 只拦不转；这一项只<b>探一探</b>上游有没有这个能力，答“为什么我们没有 UDP”</span>
           <div class="spacer"></div>
           <button class="btn btn-sm" id="btnUdpCopy">复制结果</button>
           <button class="btn btn-sm btn-primary" id="btnUdpProbe">开始探测</button>
-          <button class="info-btn" id="btnHelpUdp" title="为何未实现 UDP 中继、同行现状">i</button>
+          <button class="info-btn" id="btnHelpUdp" title="为何不做 UDP 中继">i</button>
         </div>
         <div class="card-body form">
-          <pre class="explain-out" id="udpProbeOut">点「开始探测」：逐条链问一次上游能不能中继 UDP（只发一次公网 DNS 查询，不碰客户内网）。
-
-结论怎么读：
-  ✓ 可用 = 上游真能中继 UDP（这时才有讨论“要不要上 UDP”的前提）
-  ✗ 往返没回包 = 上游接受了请求但数据面不通（大概率它那边没放行 UDP 端口）</pre>
+          <pre class="explain-out" id="udpProbeOut">点「开始探测」：逐条链问一次上游能不能中继 UDP（只发一次公网 DNS 查询，不碰客户内网）。</pre>
         </div>
       </div>
 
@@ -531,10 +519,9 @@
       <div class="card">
         <div class="card-head">
           <h2>上游拨号</h2>
-          <span class="hint">一条上游不响应时，等多久换下一条</span>
           <div class="spacer"></div>
           <button class="btn btn-sm" id="btnDialReset">重置</button>
-          <button class="info-btn" id="btnHelpDial" title="各字段含义与默认值依据">i</button>
+          <button class="info-btn" id="btnHelpDial" title="四个字段的含义与默认值">i</button>
         </div>
         <div class="card-body form">
           <div class="dial-grid">
@@ -557,13 +544,11 @@
       <div class="card">
         <div class="card-head">
           <h2>headless 模式</h2>
-          <span class="hint">把引擎装成 Windows 服务：<b>无人登录也会跑</b>（对齐 Proxifier 的 Service Mode）</span>
           <div class="spacer"></div>
           <span class="hint" id="svcInfo">—</span>
-          <button class="info-btn" id="btnHelpService" title="服务模式说明">i</button>
+          <button class="info-btn" id="btnHelpService" title="安装 vs 启用、与计划任务二选一">i</button>
         </div>
         <div class="card-body form">
-          <div class="hint">以 LocalSystem 跑、没有界面；配置与日志与界面版共用。<b>「i」</b>里有细节。</div>
           <div class="input-row">
             <button class="btn btn-sm btn-primary" id="btnSvcInstall">安装服务</button>
             <button class="btn btn-sm" id="btnSvcStart">启动</button>
