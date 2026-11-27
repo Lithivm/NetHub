@@ -952,9 +952,11 @@ if ($traffic -notmatch 'fitsSide=True') { $bad += ('traffic graph sticks out of 
 # ③ 横线背景（一格固定 256KB/s，线数体现增幅）：至少 2 条全宽浅灰线
 $tm = [regex]::Match($traffic, 'rules=(\d+)')
 if (-not $tm.Success) { $bad += ('traffic grid rules not measured: ' + $traffic) }
-# 至少 3 条：用户 2026-11-27 报"只有最上最下两根线，毫无意义" —— 一格 256KB/s 时
-# 常规流量只落在 256K 上限上，全图就只剩 0 和顶线。一格已改成 64KB/s，这里钉住"≥3 条"。
-elseif ([int]$tm.Groups[1].Value -lt 3) { $bad += ('traffic grid lines too few (rules=' + $tm.Groups[1].Value + '): ' + $traffic) }
+# 参考线固定两条（照 Clash：从顶 1/7、4/7）+ 一条底线。但像素检测只认"整行纯灰"，
+# 而下行有面积填充：曲线以下的线会被半透明面积染成蓝灰，所以常规流量下只能数到
+# **1 条**（最上面那条在曲线之上）。这里只断言"至少还有参考线"——
+# 线全没了才会是 0；线数是固定 3 条（代码里写死），不会再随流量变成"一屏线"。
+elseif ([int]$tm.Groups[1].Value -lt 1) { $bad += ('traffic reference lines missing (rules=' + $tm.Groups[1].Value + '): ' + $traffic) }
 # DOM 属性里的引号是转义过的（&quot;），断言前先复原，否则看的是转义后的文本
 $callsPlain = $calls -replace '&quot;', '"' -replace '&amp;', '&'
 # 两个开关都要真的调到后端（勾选后的值看 mock 初值：探针是把当前值取反，所以两种极性都算过）

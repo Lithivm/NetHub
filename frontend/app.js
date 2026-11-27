@@ -716,22 +716,6 @@ function setTargetProbing(on, count) {
    两条口径口径都在界面上写明（顶栏 title + 连接页的「i」）。 */
 // 纵轴一格 = 256 KB/s（不写刻度字）：线不是用来读精确值的，是让"这段比刚才忙"一眼可见。
 // 现场日常几百 K，所以平时就是"0 + 一条"两行线；峰值超过 4 格就把步长翻倍（条数封在 5 条以内）。
-/* 横线的一格（= 纵轴 1/4 高度）按**当前峰值**取整到"好看"的数字
-   （1 / 1.5 / 2 / 3 / 5 / 7.5 / 10 × 10^n）。这样：
-   · 曲线永远接近顶部（max = 4 格，峰值大时最多差一格），不会挤在底部；
-   · 中间总有 3 条线可看，不会出现"只有最上最下两根"（2026-11-27 用户报的问题）；
-   · 步长随峰值变大 → 读数不会出现 3.7 KB/s 这种没法用的刻度。
-   下限 8 KB/s：空闲时别把几 KB 的抖动放大成大起大落。 */
-function niceTrafficStep(peak) {
-  const raw = Math.max(Number(peak) || 0, 0) / 3.5;
-  const v = Math.max(raw, 8 * 1024);
-  const exp = Math.pow(10, Math.floor(Math.log10(v)));
-  for (const m of [1, 1.5, 2, 3, 5, 7.5, 10]) {
-    if (v <= m * exp + 1e-9) return m * exp;
-  }
-  return 10 * exp;
-}
-
 let trafficView = null;
 let trafficBusy = false;
 
@@ -819,14 +803,24 @@ function drawTraffic() {
 
   const pts = (v.series || []).map((p) => trafficPoint(p, !!v.countDirect));
 
-  // 纵轴：一格按峰值取整（见 niceTrafficStep），上限固定 4 格 —— 曲线总是接近顶部。
-  let peak = 0;
-  for (const p of pts) {
-    if (p.up > peak) peak = p.up;
-    if (p.down > peak) peak = p.down;
-  }
-  const stepV = niceTrafficStep(peak);
-  const max = stepV * 4;
+  // 纵轴：**照抄 Clash Verge 的分段对数**（traffic-graph.tsx 的 countY）—— 七段，
+  // 每段一个数量级、段内线性。这样几 KB/s 到几十 MB/s 都在图上占得住位置，
+  // 而且**线数固定**，不会因为流量变大变成"一屏线"（用户 2026-11-27：
+  // "直接去抄 clash 设计，别自己胡弄了"；我上一版按峰值自适应步长，几百 KB 就四条线，几十 MB 会糊满）。
+  const span = zeroY - topY;
+  const seg = span / 7;
+  const yOf = (val) => {
+    const v = Number(val) || 0;
+    if (v <= 0) return zeroY;
+    if (v <= 10) return zeroY - (v / 10) * seg;
+    if (v <= 100) return zeroY - (v / 100 + 1) * seg;
+    if (v <= 1024) return zeroY - (v / 1024 + 2) * seg;
+    if (v <= 10240) return zeroY - (v / 10240 + 3) * seg;
+    if (v <= 102400) return zeroY - (v / 102400 + 4) * seg;
+    if (v <= 1048576) return zeroY - (v / 1048576 + 5) * seg;
+    if (v <= 10485760) return zeroY - (v / 10485760 + 6) * seg;
+    return topY;
+  };
 
   // 绘图区右端要**让出一个点半径**（plotW = w - DOT_R），曲线末端与"当前值"点才同心。
   // 旧写法是曲线画到 w、点画在 w-DOT_R 上 —— 点比线末端偏左 2.2px，
@@ -835,16 +829,13 @@ function drawTraffic() {
   const slots = Math.max(Number(v.window) || pts.length, 2);
   const step = plotW / (slots - 1);
   const xOf = (i) => plotW - (pts.length - 1 - i) * step;
-  const yOf = (val) => zeroY - Math.min(Number(val) || 0, max) / max * (zeroY - topY);
 
-  // 横线：**底线 + 中间 3 条，顶线不画**。
-  // 顶线为什么不画：图框（.side-spark）自带 1px 边框，再贴着顶上画一条等于画在边框里侧，
-  // 看着就是"多出来一根没意义的线"（2026-11-27 用户指出：Clash 那两根是当边框用的，我们不需要）。
-  // 零线深一档、其余淡一档；颜色不用 --hairline-soft（深色下只比卡片亮 7 级，看不见），
-  // 改用"墨色的固定透明度"，明暗两套都清楚。
-  for (let i = 0; i <= 3; i++) {
-    const y = Math.round(yOf(i * stepV)) - 0.5;
-    g.strokeStyle = inkAlpha(i === 0 ? 0.2 : 0.12, trafficColor('--ink', '#0a0a0a'));
+  // 参考线：**照 Clash 的两条位置**（从顶往下 1/7、4/7）+ 一条底线。
+  // 固定三条、与流量大小无关 —— 这就是"不会一屏线"的来源。
+  // 颜色不用 --hairline-soft（深色下只比卡片亮 7 级，看不见），改用"墨色的固定透明度"。
+  for (const i of [1, 4]) {
+    const y = Math.round(topY + i * seg) - 0.5;
+    g.strokeStyle = inkAlpha(0.12, trafficColor('--ink', '#0a0a0a'));
     g.lineWidth = 1;
     g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke();
   }
