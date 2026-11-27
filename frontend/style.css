@@ -460,8 +460,12 @@ html.is-tray *::after {
   flex: 0 0 auto;
   display: flex; align-items: center; gap: var(--s3);
   height: 52px;
+  /* 横幅**本身（背景 + 底边）通栏贴边**，里面的文字与元素仍保留 --s4 边距
+     （2026-11-27 用户澄清：贴边的是横幅，不是文字）。
+     底色用 --canvas-soft 而不是 --card：浅色下 --card 与内容区同为白，
+     "通栏色带"根本看不出来 —— 横幅就退化成一排缩进的文字。 */
   padding: 0 var(--s4);
-  background: var(--card);
+  background: var(--canvas-soft);
   border-bottom: 1px solid var(--hairline);
 }
 .page-head h1 {
