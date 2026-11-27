@@ -90,10 +90,13 @@ func TestChainVerdict(t *testing.T) {
 			wantLevel: "ok", wantHead: "实测都通", wantDetail: "✓ 链 site-a",
 		},
 		{
-			name:      "上游都通、但没有可实测的目标 → 黄（别谎报绿）",
+			// 黄是为了别谎报绿（只证明了"本机到上游"这一段），但**不给建议**：
+			// 没配业务目标是常态，不是故障。以前这里塞过一条"去 hosts 里写一条内网主机"，
+			// 每次自检都弹一条黄字教人配 hosts —— 2026-11-27 用户："没意义，纯属噪音"。
+			name:      "上游都通、但没有可实测的目标 → 黄（别谎报绿，但不硬塞建议）",
 			running:   true,
 			chains:    []ChainHealthView{chain("site-a", up(true, true, false))},
-			wantLevel: "warn", wantHead: "上游实测都可用", wantAdvice: "hosts",
+			wantLevel: "warn", wantHead: "上游实测都可用",
 		},
 	}
 	for _, c := range cases {
@@ -120,9 +123,12 @@ func TestChainVerdict(t *testing.T) {
 					t.Errorf("文案里不该有 markdown 标记：%q", s)
 				}
 			}
-			// 红了/黄了就必须给一句"该做什么"，否则等于只报告不指路
-			if got.Level != "ok" && len(got.Advice) == 0 {
-				t.Errorf("level=%s 却没给建议", got.Level)
+			// 红了/黄了就必须给一句"该做什么"，否则等于只报告不指路。
+			// 唯一豁免：「上游都通、但还没有可实测的业务目标」—— 那是常态、不是故障，
+			// 硬塞建议（"去 hosts 写一条"）只会变成噪音（2026-11-27 用户拍板删掉）。
+			noTargetYet := got.Level == "warn" && strings.Contains(got.Head, "上游实测都可用")
+			if got.Level != "ok" && len(got.Advice) == 0 && !noTargetYet {
+				t.Errorf("level=%s 却没给建议（head=%q）", got.Level, got.Head)
 			}
 		})
 	}

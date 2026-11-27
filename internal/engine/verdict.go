@@ -132,10 +132,11 @@ func ChainVerdict(running bool, chains []ChainHealthView, targets []TargetHealth
 		v.Head = fmt.Sprintf("%d 条链的上游、%d 个内网业务目标实测都通", len(chains), n)
 	} else {
 		v.Level = "warn"
+		// 这里**只给结论、不再给 advice**（2026-11-27 用户："在 hosts 里写一条内网主机…
+		// 这条警告删掉，没意义，纯属噪音"）。理由：没配业务目标是**常态**（刚装、只做通网验证时），
+		// 每次自检都弹一条黄字教人配 hosts，等于把"正常状态"报成"待处理"；
+		// 真要配目标，「业务目标巡检」那张卡就在下面，不需要这句提示带路。
 		v.Sub = "但还没有可实测的内网业务目标 —— 这只能证明「本机到上游」这一段是好的。"
-		v.Advice = []string{
-			"在 hosts 里写一条内网主机（或让业务先访问一次），我才能回答「到得了内网吗」。",
-		}
 	}
 	v.Detail = chainDetails(chains, targets)
 	return v
