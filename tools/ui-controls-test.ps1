@@ -768,21 +768,29 @@ window.addEventListener("load", function () {
       var appNums = rateEl ? rateEl.querySelectorAll('b').length : -1;
       var appRateText = rateEl ? rateEl.textContent : '';
       if (rateEl && cvs) {
-        function rateHTML(dn, up) {
-          return '<span class="tr-up"><i>↑</i><b>' + up + '</b></span><span class="tr-down"><i>↓</i><b>' + dn + '</b></span>';
-        }
-        rateEl.innerHTML = rateHTML('999.9 MB/s', '999.9 MB/s');
-        var aLong = rateEl.querySelector('i').getBoundingClientRect();
+        // 读数现在是 2×2（↑ / peak / ↓ / total），DOM 由 index.html 定义，JS 只改文本 ——
+        // 所以这里**不能**用 innerHTML 覆盖结构（那会把 4 个槽压回 2 个，几何就量不出来了），
+        // 改成直接改各个数字的文本，量完再还原。
+        var spans = [].slice.call(rateEl.querySelectorAll('span'));
+        var bs = [].slice.call(rateEl.querySelectorAll('b'));
+        var saved = bs.map(function (b) { return b.textContent; });
+        function setAll(txt) { bs.forEach(function (b) { b.textContent = txt; }); }
+        setAll('999.9 MB/s');
+        var aLong = spans[0].querySelector('i').getBoundingClientRect();
         var cwLong = cvs.clientWidth;
-        rateEl.innerHTML = rateHTML('—', '—');
-        var aShort = rateEl.querySelector('i').getBoundingClientRect();
+        setAll('—');
+        var aShort = spans[0].querySelector('i').getBoundingClientRect();
         var cwShort = cvs.clientWidth;
+        var cells = spans.map(function (s) { return s.getBoundingClientRect(); });
+        bs.forEach(function (b, i) { b.textContent = saved[i]; });
         tv.push('widthStable=' + (cwLong === cwShort));
         tv.push('arrowFixed=' + (Math.round(aLong.left) === Math.round(aShort.left)));
-        tv.push('arrowsSeparate=' + (appArrows === 2 && appNums === 2) + '(' + appArrows + '/' + appNums + ')');
-        var rowRects = [].slice.call(rateEl.querySelectorAll('span')).map(function (s) { return s.getBoundingClientRect(); });
-        tv.push('stacked=' + (rowRects.length === 2 && Math.abs(rowRects[0].left - rowRects[1].left) < 1 &&
-          rowRects[1].top - rowRects[0].top > 4));
+        tv.push('arrowsSeparate=' + (appArrows === 4 && appNums === 4) + '(' + appArrows + '/' + appNums + ')');
+        // 2×2：第 1 行 ↑ / peak，第 2 行 ↓ / total；两列不重叠。
+        var twoByTwo = cells.length === 4 &&
+          Math.abs(cells[0].top - cells[1].top) < 1 && Math.abs(cells[2].top - cells[3].top) < 1 &&
+          cells[2].top - cells[0].top > 4 && cells[1].left >= cells[0].right - 1;
+        tv.push('stacked=' + twoByTwo + '(' + cells.length + ' cells)');
         tv.push('upFirst=' + (appRateText.indexOf('↑') >= 0 && appRateText.indexOf('↑') < appRateText.indexOf('↓')));
       }
       // ⑥ 「也统计直连流量」影响整段窗口，且只换口径重画时画布必须变

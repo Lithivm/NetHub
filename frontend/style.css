@@ -293,13 +293,22 @@ code, .mono { font-family: var(--font-mono); }
 
 /* 速率读数：上行在上、下行在下（每行「箭头列 + 数字列」，箭头位置不随位数变） */
 .side-rate {
-  display: flex; flex-direction: column; gap: 1px; padding: 0 2px;
+  display: grid;
+  grid-template-columns: auto auto;
+  justify-content: space-between;
+  column-gap: var(--s2); row-gap: 1px;
+  padding: 0 2px;
   font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--muted);
   white-space: nowrap;
 }
-.side-rate span { display: inline-flex; align-items: center; gap: 6px; }
-.side-rate i { flex: 0 0 auto; width: 10px; font-style: normal; color: var(--muted); }
-.side-rate b { font-weight: 600; font-variant-numeric: tabular-nums; text-align: left; }
+.side-rate span { display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
+.side-rate i { flex: 0 0 auto; font-style: normal; color: var(--muted-soft); }
+.side-rate .tr-up i, .side-rate .tr-down i { width: 10px; }        /* ↑ ↓ */
+.side-rate .tr-peak i, .side-rate .tr-total i { width: 5ch; }      /* peak / total 定宽 → 数字起点对齐 */
+.side-rate b {
+  font-weight: 600; font-variant-numeric: tabular-nums; text-align: left;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis;
+}
 /* 下行主色（与曲线同色）、上行中性色 —— 不拿警告色画数据 */
 .side-rate .tr-up b { color: var(--body); }
 .side-rate .tr-down b { color: var(--primary); }

@@ -730,13 +730,20 @@ async function loadTraffic() {
     if (!v) return;
     trafficView = v;
     drawTraffic();
-    const rate = document.getElementById('trafficRate');
-    if (rate) {
-      // 槽内是「箭头列（定宽）+ 数字列（左对齐）」——箭头位置和数字起始位都不随位数变
-      //（归零时 fmtRate 给“—”也不会把箭头往右拉）。**上行在上、下行在下**（用户要求颠倒）。
-      rate.innerHTML = '<span class="tr-up"><i>↑</i><b>' + fmtRate(trafficLast(v).up) + '</b></span>' +
-                       '<span class="tr-down"><i>↓</i><b>' + fmtRate(trafficLast(v).down) + '</b></span>';
+    const last = trafficLast(v);
+    // 这张图窗口内的两个汇总（与图同源，读图就能对上）：
+    //   peak  = 单秒最大速率（上下行取大者）；total = 窗口内收发合计。
+    let peak = 0, total = 0;
+    for (const p of (v.series || [])) {
+      const pt = trafficPoint(p, !!v.countDirect);
+      peak = Math.max(peak, pt.up, pt.down);
+      total += pt.up + pt.down;
     }
+    // 只改文本、不重建 DOM：定宽列每拍重排会抖（箭头/标签位置都不许动）。
+    setText('rateUp', fmtRate(last.up));
+    setText('rateDown', fmtRate(last.down));
+    setText('ratePeak', fmtRate(peak));
+    setText('rateTotal', fmtBytes(total));
   } catch (e) {
     /* 老桥/探针没这个方法：图留白就好，不报错（与 InitialTheme 同样处理） */
   } finally {
@@ -867,6 +874,12 @@ function drawTraffic() {
   g.arc(plotW, yOf(pts[pts.length - 1].down), DOT_R, 0, Math.PI * 2);
   g.fillStyle = colDown;
   g.fill();
+}
+
+/* 只改一个元素的文本（不存在就跳过）：流量读数每拍都要刷，innerHTML 重建会让定宽列重排。 */
+function setText(id, txt) {
+  const e = document.getElementById(id);
+  if (e) e.textContent = txt;
 }
 
 /* canvas 不认 color-mix：把 --ink 换算成"固定透明度的墨色"（style.css 里是 #0a0a0a / #fafafa）。 */
