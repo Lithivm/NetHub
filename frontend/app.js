@@ -716,7 +716,22 @@ function setTargetProbing(on, count) {
    两条口径口径都在界面上写明（顶栏 title + 连接页的「i」）。 */
 // 纵轴一格 = 256 KB/s（不写刻度字）：线不是用来读精确值的，是让"这段比刚才忙"一眼可见。
 // 现场日常几百 K，所以平时就是"0 + 一条"两行线；峰值超过 4 格就把步长翻倍（条数封在 5 条以内）。
-const TRAFFIC_STEP = 256 * 1024;
+/* 横线的一格（= 纵轴 1/4 高度）按**当前峰值**取整到"好看"的数字
+   （1 / 1.5 / 2 / 3 / 5 / 7.5 / 10 × 10^n）。这样：
+   · 曲线永远接近顶部（max = 4 格，峰值大时最多差一格），不会挤在底部；
+   · 中间总有 3 条线可看，不会出现"只有最上最下两根"（2026-11-27 用户报的问题）；
+   · 步长随峰值变大 → 读数不会出现 3.7 KB/s 这种没法用的刻度。
+   下限 8 KB/s：空闲时别把几 KB 的抖动放大成大起大落。 */
+function niceTrafficStep(peak) {
+  const raw = Math.max(Number(peak) || 0, 0) / 3.5;
+  const v = Math.max(raw, 8 * 1024);
+  const exp = Math.pow(10, Math.floor(Math.log10(v)));
+  for (const m of [1, 1.5, 2, 3, 5, 7.5, 10]) {
+    if (v <= m * exp + 1e-9) return m * exp;
+  }
+  return 10 * exp;
+}
+
 let trafficView = null;
 let trafficBusy = false;
 
@@ -804,16 +819,14 @@ function drawTraffic() {
 
   const pts = (v.series || []).map((p) => trafficPoint(p, !!v.countDirect));
 
-  // 纵轴：一格 = TRAFFIC_STEP，上限取到整数格（**不按峰值自适应** ——
-  // 峰值跟上限走的话线数永远不变，"线变多"就表达不出"流量涨了"）。
+  // 纵轴：一格按峰值取整（见 niceTrafficStep），上限固定 4 格 —— 曲线总是接近顶部。
   let peak = 0;
   for (const p of pts) {
     if (p.up > peak) peak = p.up;
     if (p.down > peak) peak = p.down;
   }
-  let stepV = TRAFFIC_STEP;
-  while (peak / stepV > 4) stepV *= 2;
-  const max = Math.max(stepV, Math.ceil(peak / stepV) * stepV);
+  const stepV = niceTrafficStep(peak);
+  const max = stepV * 4;
 
   // 绘图区右端要**让出一个点半径**（plotW = w - DOT_R），曲线末端与"当前值"点才同心。
   // 旧写法是曲线画到 w、点画在 w-DOT_R 上 —— 点比线末端偏左 2.2px，
@@ -824,11 +837,14 @@ function drawTraffic() {
   const xOf = (i) => plotW - (pts.length - 1 - i) * step;
   const yOf = (val) => zeroY - Math.min(Number(val) || 0, max) / max * (zeroY - topY);
 
-  // 横线：零线深一档、其余淡一档（不画竖线、不写字）。颜色不用 --hairline-soft：
-  // 深色下它只比卡片亮 7 级，几乎看不见；改用"墨色的固定透明度"，明暗两套都清楚。
-  for (let gy = 0; gy <= max + 1; gy += stepV) {
-    const y = Math.round(yOf(gy)) - 0.5;
-    g.strokeStyle = inkAlpha(gy === 0 ? 0.2 : 0.12, trafficColor('--ink', '#0a0a0a'));
+  // 横线：**底线 + 中间 3 条，顶线不画**。
+  // 顶线为什么不画：图框（.side-spark）自带 1px 边框，再贴着顶上画一条等于画在边框里侧，
+  // 看着就是"多出来一根没意义的线"（2026-11-27 用户指出：Clash 那两根是当边框用的，我们不需要）。
+  // 零线深一档、其余淡一档；颜色不用 --hairline-soft（深色下只比卡片亮 7 级，看不见），
+  // 改用"墨色的固定透明度"，明暗两套都清楚。
+  for (let i = 0; i <= 3; i++) {
+    const y = Math.round(yOf(i * stepV)) - 0.5;
+    g.strokeStyle = inkAlpha(i === 0 ? 0.2 : 0.12, trafficColor('--ink', '#0a0a0a'));
     g.lineWidth = 1;
     g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke();
   }
@@ -865,6 +881,15 @@ function drawTraffic() {
   }
   line('up', colUp, 0);     // 先画上行（在下面），下行盖在上面
   line('down', colDown, 0.22);
+
+  // 底线**在面积之后再画一次**：半透明的面积会把底线染成蓝灰，看着像"底线没了"。
+  // 只压这一条 1px，不会盖住曲线（曲线本来就贴着它）。
+  {
+    const y = Math.round(zeroY) - 0.5;
+    g.strokeStyle = inkAlpha(0.28, trafficColor('--ink', '#0a0a0a'));
+    g.lineWidth = 1;
+    g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke();
+  }
 
   // 右端"当前值"落点：曲线右端原来悬在读数左边、没有任何东西告诉眼睛"现在在哪里"。
   // 点画在**下行**末端（有面积那条就是主数据），颜色同曲线。
