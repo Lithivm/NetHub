@@ -784,15 +784,21 @@ function trafficColor(name, fallback) {
    为什么是它：Verge 顺滑的核心不是插值（我们两边都是"过中点二次贝塞尔"），
    而是这条合成器上的平移动画。**不要**改成每帧重绘，那会把 CPU 从"每秒一次"变成"每秒 60 次"。 */
 let trafficAnim = null;
+let trafficLastAt = 0;   // 上一拍的时刻：动画时长按"实际间隔"给，才不会有静止段
 
-/* 滑入动画 —— **照 Clash Verge 的参数原样抄**（2026-11-27 用户："还是顿，不能原样抄吗"）：
-   每拍把整块画布**固定滑一格**、150ms、linear，然后停到下一拍。
-   两个前提缺一不可：
-     ① 一格 = 一拍的数据量（一格 1 秒；所以不合并采样，否则数据每拍只走半格、动画滑一格会往回跳）；
-     ② 图够宽（一格 ≥ 6px）。一格 3px 时无论怎么调时长都看不出来 —— 那是窗口秒数的问题，
-        由后端 trafficSlots 决定（现为 30 秒 / 图约 190px → 一格 6.2px）。
-   WAAPI 在合成器上跑，不占主线程；托盘冻结时自己 cancel（html.is-tray 的 animation:none 管不到它）。 */
+/* 滑入动画。两条约束（缺一条就会"一秒一顿"）：
+   ① **位移 = 一格**：一格 = 一拍的数据量（窗口 20 秒 / 20 格 → 每秒正好一格），
+      所以数据前进多少、画面就滑多少，绝不会往回跳；
+   ② **时长 = 这一拍的实际间隔**（约 1000ms），**不是 150ms** —— 150ms 滑完就停 850ms，
+      肉眼看到的是"闪一下、停一下"，那就是用户说的"一秒一顿"。
+      铺满整拍 = 画面持续匀速流动，下一拍 cancel+重画正好接上（新内容已左移一格，
+      与动画终点重合，所以无缝）。
+   前提：图够宽（一格 ≥ 9px）。一格像素 = 图宽/窗口秒数，由后端 trafficSlots 决定。 */
 function slideTraffic(cv, slots, animate) {
+  const now = performance.now();
+  // 实际间隔；时钟/调度抖动时给个下限，避免动画提前结束露出静止段
+  const dt = trafficLastAt ? Math.min(Math.max(now - trafficLastAt, 850), 1600) : 1000;
+  trafficLastAt = now;
   // 上一拍的动画先收掉：fill:forwards 被 cancel 后 transform 回到 0，
   // 而重画的新内容正好左移了同样的距离 —— 两下相抵，画面无缝。
   if (trafficAnim) { try { trafficAnim.cancel(); } catch (e) {} trafficAnim = null; }
@@ -801,10 +807,10 @@ function slideTraffic(cv, slots, animate) {
   try {
     if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
   } catch (e) { /* 老引擎没有 matchMedia：照常动 */ }
-  const pct = 100 / (Math.max(Number(slots) || 2, 2) + 1);   // 正好一格（画布共 slots+1 格）
+  const pct = 100 / (Math.max(Number(slots) || 2, 2) + 1);   // 正好一格
   trafficAnim = cv.animate(
     [{ transform: 'translateX(0)' }, { transform: 'translateX(-' + pct + '%)' }],
-    { duration: 150, easing: 'linear', fill: 'forwards' }
+    { duration: dt, easing: 'linear', fill: 'forwards' }
   );
 }
 
