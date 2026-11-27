@@ -123,10 +123,14 @@ window.addEventListener("load", function () {
         // @media (max-height:720px) 里的 .page{padding:12px} 在文件后面，
         // 把 .page-flat{padding:0} 盖掉了：窗口一矮横幅就被推进去 12px。
         var pr = pg.getBoundingClientRect(), hr = ph.getBoundingClientRect();
+        // 标题必须**单行**：按"高度 / 行高"算行数，而不是钉一个像素阈值
+        // （字号从 15 调到 17 时，固定阈值会假红 —— 要钉的是"没折行"这件事）。
+        var lh = parseFloat(getComputedStyle(h1).lineHeight) || 24;
+        var hlines = h1 ? Math.round(h1.getBoundingClientRect().height / lh) : 0;
         var flush = Math.abs(hr.left - pr.left) < 1 && Math.abs(hr.right - pr.right) < 1;
         window.__scan.push(pages[i] + ":head=" + Math.round(h1 ? h1.getBoundingClientRect().height : -1) +
           "/" + (ph.scrollWidth > ph.clientWidth + 1 ? "OVERFLOW" : "ok") +
-          "/" + (flush ? "eq" : "inset"));
+          "/" + (flush ? "eq" : "inset") + "/" + hlines);
       }
       boxes.forEach(function (el) {
         if (typeof el.onchange !== "function") return;
@@ -1098,12 +1102,12 @@ else {
 # ① 三页都必须有 .page-head（否则就是退回"整页一个大卡片"）
 # ② 横幅标题不许折行（≤26px）；③ 横幅里的东西不许横向溢出（挤不下会横向滚）
 foreach ($p in 'log','chain','rule') {
-  $mh = [regex]::Match($layout, ($p + ':head=(\d+)/(\w+)/(\w+)'))
+  $mh = [regex]::Match($layout, ($p + ':head=(\d+)/(\w+)/(\w+)/(\d+)'))
   if (-not $mh.Success) { $bad += ('page head (banner) not measured on ' + $p + ': ' + $layout); continue }
   $hh = [int]$mh.Groups[1].Value
-  if ($hh -gt 26) { $bad += ('page head title wrapped on ' + $p + ': ' + $hh + 'px') }
   if ($mh.Groups[2].Value -ne 'ok') { $bad += ('page head overflows on ' + $p + ': ' + $layout) }
   if ($mh.Groups[3].Value -ne 'eq') { $bad += ('page head is not flush with the page (banner must be edge-to-edge) on ' + $p + ': ' + $layout) }
+  if ($mh.Groups[4].Value -ne '1') { $bad += ('page head title wrapped (' + $mh.Groups[4].Value + ' lines) on ' + $p + ': ' + $layout) }
 }
 $mt = [regex]::Match($layout, 'maxTitle=([0-9]+)')
 if ($mt.Success -and [int]$mt.Groups[1].Value -gt 34) { $bad += ('card title wrapped: ' + $mt.Groups[1].Value + 'px') }

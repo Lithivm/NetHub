@@ -12,6 +12,7 @@
   --fs-nav: 14px;      /* 左侧竖栏导航：比正文大一档 —— 它是"视觉中心"（见 DESIGN.md 竖栏导航） */
   --fs-xs: 11px;       /* 提示 */
   --fs-lg: 15px;       /* 卡片标题 */
+  --fs-page: 18px;     /* 页面标题（横幅里的 h1）：比卡片标题（15）大两档，撑住横幅那一条 */
 
   /* 圆角 */
   --r-card: 12px;
@@ -470,7 +471,9 @@ html.is-tray *::after {
 }
 .page-head h1 {
   flex: 0 0 auto; margin: 0; white-space: nowrap;
-  font-size: var(--fs-lg); font-weight: 700; color: var(--ink);
+  /* 页面标题**大写一档**（17px vs 卡片标题 15px）：横幅删掉解释小字之后只剩标题 + 右侧操作，
+     同号字会让那一条看着空；大一号也把层级说清 —— 这是"页"，不是一张卡。 */
+  font-size: var(--fs-page); font-weight: 700; color: var(--ink);
 }
 /* 标题后的说明文字：横幅只有一行，长了就省略（点开才知道的那类信息不放这里） */
 .page-head .hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
