@@ -448,6 +448,36 @@ html.is-tray *::after {
 .page { display: none; height: 100%; min-height: 0; padding: var(--s4); }
 .page.is-active { display: flex; flex-direction: column; }
 
+/* ═══════════════ 页面头（横幅）+ 扁平页面 ═══════════════ */
+
+/* 单卡片页（运行日志 / 隧道链路）改成「页面头横幅 + 扁平内容」：
+   左侧竖栏已经把窗口分成两段，右边该读成"一个页面"，而不是"一页里浮着一张卡"。
+   横幅与内容**同色**（浅色都是 --canvas），只靠一条 hairline 分界 —— 像应用窗口的页眉，
+   而不是又一块卡片。深色下横幅用 --card（比内容区的 --canvas 亮），层次仍成立。 */
+.page-flat { padding: 0; }
+
+.page-head {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: var(--s3);
+  height: 52px;
+  padding: 0 var(--s4);
+  background: var(--card);
+  border-bottom: 1px solid var(--hairline);
+}
+.page-head h1 {
+  flex: 0 0 auto; margin: 0; white-space: nowrap;
+  font-size: var(--fs-lg); font-weight: 700; color: var(--ink);
+}
+/* 标题后的说明文字：横幅只有一行，长了就省略（点开才知道的那类信息不放这里） */
+.page-head .hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.page-head .spacer { flex: 1; }
+
+/* 内容区：没有卡片外壳，直接是页面底；滚动交给里面的 .logbox / .table */
+.page-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+
+/* 日志区在扁平页面里要跟横幅标题左对齐（原来是卡片内容的内边距） */
+.page-flat .logbox { padding: var(--s3) var(--s4); background: var(--canvas); }
+
 /* ═══════════════ 卡片 ═══════════════ */
 
 .card {

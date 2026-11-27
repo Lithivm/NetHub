@@ -98,38 +98,40 @@
 <main class="content">
 
   <!-- ═══════ 运行日志 ═══════ -->
-  <section class="page is-active" id="page-log">
-    <div class="card card-fill">
-      <div class="card-head">
-        <h2>运行日志</h2>
-        <span class="hint" id="logFileHint">同时写到程序目录的 nethub.log</span>
-        <div class="spacer"></div>
-        <div class="seg" id="segLogLevel" title="日志档位：normal 只记连接与错误 · verbose 加每条连接的判定、DNS、走了哪个上游 · debug 加引擎内部状态。档位会记住，重启不变">
-          <span class="seg-thumb"></span>
-          <button type="button" class="seg-btn" data-level="normal">normal</button>
-          <button type="button" class="seg-btn" data-level="verbose">verbose</button>
-          <button type="button" class="seg-btn" data-level="debug">debug</button>
-        </div>
-        <button class="btn btn-sm btn-ghost" id="btnClearLog">清空</button>
+  <!-- 页面头是**横幅**（贴着页面顶边、与内容同色、只靠一条 hairline 分界），不再是卡片头：
+       左侧竖栏已经把窗口切成两段，右边该读成"一个页面"，而不是"一页里浮着一张卡"。 -->
+  <section class="page page-flat is-active" id="page-log">
+    <header class="page-head">
+      <h1>运行日志</h1>
+      <span class="hint" id="logFileHint">同时写到程序目录的 nethub.log</span>
+      <div class="spacer"></div>
+      <div class="seg" id="segLogLevel" title="日志档位：normal 只记连接与错误 · verbose 加每条连接的判定、DNS、走了哪个上游 · debug 加引擎内部状态。档位会记住，重启不变">
+        <span class="seg-thumb"></span>
+        <button type="button" class="seg-btn" data-level="normal">normal</button>
+        <button type="button" class="seg-btn" data-level="verbose">verbose</button>
+        <button type="button" class="seg-btn" data-level="debug">debug</button>
       </div>
+      <button class="btn btn-sm btn-ghost" id="btnClearLog">清空</button>
+    </header>
+    <div class="page-body">
       <div class="logbox" id="logBox"></div>
     </div>
   </section>
 
   <!-- ═══════ 隧道链路 ═══════ -->
-  <section class="page" id="page-chain">
-    <div class="card card-fill">
-      <div class="card-head">
-        <h2>隧道链路</h2>
-        <div class="spacer"></div>
-        <!-- 探测状态（自己在跑的时候要看得见）：以前只能从"待探测"变成"12 ms"这两张面孔里
-             猜它是不是在探，于是用户会困惑"到底该等还是该点一下"。 -->
-        <span class="hint" id="chainProbeState"></span>
-        <span class="hint" id="warmInfo"></span>
-        <button class="btn btn-sm btn-primary" id="btnChainAdd">添加链路</button>
-        <button class="btn btn-sm" id="btnChainProbe" title="连一次上游：TCP + TLS + 认证 + 试连（不碰业务目标）。启动时自动一轮，之后每 30 秒一轮">立即探测</button>
-        <button class="btn btn-sm" id="btnChainImport">从 gost .bat 导入</button>
-      </div>
+  <section class="page page-flat" id="page-chain">
+    <header class="page-head">
+      <h1>隧道链路</h1>
+      <div class="spacer"></div>
+      <!-- 探测状态（自己在跑的时候要看得见）：以前只能从"待探测"变成"12 ms"这两张面孔里
+           猜它是不是在探，于是用户会困惑"到底该等还是该点一下"。 -->
+      <span class="hint" id="chainProbeState"></span>
+      <span class="hint" id="warmInfo"></span>
+      <button class="btn btn-sm btn-primary" id="btnChainAdd">添加链路</button>
+      <button class="btn btn-sm" id="btnChainProbe" title="连一次上游：TCP + TLS + 认证 + 试连（不碰业务目标）。启动时自动一轮，之后每 30 秒一轮">立即探测</button>
+      <button class="btn btn-sm" id="btnChainImport">从 gost .bat 导入</button>
+    </header>
+    <div class="page-body">
       <div class="table" id="chainTable"></div>
     </div>
   </section>
