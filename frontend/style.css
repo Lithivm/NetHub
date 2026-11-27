@@ -9,6 +9,7 @@
   --font-mono: "Cascadia Code", "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
   --fs: 13px;          /* 正文 */
   --fs-sm: 12px;       /* 次要 */
+  --fs-nav: 14px;      /* 左侧竖栏导航：比正文大一档 —— 它是"视觉中心"（见 DESIGN.md 竖栏导航） */
   --fs-xs: 11px;       /* 提示 */
   --fs-lg: 15px;       /* 卡片标题 */
 
@@ -231,15 +232,20 @@ code, .mono { font-family: var(--font-mono); }
   padding: var(--s2) var(--s2) var(--s3);
   min-height: 0; overflow: auto;   /* 窗口矮时让导航自己滚，别把仪表和引擎行挤出窗外 */
 }
+/* 导航是侧栏的**视觉中心**（2026-11-27 用户要求"字再大一点"）：
+   字号 14px（正文 13、辅助 11/12），图标 18px，每项约 38px 高 —— 比内容区的表格字大、
+   比卡片标题小，层级正好落在"去哪一页 > 现在怎么样"上。
+   ⚠ 六项因此多占约 30px 垂直空间：窗口矮时由 .sidenav 自己滚，仪表与引擎行不动。 */
 .side-item {
   display: flex; align-items: center; gap: 10px;
-  padding: 7px 10px; border: 0; border-radius: var(--r-chip);
+  padding: 8px 12px; border: 0; border-radius: var(--r-chip);
   background: transparent; color: var(--muted);
-  font-family: inherit; font-size: var(--fs-sm); font-weight: 600;
+  font-family: inherit; font-size: var(--fs-nav); font-weight: 600;
   text-align: left; cursor: pointer; white-space: nowrap;
   transition: background var(--ease), color var(--ease);
 }
-.side-item svg { flex: 0 0 auto; opacity: .9; }
+/* 图标跟着字号一起放大（只放大字会让图标显得缩水）。stroke 是 viewBox 单位，等比放大即可。 */
+.side-item svg { flex: 0 0 auto; width: 18px; height: 18px; opacity: .9; }
 .side-item .side-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .side-item:hover { background: var(--card-strong); color: var(--ink); }
 .side-item.is-active {
