@@ -113,6 +113,14 @@ window.addEventListener("load", function () {
       var withH = 0;
       boxes.forEach(function (el) { if (typeof el.onchange === "function") withH++; });
       window.__scan.push(pages[i] + ":" + boxes.length + "/" + withH);
+      // 横幅（单内容页的页面头）：标题必须单行、横幅里的东西不许横向溢出。
+      // 这三页（日志/链路/规则）已经没有 card-head 了 —— 只靠"卡片标题不折行"那条会空转。
+      var ph = pg.querySelector('.page-head');
+      if (ph) {
+        var h1 = ph.querySelector('h1');
+        window.__scan.push(pages[i] + ":head=" + Math.round(h1 ? h1.getBoundingClientRect().height : -1) +
+          "/" + (ph.scrollWidth > ph.clientWidth + 1 ? "OVERFLOW" : "ok"));
+      }
       boxes.forEach(function (el) {
         if (typeof el.onchange !== "function") return;
         try {
@@ -1078,6 +1086,16 @@ else {
   foreach ($n in ($rule.Groups[1].Value -split ',' | Where-Object { $_ })) {
     if ([int]$n -gt 2) { $bad += ("rule page hint wraps into $n lines") }
   }
+}
+# 单内容页的横幅（2026-11-27 起：一页一块内容 = 横幅 + 扁平）：
+# ① 三页都必须有 .page-head（否则就是退回"整页一个大卡片"）
+# ② 横幅标题不许折行（≤26px）；③ 横幅里的东西不许横向溢出（挤不下会横向滚）
+foreach ($p in 'log','chain','rule') {
+  $mh = [regex]::Match($layout, ($p + ':head=(\d+)/(\w+)'))
+  if (-not $mh.Success) { $bad += ('page head (banner) not measured on ' + $p + ': ' + $layout); continue }
+  $hh = [int]$mh.Groups[1].Value
+  if ($hh -gt 26) { $bad += ('page head title wrapped on ' + $p + ': ' + $hh + 'px') }
+  if ($mh.Groups[2].Value -ne 'ok') { $bad += ('page head overflows on ' + $p + ': ' + $layout) }
 }
 $mt = [regex]::Match($layout, 'maxTitle=([0-9]+)')
 if ($mt.Success -and [int]$mt.Groups[1].Value -gt 34) { $bad += ('card title wrapped: ' + $mt.Groups[1].Value + 'px') }

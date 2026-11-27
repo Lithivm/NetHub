@@ -475,6 +475,16 @@ html.is-tray *::after {
 /* 内容区：没有卡片外壳，直接是页面底；滚动交给里面的 .logbox / .table */
 .page-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 
+/* 扁平页面里的"工具区"（规则页的模拟器）：页面内的一块工具，不是卡片 ——
+   自己的内边距 + 一条 hairline-soft 与下面的表格分开。 */
+.page-tools {
+  flex: 0 0 auto;
+  display: flex; flex-direction: column; gap: var(--s3);
+  padding: var(--s3) var(--s4);
+  border-bottom: 1px solid var(--hairline-soft);
+  overflow: visible;   /* 模拟结果展开时撑高自己，不滚 */
+}
+
 /* 日志区在扁平页面里要跟横幅标题左对齐（原来是卡片内容的内边距） */
 .page-flat .logbox { padding: var(--s3) var(--s4); background: var(--canvas); }
 
