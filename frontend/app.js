@@ -799,22 +799,24 @@ function drawTraffic() {
   // zeroY 取"整+半"像素：1px 的零线要落在半像素上才锐，不然会糊成两像素灰。
   const DOT_R = 2.2;
   const zeroY = Math.round(h - DOT_R - 0.6) - 0.5;
-  const topY = Math.min(DOT_R + 0.4, zeroY - 8);
+  const topY = Math.min(DOT_R + 5, zeroY - 8);   // 与 demo 一致：峰值离顶留 5px
 
   const pts = (v.series || []).map((p) => trafficPoint(p, !!v.countDirect));
 
-  // 纵轴：**线性**（走回我们自己的设计，不用 Clash 的对数——2026-11-27 用户：
-  // "横轴能不能不抄 clash，走我们之前的设计，现在的太密了"：对数把低流量区段放得太大，
-  // 每秒钟的小抖动都被拉成密集锯齿）。
-  // 线数**固定 3 条**（底线 + 中间 2 条）：步长按峰值走 1-2-5 阶梯、保证 3 格够到顶，
-  // 所以流量从几十 KB 到几十 MB 都是这 3 条 —— 不会变成"一屏线"，也不会只剩上下两根。
+  // 纵轴：**就是 local/ui-layout-demo.html 里那一版**（2026-11-27 用户："折线图直接回退到
+  // ui-layout-demo.html 的样子，但是去掉顶部的线"）：
+  //   一格 256 KB/s；峰值超过 4 格就把步长翻倍（条数封顶 5）；上限向上取整到整格。
+  // 额外一条：峰值比一格还小时把步长减半（下限 16 KB/s）——否则几十 KB/s 的日常
+  // 连一条中间线都不会有，整张图只剩一条底线。
   let peak = 0;
   for (const p of pts) {
     if (p.up > peak) peak = p.up;
     if (p.down > peak) peak = p.down;
   }
-  const stepV = trafficStep(peak);
-  const max = stepV * 3;
+  let stepV = 256 * 1024;
+  while (peak / stepV > 4) stepV *= 2;
+  while (peak > 0 && peak / stepV < 1 && stepV > 16 * 1024) stepV /= 2;
+  const max = Math.max(stepV, Math.ceil(peak / stepV) * stepV);
   const yOf = (val) => zeroY - Math.min(Number(val) || 0, max) / max * (zeroY - topY);
 
   // 绘图区右端要**让出一个点半径**（plotW = w - DOT_R），曲线末端与"当前值"点才同心。
@@ -825,11 +827,11 @@ function drawTraffic() {
   const step = plotW / (slots - 1);
   const xOf = (i) => plotW - (pts.length - 1 - i) * step;
 
-  // 横线固定 3 条：底线、1 格、2 格。**顶线（3 格）不画** —— 图框自带 1px 边框，
-  // 贴着顶再画一条等于画在边框里侧（2026-11-27 用户指出：Clash 那两根是当边框用的）。
-  for (let i = 0; i <= 2; i++) {
-    const y = Math.round(yOf(i * stepV)) - 0.5;
-    g.strokeStyle = inkAlpha(i === 0 ? 0.2 : 0.12, trafficColor('--ink', '#0a0a0a'));
+  // 横线：每格一条，**顶线（= 纵轴上限那条）不画** —— 图框自带 1px 边框，
+  // 贴着顶再画一条等于画在边框里侧（用户 2026-11-27 指出：Clash 那两根是当边框用的）。
+  for (let v = 0; v < max; v += stepV) {
+    const y = Math.round(yOf(v)) - 0.5;
+    g.strokeStyle = inkAlpha(v === 0 ? 0.2 : 0.12, trafficColor('--ink', '#0a0a0a'));
     g.lineWidth = 1;
     g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke();
   }
@@ -884,17 +886,6 @@ function drawTraffic() {
   g.arc(plotW, yOf(pts[pts.length - 1].down), DOT_R, 0, Math.PI * 2);
   g.fillStyle = colDown;
   g.fill();
-}
-
-/* 纵轴一格（线性的）：保证 3 格够到峰值，数字取 1 / 2 / 5 × 10^n（按 KB/s 走）。
-   这样"3 条线"是恒定的：峰值 30 KB/s 时一格 20K，30 MB/s 时一格 20M，条数一样。 */
-function trafficStep(peak) {
-  const needKB = Math.max(Number(peak) || 0, 8 * 1024) / 3 / 1024;
-  const exp = Math.pow(10, Math.floor(Math.log10(needKB)));
-  for (const m of [1, 2, 5, 10]) {
-    if (needKB <= m * exp + 1e-9) return m * exp * 1024;
-  }
-  return 10 * exp * 1024;
 }
 
 /* 只改一个元素的文本（不存在就跳过）：流量读数每拍都要刷，innerHTML 重建会让定宽列重排。 */
