@@ -827,14 +827,9 @@ function drawTraffic() {
   const step = plotW / (slots - 1);
   const xOf = (i) => plotW - (pts.length - 1 - i) * step;
 
-  // 横线：每格一条，**顶线（= 纵轴上限那条）不画** —— 图框自带 1px 边框，
-  // 贴着顶再画一条等于画在边框里侧（用户 2026-11-27 指出：Clash 那两根是当边框用的）。
-  for (let v = 0; v < max; v += stepV) {
-    const y = Math.round(yOf(v)) - 0.5;
-    g.strokeStyle = inkAlpha(v === 0 ? 0.2 : 0.12, trafficColor('--ink', '#0a0a0a'));
-    g.lineWidth = 1;
-    g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke();
-  }
+  // **没有横线**（2026-11-27 用户："我们完全不要横线了"）：
+  // 图上只有两条曲线、下行面积和右端的当前值点。零轴也不再画 ——
+  // 面积的下边缘本身就落在零线上，再加一条线只是重复。
 
   if (pts.length < 2) return; // 刚起来：只有横线
 
@@ -869,14 +864,7 @@ function drawTraffic() {
   line('up', colUp, 0);     // 先画上行（在下面），下行盖在上面
   line('down', colDown, 0.22);
 
-  // 底线**在面积之后再画一次**：半透明的面积会把底线染成蓝灰，看着像"底线没了"。
-  // 只压这一条 1px，不会盖住曲线（曲线本来就贴着它）。
-  {
-    const y = Math.round(zeroY) - 0.5;
-    g.strokeStyle = inkAlpha(0.28, trafficColor('--ink', '#0a0a0a'));
-    g.lineWidth = 1;
-    g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke();
-  }
+
 
   // 右端"当前值"落点：曲线右端原来悬在读数左边、没有任何东西告诉眼睛"现在在哪里"。
   // 点画在**下行**末端（有面积那条就是主数据），颜色同曲线。
@@ -894,14 +882,6 @@ function setText(id, txt) {
   if (e) e.textContent = txt;
 }
 
-/* canvas 不认 color-mix：把 --ink 换算成"固定透明度的墨色"（style.css 里是 #0a0a0a / #fafafa）。 */
-function inkAlpha(a, hex) {
-  const v = (hex || '#0a0a0a').trim();
-  if (v[0] !== '#') return v;
-  const h = v.length === 4 ? v.slice(1).split('').map((c) => c + c).join('') : v.slice(1);
-  const n = parseInt(h, 16);
-  return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')';
-}
 
 /* 方形流量图的边长：取「侧栏内容宽」与「侧栏剩余高度」里的小者。
    只写 aspect-ratio 不够 —— 窗口一矮就会把下面的速率读数挤出窗外，
